@@ -1,0 +1,34 @@
+# Local development infrastructure for the Autonomous Production
+# Reliability Platform.
+#
+# Phase 0.2 scope: a single PostgreSQL instance for local development.
+# No application services are defined here yet.
+#
+# Configuration comes entirely from environment variables (see
+# .env.example). Copy .env.example to .env and adjust values locally;
+# .env is gitignored and must never be committed.
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    # PostgreSQL 18's official image expects a single mount at
+    # /var/lib/postgresql (not .../data) — see
+    # https://github.com/docker-library/postgres/pull/1259
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres_data:

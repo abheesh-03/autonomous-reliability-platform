@@ -17,8 +17,8 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 0.1 — Repository Foundation and Local Development Environment**.
-No application services, infrastructure, or AI functionality exist yet.
+**Phase 0.2 — Local PostgreSQL Infrastructure**. Application services and
+AI functionality do not exist yet.
 
 ## Problem this project will eventually solve
 
@@ -65,11 +65,47 @@ for the current-vs-planned breakdown.
 
 ## Current implementation status
 
-Only repository-level scaffolding exists: baseline documentation, an
-environment-check script, and standard configuration files
-(`.gitignore`, `.editorconfig`, `.env.example`). No application code, no
-containers, no infrastructure-as-code, and no AI integration have been
-added.
+Repository-level scaffolding exists (baseline documentation, an
+environment-check script, and standard configuration files), plus a
+single local infrastructure dependency: a PostgreSQL database run via
+Docker Compose for local development. No application code and no AI
+integration have been added yet.
+
+## Local PostgreSQL
+
+PostgreSQL is the first running infrastructure component. It is defined
+in `docker-compose.yml` and configured entirely through environment
+variables — no credentials are committed to the repository.
+
+**1. Create your local `.env`:**
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` if you want different local values. `.env` is gitignored and
+must never be committed.
+
+**2. Start PostgreSQL:**
+
+```bash
+docker compose up -d
+```
+
+**3. Check status (wait for `healthy`):**
+
+```bash
+docker compose ps
+```
+
+**4. Stop PostgreSQL (keeps data in the named volume):**
+
+```bash
+docker compose down
+```
+
+Use `docker compose down -v` only if you intentionally want to delete the
+local database volume.
 
 ## VERIFIED COMPLETED FEATURES
 
@@ -82,3 +118,19 @@ added.
 - `scripts/check-env.sh` created, made executable, and run successfully;
   it correctly detects locally available tooling and distinguishes
   Phase 0.1 requirements from later-phase requirements.
+- `docker-compose.yml` created, defining a single `postgres` service
+  (PostgreSQL 18, pinned) configured entirely via environment variables.
+- `docker compose config` validated successfully.
+- PostgreSQL starts via `docker compose up -d` and reaches Docker-reported
+  `healthy` status using a `pg_isready`-based healthcheck.
+- Verified via `psql` inside the container: `SELECT version()`,
+  `SELECT current_database()`, and `SELECT current_user` all return the
+  expected, environment-configured values.
+- Verified data persistence: a table created and populated in the running
+  database survived `docker compose restart postgres` and was still
+  present with the same content afterward.
+- Verified `.env` is created locally from `.env.example`, is correctly
+  ignored by Git (`git check-ignore`), and never appears in `git status`
+  or any commit.
+- Verified `docker compose down` (without `-v`) stops and removes the
+  container while preserving the named data volume.

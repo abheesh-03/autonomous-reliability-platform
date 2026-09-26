@@ -7,15 +7,21 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 0.1, the repository contains only foundational scaffolding:
+As of Phase 0.2, the repository contains foundational scaffolding plus a
+single running infrastructure dependency:
 
 - Repository-level documentation (`README.md`, this document, ADR records)
 - Standard configuration files (`.gitignore`, `.editorconfig`, `.env.example`)
 - A local environment-check script (`scripts/check-env.sh`)
+- **PostgreSQL 18**, run locally via Docker Compose (`docker-compose.yml`),
+  configured entirely through environment variables, with a named Docker
+  volume for persistent storage and a healthcheck based on `pg_isready`.
+  This is the first piece of the planned "durable state" component below
+  to actually exist; it currently has no schema, migrations, or
+  application connecting to it.
 
-There is no application code, no services, no containers, no databases,
-no message brokers, no orchestration, no cloud infrastructure, and no AI
-provider integration.
+There is no application code, no other services, no message brokers, no
+orchestration, no cloud infrastructure, and no AI provider integration.
 
 ## Planned Architecture
 
@@ -36,7 +42,9 @@ APIs consumed by the operations console.
 
 ### Durable state
 **PostgreSQL** for persisting incidents, investigation history, decisions,
-approvals, remediation actions, and the audit trail.
+approvals, remediation actions, and the audit trail. A bare PostgreSQL
+instance now runs locally via Docker Compose (see Current Implementation
+above); the schema and any application usage of it are still planned.
 
 ### Coordination / ephemeral state
 **Redis** for short-lived state such as in-flight workflow coordination.
