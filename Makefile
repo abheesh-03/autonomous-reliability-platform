@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart checkout-build checkout-test checkout-logs payment-build payment-test payment-logs
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -16,6 +16,9 @@ help: ## Show available targets
 	@echo "  payment-build   Build the payment-service Docker image"
 	@echo "  payment-test    Run payment-service tests on Python 3.13 (via Docker)"
 	@echo "  payment-logs    Show recent payment-service logs"
+	@echo "  inventory-build Build the inventory-service Docker image"
+	@echo "  inventory-test  Run inventory-service gofmt/vet/test on Go 1.27 (via Docker)"
+	@echo "  inventory-logs  Show recent inventory-service logs"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -60,3 +63,16 @@ payment-test: ## Run payment-service tests on Python 3.13 (via Docker)
 
 payment-logs: ## Show recent payment-service logs
 	docker compose logs --tail=100 payment-service
+
+inventory-build: ## Build the inventory-service Docker image
+	docker compose build inventory-service
+
+# Go isn't installed locally for this repo; running gofmt/vet/test
+# inside golang:1.27 keeps results reproducible and consistent with CI
+# regardless of whether (or which) Go is on the developer's machine.
+inventory-test: ## Run inventory-service gofmt/vet/test on Go 1.27 (via Docker)
+	docker run --rm -v "$(CURDIR)/services/inventory-service:/build" -w /build golang:1.27 \
+		bash -c 'test -z "$$(gofmt -l .)" && go vet ./... && go test ./...'
+
+inventory-logs: ## Show recent inventory-service logs
+	docker compose logs --tail=100 inventory-service

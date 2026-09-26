@@ -8,6 +8,9 @@
 #   - payment-service: second application service bootstrap (Phase 1A.2).
 #     It does not connect to PostgreSQL and does not talk to
 #     checkout-service yet; it has no payment business logic.
+#   - inventory-service: third application service bootstrap (Phase 1A.3).
+#     It does not connect to PostgreSQL and does not talk to
+#     checkout-service or payment-service yet; it has no inventory logic.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -56,6 +59,21 @@ services:
       - "8081:8081"
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8081/health', timeout=3)\" || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  inventory-service:
+    build:
+      context: ./services/inventory-service
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    # Runtime image is distroless (no shell, no curl/wget), so the
+    # binary's own "healthcheck" subcommand is used via exec form.
+    healthcheck:
+      test: ["CMD", "/inventory-service", "healthcheck"]
       interval: 5s
       timeout: 5s
       retries: 5

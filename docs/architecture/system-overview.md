@@ -7,21 +7,24 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 1A.2, the repository contains foundational scaffolding, a
-running infrastructure dependency, and two application service
+As of Phase 1A.3, the repository contains foundational scaffolding, a
+running infrastructure dependency, and three application service
 bootstraps. Conceptually, the current demo application shape is:
 
 ```
 Client
   |
-  +--> checkout-service :8080
+  +--> checkout-service   :8080
   |
-  +--> payment-service :8081
+  +--> payment-service    :8081
+  |
+  +--> inventory-service  :8082
 ```
 
-Both boxes are standalone health-only bootstraps today — there is no
-arrow between them yet, and neither talks to PostgreSQL, which exists
-alongside them as a separate, currently-unused infrastructure dependency.
+All three boxes are standalone health-only bootstraps today — there are
+no arrows between them yet, and none of them talks to PostgreSQL, which
+exists alongside them as a separate, currently-unused infrastructure
+dependency.
 
 Full inventory:
 
@@ -79,6 +82,35 @@ Full inventory:
   - Communication with any other service
   - Agent functionality of any kind
 
+- **`inventory-service`** (`services/inventory-service`), a Go 1.27
+  project using only the standard library — the third piece of the
+  planned "demonstration target system" below to actually exist. It runs
+  through the same Docker Compose environment as PostgreSQL,
+  `checkout-service`, and `payment-service`, but does not connect to or
+  communicate with any of them.
+
+  **Implemented in this service:**
+  - Application bootstrap with graceful shutdown (`SIGTERM`/`SIGINT`)
+  - `GET /health` — a small typed JSON health response (other methods
+    on `/health` return HTTP 405)
+  - An `http.Server` with explicit read/write/idle timeouts
+  - Automated tests (`go test`, using `net/http/httptest`)
+  - A multi-stage Dockerfile (`golang:1.27` builder running
+    `gofmt`/`go vet`/`go test` → `distroless/static-debian12:nonroot`
+    runtime) producing a runnable, non-root container image
+  - Docker Compose integration with its own healthcheck (via the
+    binary's own `healthcheck` subcommand, since the distroless runtime
+    has no shell or curl/wget)
+
+  **Not implemented in this service:**
+  - Any actual inventory tracking, reservation, or business logic
+  - Checkout integration
+  - Payment integration
+  - Database access of any kind
+  - Telemetry / observability
+  - Communication with any other service
+  - Agent functionality of any kind
+
 There are no other application services, no message brokers, no
 orchestration, no cloud infrastructure, and no AI provider integration.
 
@@ -123,11 +155,10 @@ destructive or high-risk.
 ### Demonstration target system
 A set of small **demo commerce microservices** that the platform monitors
 and (eventually) remediates against, giving the agent a realistic
-distributed system to investigate rather than a synthetic one. Two
-services, `checkout-service` and `payment-service`, now exist as
-bootstraps (see Current Implementation above); neither has business
-logic yet, they do not call each other, and an inventory service does
-not exist.
+distributed system to investigate rather than a synthetic one. Three
+services, `checkout-service`, `payment-service`, and `inventory-service`,
+now exist as bootstraps (see Current Implementation above); none has
+business logic yet, and they do not call each other.
 
 ### Observability
 - **OpenTelemetry** for traces, metrics, and logs emitted by the demo

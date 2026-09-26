@@ -17,10 +17,10 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 1A.2 — Payment Service Bootstrap**. `checkout-service` and
-`payment-service` both exist only as health-only bootstraps; neither has
-real business logic, they do not talk to each other, and no AI
-functionality exists.
+**Phase 1A.3 — Inventory Service Bootstrap**. `checkout-service`,
+`payment-service`, and `inventory-service` all exist only as health-only
+bootstraps; none has real business logic, they do not talk to each
+other, and no AI functionality exists.
 
 ## Problem this project will eventually solve
 
@@ -69,11 +69,12 @@ for the current-vs-planned breakdown.
 
 Repository-level scaffolding exists (baseline documentation, an
 environment-check script, and standard configuration files), a local
-PostgreSQL database run via Docker Compose, and two application service
-bootstraps: `checkout-service` (Java / Spring Boot) and `payment-service`
-(Python / FastAPI). Both currently only expose health endpoints — neither
-has real business logic, neither connects to PostgreSQL, and they do not
-communicate with each other. No AI integration has been added yet.
+PostgreSQL database run via Docker Compose, and three application service
+bootstraps: `checkout-service` (Java / Spring Boot), `payment-service`
+(Python / FastAPI), and `inventory-service` (Go / standard library). All
+three currently only expose health endpoints — none has real business
+logic, none connects to PostgreSQL, and they do not communicate with
+each other. No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -205,6 +206,59 @@ make payment-logs
 make db-down
 ```
 
+## Inventory Service
+
+`services/inventory-service` is the third application service: a Go 1.27
+project using only the standard library (`net/http`, `encoding/json`,
+`net/http/httptest`, etc. — no web framework, no external dependencies).
+At this stage it is a bootstrap only — it exposes a health endpoint and
+nothing else. It does **not** track or reserve inventory, does **not**
+connect to PostgreSQL, and does **not** communicate with `checkout-service`
+or `payment-service`.
+
+Endpoint:
+
+- `GET /health` — a small typed JSON response: `{"status": "UP", "service": "inventory-service"}`
+  (only `GET` is accepted; other methods return `405`)
+
+The HTTP server uses explicit `ReadHeaderTimeout`/`ReadTimeout`/
+`WriteTimeout`/`IdleTimeout` and shuts down gracefully on `SIGTERM`/`SIGINT`.
+
+**Test and build locally** (requires a local Go 1.27 toolchain — if Go
+isn't installed, use the Docker path below instead):
+
+```bash
+cd services/inventory-service
+gofmt -l .
+go vet ./...
+go test ./...
+```
+
+**Test on Go 1.27 via Docker** (reproducible regardless of whether Go is
+installed locally):
+
+```bash
+make inventory-test
+```
+
+**Run it through Docker Compose**, alongside PostgreSQL, checkout-service,
+and payment-service:
+
+```bash
+make db-up
+curl http://localhost:8082/health
+make inventory-logs
+make db-down
+```
+
+The container image is built in two stages: a `golang:1.27` builder
+(which also runs `gofmt`/`go vet`/`go test`) producing a static binary,
+and a `gcr.io/distroless/static-debian12:nonroot` runtime with no shell
+and no package manager. Since that runtime has no `curl`/`wget` for a
+Compose healthcheck, the same binary exposes a built-in `healthcheck`
+subcommand (a plain HTTP GET against its own `/health`) that Compose
+calls directly.
+
 ## Continuous Integration
 
 A GitHub Actions workflow (`.github/workflows/ci.yml`) has been added. It
@@ -213,24 +267,27 @@ triggered manually (`workflow_dispatch`). Using `contents: read`
 permissions only, it validates: shell script syntax, that the Makefile is
 usable, that `checkout-service` builds and its tests pass (Java 21 via
 `actions/setup-java`), that `payment-service`'s dependencies install and
-its tests pass (Python 3.13 via `actions/setup-python`), that Docker
-Compose config resolves, that PostgreSQL, `checkout-service`, and
-`payment-service` all start and reach a healthy state (bounded retry
+its tests pass (Python 3.13 via `actions/setup-python`), that
+`inventory-service` is `gofmt`-clean and passes `go vet`/`go test`/build
+(Go 1.27 via `actions/setup-go`), that Docker Compose config resolves,
+that PostgreSQL, `checkout-service`, `payment-service`, and
+`inventory-service` all start and reach a healthy state (bounded retry
 loops, not assumed), a basic SQL smoke test, and HTTP smoke tests against
-`checkout-service`'s and `payment-service`'s health endpoints — then
-always tears the environment down (without deleting volumes).
+all three application services' health endpoints — then always tears the
+environment down (without deleting volumes).
 
 The repository has a GitHub remote
 (`abheesh-03/autonomous-reliability-platform`). The version of this
-workflow covering repository baseline checks and `checkout-service`
-(Java setup, build, tests, Compose, PostgreSQL, and checkout-service
-health/smoke-test) has been verified running successfully on a
-GitHub-hosted runner (CI run `36268092550`). The updated workflow (with
-the `payment-service` Python setup, dependency install, test, health-check,
-and smoke-test steps added in this phase, plus `actions/checkout` and
-`actions/setup-java` bumped to their current major versions) has been
-locally validated by reproducing its steps, but has **not yet run on
-GitHub Actions** — that will only be true once it runs there after a push.
+workflow covering repository baseline checks, `checkout-service`, and
+`payment-service` (Java + Python setup, build/test, Compose, PostgreSQL,
+and both services' health/smoke-tests) has been verified running
+successfully on a GitHub-hosted runner (CI run `36269437529`). The
+updated workflow (with the `inventory-service` Go setup, formatting/vet/
+test/build, health-check, and smoke-test steps added in this phase, plus
+`actions/setup-python` bumped from `v5` to `v6` to resolve a Node.js 20
+deprecation warning from the previous run) has been locally validated by
+reproducing its steps, but has **not yet run on GitHub Actions** — that
+will only be true once it runs there after a push.
 
 ## VERIFIED COMPLETED FEATURES
 
@@ -281,7 +338,9 @@ GitHub Actions** — that will only be true once it runs there after a push.
   `checkout-service` build/test + Docker Compose + PostgreSQL health/SQL
   smoke test + `checkout-service` health/HTTP smoke test) executed
   successfully on a real GitHub-hosted runner (CI run `36268092550`)
-  after the repository was pushed to `main` on GitHub.
+  after the repository was pushed to `main` on GitHub, and this coverage
+  was later re-verified together with `payment-service` in CI run
+  `36269437529`.
 - `services/checkout-service` created: a Java 21 / Spring Boot 3.5.16
   Maven project exposing `GET /health` and `GET /actuator/health` only,
   with no checkout, payment, inventory, or database logic.
@@ -352,6 +411,59 @@ GitHub Actions** — that will only be true once it runs there after a push.
   smoke test for it. `actions/checkout` and `actions/setup-java` were
   bumped to their current major versions (`v5`) to resolve GitHub's
   deprecation warnings from the previous verified run, with equivalent
-  behavior. Locally reproduced the full updated CI path end-to-end (all
-  three services healthy, all smoke tests, logs, cleanup) — **not yet
-  verified running on GitHub Actions itself.**
+  behavior — **verified running successfully on GitHub Actions**
+  (CI run `36269437529`).
+- `services/inventory-service` created: a Go 1.27 project using only the
+  standard library (`net/http`, `encoding/json`, `net/http/httptest`, no
+  web framework, no external dependencies) exposing `GET /health` only,
+  with no inventory, checkout, payment, or database logic.
+- Go was not installed locally (confirmed before starting); the official
+  `golang:1.27` Docker image was used as the authoritative local
+  build/test environment throughout, matching what CI's
+  `actions/setup-go` does.
+- `gofmt -l .` produced no output (fully formatted), `go vet ./...`
+  passed with no findings, and `go test ./...` passed all 3 tests
+  (health-handler body/content-type, GET /health accepted, POST /health
+  rejected) — verified both standalone (via `docker run golang:1.27`)
+  and again inside the Docker image build itself.
+- `services/inventory-service/Dockerfile` (multi-stage: `golang:1.27`
+  builder running `gofmt`/`go vet`/`go test` before compiling a static
+  binary → `gcr.io/distroless/static-debian12:nonroot` runtime, no
+  shell, no package manager, no Go toolchain) builds successfully via
+  `docker compose build` / `make inventory-build`.
+- Verified the built binary's own `healthcheck` subcommand (used by the
+  Compose healthcheck in place of curl/wget, which the distroless
+  runtime doesn't have) exits 0 against a running instance.
+- `docker-compose.yml` updated with an `inventory-service` entry (build,
+  port 8082, exec-form healthcheck via the binary itself, no PostgreSQL
+  or other service dependency/credentials, default network only).
+- Verified `docker compose up -d` starts all four of `postgres`,
+  `checkout-service`, `payment-service`, and `inventory-service`, and all
+  four independently reach Docker-reported `healthy` status (bounded
+  polling, not assumed).
+- Verified `curl http://localhost:8080/health` and
+  `curl http://localhost:8081/health` still return their expected bodies
+  (unaffected by adding inventory-service).
+- Verified `curl http://localhost:8082/health` returns HTTP 200 with
+  `{"status":"UP","service":"inventory-service"}`.
+- Verified `curl -X POST http://localhost:8082/health` returns HTTP 405
+  Method Not Allowed, not the valid health response.
+- Verified the `inventory-service` container process runs as
+  `nonroot:nonroot`, and that `docker compose logs inventory-service`
+  returns real log output.
+- Verified `docker compose down` (without `-v`) stops all four
+  containers while the PostgreSQL named volume remains present afterward.
+- `Makefile` extended with `inventory-build`, `inventory-test` (runs
+  `gofmt`/`go vet`/`go test` inside a `golang:1.27` container for
+  reproducibility regardless of whether Go is installed locally), and
+  `inventory-logs`; existing `db-*`, `checkout-*`, and `payment-*`
+  targets continue to work unchanged.
+- `.github/workflows/ci.yml` updated to set up Go 1.27 (`actions/setup-go`),
+  validate `inventory-service` formatting/vet/tests/build, and add a
+  bounded health-check + HTTP smoke test for it. `actions/setup-python`
+  was bumped from `v5` to `v6` (confirmed to move from `node20` to
+  `node24`) to resolve the Node.js 20 deprecation warning noted from the
+  previous run, with equivalent behavior. Locally reproduced the full
+  updated CI path end-to-end (all four services healthy, all smoke
+  tests, logs, cleanup) — **not yet verified running on GitHub Actions
+  itself.**

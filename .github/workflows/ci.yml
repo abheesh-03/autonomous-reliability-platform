@@ -40,7 +40,7 @@ jobs:
         run: ./mvnw -B test
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
@@ -51,6 +51,27 @@ jobs:
       - name: Run payment-service tests
         working-directory: services/payment-service
         run: pytest -v
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+
+      - name: Check inventory-service formatting
+        working-directory: services/inventory-service
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run inventory-service go vet
+        working-directory: services/inventory-service
+        run: go vet ./...
+
+      - name: Run inventory-service tests
+        working-directory: services/inventory-service
+        run: go test ./...
+
+      - name: Build inventory-service binary
+        working-directory: services/inventory-service
+        run: CGO_ENABLED=0 GOOS=linux go build -o /tmp/inventory-service ./cmd/inventory-service
 
       - name: Create runtime .env from .env.example
         run: cp .env.example .env
@@ -132,12 +153,34 @@ jobs:
           echo "$body"
           echo "$body" | jq -e '.status == "UP" and .service == "payment-service"'
 
+      - name: Wait for inventory-service to become healthy
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            cid="$(docker compose ps -q inventory-service)"
+            health="$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || true)"
+            echo "Attempt $i/$attempts: health=$health"
+            if [ "$health" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "inventory-service did not become healthy in time" >&2
+          exit 1
+
+      - name: HTTP smoke test for inventory-service
+        run: |
+          body="$(curl -fsS http://localhost:8082/health)"
+          echo "$body"
+          echo "$body" | jq -e '.status == "UP" and .service == "inventory-service"'
+
       - name: Show service logs
         if: always()
         run: |
           docker compose logs --tail=100 postgres
           docker compose logs --tail=100 checkout-service
           docker compose logs --tail=100 payment-service
+          docker compose logs --tail=100 inventory-service
 
       - name: Stop Compose environment (preserve volumes)
         if: always()
