@@ -1,0 +1,63 @@
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets/
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- IDE artifacts ---
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# --- Node.js ---
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.next/
+out/
+
+# --- Java ---
+target/
+*.class
+*.jar
+
+# --- Go ---
+/bin/
+*.exe
+*.test
+
+# --- Terraform ---
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# --- Logs / coverage ---
+*.log
+logs/
+coverage/
+*.cover
+.coverage
