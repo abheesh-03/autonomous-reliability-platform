@@ -1,15 +1,18 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart checkout-build checkout-test checkout-logs
 
 help: ## Show available targets
 	@echo "Available targets:"
 	@echo "  help            Show this help"
 	@echo "  check           Verify local developer prerequisites"
 	@echo "  compose-config  Validate docker-compose.yml"
-	@echo "  db-up           Start PostgreSQL (docker compose up -d)"
-	@echo "  db-down         Stop PostgreSQL, preserving the data volume"
-	@echo "  db-status       Show PostgreSQL container status"
+	@echo "  db-up           Start the Compose environment (docker compose up -d)"
+	@echo "  db-down         Stop the Compose environment, preserving the data volume"
+	@echo "  db-status       Show container status"
 	@echo "  db-logs         Show recent PostgreSQL logs"
 	@echo "  db-restart      Restart PostgreSQL without removing data"
+	@echo "  checkout-build  Build the checkout-service Docker image"
+	@echo "  checkout-test   Run checkout-service tests locally (requires Java 21)"
+	@echo "  checkout-logs   Show recent checkout-service logs"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -32,3 +35,12 @@ db-logs: ## Show recent PostgreSQL logs
 
 db-restart: ## Restart PostgreSQL without removing data
 	docker compose restart postgres
+
+checkout-build: ## Build the checkout-service Docker image
+	docker compose build checkout-service
+
+checkout-test: ## Run checkout-service tests locally (requires Java 21)
+	cd services/checkout-service && ./mvnw test
+
+checkout-logs: ## Show recent checkout-service logs
+	docker compose logs --tail=100 checkout-service

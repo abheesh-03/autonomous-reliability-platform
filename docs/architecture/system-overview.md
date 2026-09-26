@@ -7,8 +7,9 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 0.2, the repository contains foundational scaffolding plus a
-single running infrastructure dependency:
+As of Phase 1A.1, the repository contains foundational scaffolding, a
+running infrastructure dependency, and the first application service
+bootstrap:
 
 - Repository-level documentation (`README.md`, this document, ADR records)
 - Standard configuration files (`.gitignore`, `.editorconfig`, `.env.example`)
@@ -19,8 +20,30 @@ single running infrastructure dependency:
   This is the first piece of the planned "durable state" component below
   to actually exist; it currently has no schema, migrations, or
   application connecting to it.
+- **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
+  Boot 3 Maven project — the first piece of the planned "demonstration
+  target system" below to actually exist. It runs through the same Docker
+  Compose environment as PostgreSQL, but does not connect to it.
 
-There is no application code, no other services, no message brokers, no
+  **Implemented in this service:**
+  - Application bootstrap (`CheckoutServiceApplication`)
+  - `GET /health` — a small typed JSON health response
+  - `GET /actuator/health` — Spring Boot Actuator health (only `health`
+    is exposed)
+  - Automated tests (application context load + health endpoint test)
+  - A multi-stage Dockerfile producing a runnable, non-root container image
+  - Docker Compose integration with its own healthcheck
+
+  **Not implemented in this service:**
+  - Any actual checkout workflow or business logic
+  - Payment integration
+  - Inventory integration
+  - Database access of any kind
+  - Telemetry / observability
+  - Communication with any other service
+  - Agent functionality of any kind
+
+There are no other application services, no message brokers, no
 orchestration, no cloud infrastructure, and no AI provider integration.
 
 ## Planned Architecture
@@ -64,7 +87,10 @@ destructive or high-risk.
 ### Demonstration target system
 A set of small **demo commerce microservices** that the platform monitors
 and (eventually) remediates against, giving the agent a realistic
-distributed system to investigate rather than a synthetic one.
+distributed system to investigate rather than a synthetic one. A first
+service, `checkout-service`, now exists as a bootstrap (see Current
+Implementation above); it has no business logic yet, and
+payment/inventory services do not exist.
 
 ### Observability
 - **OpenTelemetry** for traces, metrics, and logs emitted by the demo

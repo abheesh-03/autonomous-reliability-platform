@@ -14,7 +14,7 @@ jobs:
   repository-validation:
     name: Repository validation
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -25,13 +25,27 @@ jobs:
       - name: Verify Makefile is usable
         run: make help
 
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build checkout-service
+        working-directory: services/checkout-service
+        run: ./mvnw -B -DskipTests package
+
+      - name: Run checkout-service tests
+        working-directory: services/checkout-service
+        run: ./mvnw -B test
+
       - name: Create runtime .env from .env.example
         run: cp .env.example .env
 
       - name: Validate Docker Compose configuration
         run: docker compose config
 
-      - name: Start PostgreSQL
+      - name: Start Compose environment
         run: make db-up
 
       - name: Wait for PostgreSQL to become healthy
@@ -59,10 +73,37 @@ jobs:
             -c "SELECT current_database();" \
             -c "SELECT current_user;"
 
-      - name: Show PostgreSQL logs
-        if: always()
-        run: docker compose logs --tail=100 postgres
+      - name: Wait for checkout-service to become healthy
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            cid="$(docker compose ps -q checkout-service)"
+            health="$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || true)"
+            echo "Attempt $i/$attempts: health=$health"
+            if [ "$health" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "checkout-service did not become healthy in time" >&2
+          exit 1
 
-      - name: Stop PostgreSQL (preserve volumes)
+      - name: HTTP smoke test for checkout-service
+        run: |
+          body="$(curl -fsS http://localhost:8080/health)"
+          echo "$body"
+          echo "$body" | jq -e '.status == "UP" and .service == "checkout-service"'
+
+          actuator="$(curl -fsS http://localhost:8080/actuator/health)"
+          echo "$actuator"
+          echo "$actuator" | jq -e '.status == "UP"'
+
+      - name: Show service logs
+        if: always()
+        run: |
+          docker compose logs --tail=100 postgres
+          docker compose logs --tail=100 checkout-service
+
+      - name: Stop Compose environment (preserve volumes)
         if: always()
         run: docker compose down

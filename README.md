@@ -17,8 +17,9 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 0.4 — GitHub Actions CI Baseline**. Application services and AI
-functionality do not exist yet.
+**Phase 1A.1 — Checkout Service Bootstrap**. This is the first application
+service; it has no checkout, payment, or inventory logic yet, and no AI
+functionality exists.
 
 ## Problem this project will eventually solve
 
@@ -66,10 +67,12 @@ for the current-vs-planned breakdown.
 ## Current implementation status
 
 Repository-level scaffolding exists (baseline documentation, an
-environment-check script, and standard configuration files), plus a
-single local infrastructure dependency: a PostgreSQL database run via
-Docker Compose for local development. No application code and no AI
-integration have been added yet.
+environment-check script, and standard configuration files), a local
+PostgreSQL database run via Docker Compose, and the first application
+service bootstrap: `checkout-service` (Java / Spring Boot). It currently
+only exposes health endpoints — it has no checkout, payment, or inventory
+logic and does not connect to PostgreSQL. No AI integration has been
+added yet.
 
 ## Local PostgreSQL
 
@@ -123,22 +126,66 @@ make db-down         # stop PostgreSQL — preserves the data volume
 
 `make db-down` never deletes the PostgreSQL named volume.
 
+## Checkout Service
+
+`services/checkout-service` is the first application service: a Java 21 /
+Spring Boot 3 project built with Maven. At this stage it is a bootstrap
+only — it exposes health endpoints and nothing else. It does not
+implement checkout logic, does not talk to any other service, and does
+not connect to PostgreSQL.
+
+Endpoints:
+
+- `GET /health` — a small typed JSON response: `{"status": "UP", "service": "checkout-service"}`
+- `GET /actuator/health` — Spring Boot Actuator's own health endpoint (only `health` is exposed)
+
+**Build and test locally** (requires a local Java 21 toolchain — if your
+machine only has an older Java version, this will fail to compile; use
+the Docker path below instead):
+
+```bash
+cd services/checkout-service
+./mvnw test
+```
+
+**Build and test via Docker** (does not require local Java 21 — the
+image build compiles and runs the tests on Java 21 inside the build):
+
+```bash
+make checkout-build
+```
+
+**Run it through Docker Compose**, alongside PostgreSQL:
+
+```bash
+make db-up
+curl http://localhost:8080/health
+curl http://localhost:8080/actuator/health
+make checkout-logs
+make db-down
+```
+
 ## Continuous Integration
 
 A GitHub Actions workflow (`.github/workflows/ci.yml`) has been added. It
 runs on pushes and pull requests targeting `main`, and can also be
 triggered manually (`workflow_dispatch`). Using `contents: read`
 permissions only, it validates: shell script syntax, that the Makefile is
-usable, that Docker Compose config resolves, that PostgreSQL starts and
-reaches a healthy state (bounded retry loop, not assumed), and a basic
-SQL smoke test against it — then always tears the environment down
+usable, that `checkout-service` builds and its tests pass (on a real Java
+21 toolchain via `actions/setup-java`), that Docker Compose config
+resolves, that PostgreSQL and `checkout-service` both start and reach a
+healthy state (bounded retry loops, not assumed), a basic SQL smoke test,
+and an HTTP smoke test against `checkout-service`'s `/health` and
+`/actuator/health` endpoints — then always tears the environment down
 (without deleting volumes).
 
-The repository now has a GitHub remote
-(`abheesh-03/autonomous-reliability-platform`), and the workflow has been
-successfully verified running on a GitHub-hosted runner: it validated
-shell syntax, Makefile availability, Docker Compose configuration,
-PostgreSQL startup and health, SQL connectivity, logs, and cleanup.
+The repository has a GitHub remote
+(`abheesh-03/autonomous-reliability-platform`), and the pre-checkout-service
+version of this workflow has previously been verified running
+successfully on a GitHub-hosted runner. The updated workflow (with the
+`checkout-service` build/test/smoke-test steps added in this phase) has
+been locally validated by reproducing its steps, but has not yet run on
+GitHub Actions — that will only be true once it runs there after a push.
 
 ## VERIFIED COMPLETED FEATURES
 
@@ -186,4 +233,40 @@ PostgreSQL startup and health, SQL connectivity, logs, and cleanup.
   (`SELECT 1`, `current_database()`, `current_user`), log output, and
   cleanup via `docker compose down` (volume preserved).
 - Verified: the CI workflow executed successfully on GitHub Actions after
-  the repository was pushed to `main` on GitHub.
+  the repository was pushed to `main` on GitHub. (This was verified for
+  the pre-`checkout-service` version of the workflow; the updated
+  workflow has only been locally reproduced so far — see below.)
+- `services/checkout-service` created: a Java 21 / Spring Boot 3.5.16
+  Maven project exposing `GET /health` and `GET /actuator/health` only,
+  with no checkout, payment, inventory, or database logic.
+- Automated tests (`CheckoutServiceApplicationTests`, `HealthControllerTest`)
+  pass. Local Java is 17, so `./mvnw test` fails to compile locally
+  (`release version 21 not supported`) — this is a known local-toolchain
+  limitation, not a code defect; tests were verified running for real on
+  Java 21 inside the Docker build (`Tests run: 2, Failures: 0, Errors: 0`).
+- `services/checkout-service/Dockerfile` (multi-stage, Java 21 builder →
+  Java 21 JRE runtime, non-root user) builds successfully via
+  `docker compose build` / `make checkout-build`.
+- `docker-compose.yml` updated with a `checkout-service` entry (build,
+  port 8080, `curl`-based Actuator healthcheck, no PostgreSQL
+  dependency/credentials, default network only).
+- Verified `docker compose up -d` starts both `postgres` and
+  `checkout-service`, and both independently reach Docker-reported
+  `healthy` status (bounded polling, not assumed).
+- Verified `curl http://localhost:8080/health` returns HTTP 200 with
+  `{"status":"UP","service":"checkout-service"}`.
+- Verified `curl http://localhost:8080/actuator/health` returns HTTP 200
+  with `{"status":"UP"}`, and that only the `health` Actuator endpoint is
+  exposed (`/actuator/env` returns 404).
+- Verified the `checkout-service` container process runs as a non-root
+  user (`uid=999(app)`).
+- Verified `docker compose down` (without `-v`) stops both containers
+  while the PostgreSQL named volume remains present afterward.
+- `Makefile` extended with `checkout-build`, `checkout-test`, and
+  `checkout-logs`; existing `db-*` targets continue to work unchanged.
+- `.github/workflows/ci.yml` updated to build/test `checkout-service` on
+  a real Java 21 toolchain (`actions/setup-java`) and to add a bounded
+  health-check + HTTP smoke test for it. Locally reproduced the full
+  updated CI path end-to-end (config validation, both services healthy,
+  both smoke tests, logs, cleanup) — **not yet verified running on
+  GitHub Actions itself.**

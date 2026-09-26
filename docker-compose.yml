@@ -1,8 +1,10 @@
 # Local development infrastructure for the Autonomous Production
 # Reliability Platform.
 #
-# Phase 0.2 scope: a single PostgreSQL instance for local development.
-# No application services are defined here yet.
+# Services:
+#   - postgres: local PostgreSQL database (Phase 0.2)
+#   - checkout-service: first application service bootstrap (Phase 1A.1).
+#     It does not connect to PostgreSQL yet and has no business logic.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -29,6 +31,19 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  checkout-service:
+    build:
+      context: ./services/checkout-service
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   postgres_data:
