@@ -17,7 +17,7 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 0.2 — Local PostgreSQL Infrastructure**. Application services and
+**Phase 0.3 — Developer Commands / Makefile**. Application services and
 AI functionality do not exist yet.
 
 ## Problem this project will eventually solve
@@ -107,6 +107,22 @@ docker compose down
 Use `docker compose down -v` only if you intentionally want to delete the
 local database volume.
 
+## Developer Commands
+
+The commands above are also available as `make` targets, for convenience:
+
+```bash
+make help            # list available targets
+make check           # verify local prerequisites (scripts/check-env.sh)
+make compose-config  # validate docker-compose.yml
+make db-up           # start PostgreSQL
+make db-status       # check PostgreSQL status (wait for "healthy")
+make db-logs         # show recent PostgreSQL logs
+make db-down         # stop PostgreSQL — preserves the data volume
+```
+
+`make db-down` never deletes the PostgreSQL named volume.
+
 ## VERIFIED COMPLETED FEATURES
 
 - Git repository initialized on branch `main`.
@@ -134,3 +150,13 @@ local database volume.
   or any commit.
 - Verified `docker compose down` (without `-v`) stops and removes the
   container while preserving the named data volume.
+- `Makefile` created with `help`, `check`, `compose-config`, `db-up`,
+  `db-down`, `db-status`, `db-logs`, and `db-restart` targets, each a
+  thin wrapper around the already-verified underlying commands.
+- Verified `make help`, `make check`, and `make compose-config` all run
+  and exit successfully.
+- Verified `make db-up` starts PostgreSQL and `make db-status` confirms
+  Docker-reported `healthy` status (health was polled, not assumed).
+- Verified `make db-logs` returns real PostgreSQL log output.
+- Verified `make db-down` stops the container while the named data
+  volume remains present afterward.
