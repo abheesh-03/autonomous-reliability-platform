@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  repository-validation:
+    name: Repository validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check shell script syntax
+        run: bash -n scripts/check-env.sh
+
+      - name: Verify Makefile is usable
+        run: make help
+
+      - name: Create runtime .env from .env.example
+        run: cp .env.example .env
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config
+
+      - name: Start PostgreSQL
+        run: make db-up
+
+      - name: Wait for PostgreSQL to become healthy
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            cid="$(docker compose ps -q postgres)"
+            health="$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || true)"
+            echo "Attempt $i/$attempts: health=$health"
+            if [ "$health" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "PostgreSQL did not become healthy in time" >&2
+          exit 1
+
+      - name: SQL smoke test
+        run: |
+          set -a
+          . ./.env
+          set +a
+          docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -c "SELECT 1;" \
+            -c "SELECT current_database();" \
+            -c "SELECT current_user;"
+
+      - name: Show PostgreSQL logs
+        if: always()
+        run: docker compose logs --tail=100 postgres
+
+      - name: Stop PostgreSQL (preserve volumes)
+        if: always()
+        run: docker compose down

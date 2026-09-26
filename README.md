@@ -17,8 +17,8 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 0.3 — Developer Commands / Makefile**. Application services and
-AI functionality do not exist yet.
+**Phase 0.4 — GitHub Actions CI Baseline**. Application services and AI
+functionality do not exist yet.
 
 ## Problem this project will eventually solve
 
@@ -123,6 +123,22 @@ make db-down         # stop PostgreSQL — preserves the data volume
 
 `make db-down` never deletes the PostgreSQL named volume.
 
+## Continuous Integration
+
+A GitHub Actions workflow (`.github/workflows/ci.yml`) has been added. It
+runs on pushes and pull requests targeting `main`, and can also be
+triggered manually (`workflow_dispatch`). Using `contents: read`
+permissions only, it validates: shell script syntax, that the Makefile is
+usable, that Docker Compose config resolves, that PostgreSQL starts and
+reaches a healthy state (bounded retry loop, not assumed), and a basic
+SQL smoke test against it — then always tears the environment down
+(without deleting volumes).
+
+The workflow has been added and locally validated by reproducing its
+steps manually. This repository does not yet have a GitHub remote
+configured, so the workflow has **not yet actually executed on GitHub
+Actions** — that will only be true once it runs there.
+
 ## VERIFIED COMPLETED FEATURES
 
 - Git repository initialized on branch `main`.
@@ -160,3 +176,14 @@ make db-down         # stop PostgreSQL — preserves the data volume
 - Verified `make db-logs` returns real PostgreSQL log output.
 - Verified `make db-down` stops the container while the named data
   volume remains present afterward.
+- `.github/workflows/ci.yml` created (triggers: push/PR to `main`,
+  `workflow_dispatch`; `contents: read` permissions only).
+- Locally reproduced every CI step end-to-end on this machine: shell
+  syntax check, `make help`, `.env` creation from `.env.example`,
+  `docker compose config`, `make db-up`, the workflow's exact bounded
+  health-check retry loop (reached `healthy`), the exact SQL smoke test
+  (`SELECT 1`, `current_database()`, `current_user`), log output, and
+  cleanup via `docker compose down` (volume preserved).
+- **Not yet verified:** actual execution on GitHub Actions. This
+  repository has no GitHub remote configured, so the workflow has never
+  run on GitHub; only local reproduction of its steps has been verified.
