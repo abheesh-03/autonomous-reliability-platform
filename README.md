@@ -134,10 +134,11 @@ reaches a healthy state (bounded retry loop, not assumed), and a basic
 SQL smoke test against it — then always tears the environment down
 (without deleting volumes).
 
-The workflow has been added and locally validated by reproducing its
-steps manually. This repository does not yet have a GitHub remote
-configured, so the workflow has **not yet actually executed on GitHub
-Actions** — that will only be true once it runs there.
+The repository now has a GitHub remote
+(`abheesh-03/autonomous-reliability-platform`), and the workflow has been
+successfully verified running on a GitHub-hosted runner: it validated
+shell syntax, Makefile availability, Docker Compose configuration,
+PostgreSQL startup and health, SQL connectivity, logs, and cleanup.
 
 ## VERIFIED COMPLETED FEATURES
 
@@ -184,6 +185,5 @@ Actions** — that will only be true once it runs there.
   health-check retry loop (reached `healthy`), the exact SQL smoke test
   (`SELECT 1`, `current_database()`, `current_user`), log output, and
   cleanup via `docker compose down` (volume preserved).
-- **Not yet verified:** actual execution on GitHub Actions. This
-  repository has no GitHub remote configured, so the workflow has never
-  run on GitHub; only local reproduction of its steps has been verified.
+- Verified: the CI workflow executed successfully on GitHub Actions after
+  the repository was pushed to `main` on GitHub.
