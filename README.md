@@ -17,8 +17,9 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 1A.1 — Checkout Service Bootstrap**. This is the first application
-service; it has no checkout, payment, or inventory logic yet, and no AI
+**Phase 1A.2 — Payment Service Bootstrap**. `checkout-service` and
+`payment-service` both exist only as health-only bootstraps; neither has
+real business logic, they do not talk to each other, and no AI
 functionality exists.
 
 ## Problem this project will eventually solve
@@ -68,11 +69,11 @@ for the current-vs-planned breakdown.
 
 Repository-level scaffolding exists (baseline documentation, an
 environment-check script, and standard configuration files), a local
-PostgreSQL database run via Docker Compose, and the first application
-service bootstrap: `checkout-service` (Java / Spring Boot). It currently
-only exposes health endpoints — it has no checkout, payment, or inventory
-logic and does not connect to PostgreSQL. No AI integration has been
-added yet.
+PostgreSQL database run via Docker Compose, and two application service
+bootstraps: `checkout-service` (Java / Spring Boot) and `payment-service`
+(Python / FastAPI). Both currently only expose health endpoints — neither
+has real business logic, neither connects to PostgreSQL, and they do not
+communicate with each other. No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -165,27 +166,71 @@ make checkout-logs
 make db-down
 ```
 
+## Payment Service
+
+`services/payment-service` is the second application service: a Python
+3.13 / FastAPI project using a standard `src`-layout package, installed
+via `pyproject.toml` (no Poetry/Pipenv). At this stage it is a bootstrap
+only — it exposes a health endpoint and nothing else. It does **not**
+process payments, does **not** connect to PostgreSQL, and does **not**
+communicate with `checkout-service`.
+
+Endpoint:
+
+- `GET /health` — a small typed JSON response: `{"status": "UP", "service": "payment-service"}`
+
+**Build and test locally** (requires a local Python 3.13 toolchain — if
+your machine has a different Python version, install may still work but
+is not the authoritative check; use the Docker path below instead):
+
+```bash
+cd services/payment-service
+pip install -e ".[dev]"
+pytest
+```
+
+**Test on Python 3.13 via Docker** (reproducible regardless of your local
+Python version):
+
+```bash
+make payment-test
+```
+
+**Run it through Docker Compose**, alongside PostgreSQL and checkout-service:
+
+```bash
+make db-up
+curl http://localhost:8081/health
+make payment-logs
+make db-down
+```
+
 ## Continuous Integration
 
 A GitHub Actions workflow (`.github/workflows/ci.yml`) has been added. It
 runs on pushes and pull requests targeting `main`, and can also be
 triggered manually (`workflow_dispatch`). Using `contents: read`
 permissions only, it validates: shell script syntax, that the Makefile is
-usable, that `checkout-service` builds and its tests pass (on a real Java
-21 toolchain via `actions/setup-java`), that Docker Compose config
-resolves, that PostgreSQL and `checkout-service` both start and reach a
-healthy state (bounded retry loops, not assumed), a basic SQL smoke test,
-and an HTTP smoke test against `checkout-service`'s `/health` and
-`/actuator/health` endpoints — then always tears the environment down
-(without deleting volumes).
+usable, that `checkout-service` builds and its tests pass (Java 21 via
+`actions/setup-java`), that `payment-service`'s dependencies install and
+its tests pass (Python 3.13 via `actions/setup-python`), that Docker
+Compose config resolves, that PostgreSQL, `checkout-service`, and
+`payment-service` all start and reach a healthy state (bounded retry
+loops, not assumed), a basic SQL smoke test, and HTTP smoke tests against
+`checkout-service`'s and `payment-service`'s health endpoints — then
+always tears the environment down (without deleting volumes).
 
 The repository has a GitHub remote
-(`abheesh-03/autonomous-reliability-platform`), and the pre-checkout-service
-version of this workflow has previously been verified running
-successfully on a GitHub-hosted runner. The updated workflow (with the
-`checkout-service` build/test/smoke-test steps added in this phase) has
-been locally validated by reproducing its steps, but has not yet run on
-GitHub Actions — that will only be true once it runs there after a push.
+(`abheesh-03/autonomous-reliability-platform`). The version of this
+workflow covering repository baseline checks and `checkout-service`
+(Java setup, build, tests, Compose, PostgreSQL, and checkout-service
+health/smoke-test) has been verified running successfully on a
+GitHub-hosted runner (CI run `36268092550`). The updated workflow (with
+the `payment-service` Python setup, dependency install, test, health-check,
+and smoke-test steps added in this phase, plus `actions/checkout` and
+`actions/setup-java` bumped to their current major versions) has been
+locally validated by reproducing its steps, but has **not yet run on
+GitHub Actions** — that will only be true once it runs there after a push.
 
 ## VERIFIED COMPLETED FEATURES
 
@@ -232,10 +277,11 @@ GitHub Actions — that will only be true once it runs there after a push.
   health-check retry loop (reached `healthy`), the exact SQL smoke test
   (`SELECT 1`, `current_database()`, `current_user`), log output, and
   cleanup via `docker compose down` (volume preserved).
-- Verified: the CI workflow executed successfully on GitHub Actions after
-  the repository was pushed to `main` on GitHub. (This was verified for
-  the pre-`checkout-service` version of the workflow; the updated
-  workflow has only been locally reproduced so far — see below.)
+- Verified: the CI workflow (repository baseline checks + Java 21 setup +
+  `checkout-service` build/test + Docker Compose + PostgreSQL health/SQL
+  smoke test + `checkout-service` health/HTTP smoke test) executed
+  successfully on a real GitHub-hosted runner (CI run `36268092550`)
+  after the repository was pushed to `main` on GitHub.
 - `services/checkout-service` created: a Java 21 / Spring Boot 3.5.16
   Maven project exposing `GET /health` and `GET /actuator/health` only,
   with no checkout, payment, inventory, or database logic.
@@ -266,7 +312,46 @@ GitHub Actions — that will only be true once it runs there after a push.
   `checkout-logs`; existing `db-*` targets continue to work unchanged.
 - `.github/workflows/ci.yml` updated to build/test `checkout-service` on
   a real Java 21 toolchain (`actions/setup-java`) and to add a bounded
-  health-check + HTTP smoke test for it. Locally reproduced the full
-  updated CI path end-to-end (config validation, both services healthy,
-  both smoke tests, logs, cleanup) — **not yet verified running on
-  GitHub Actions itself.**
+  health-check + HTTP smoke test for it — **verified running successfully
+  on GitHub Actions** (CI run `36268092550`).
+- `services/payment-service` created: a Python 3.13 / FastAPI project
+  (`src`-layout, `pyproject.toml`, no Poetry/Pipenv) exposing `GET /health`
+  only, with no payment, checkout, or database logic.
+- Automated test (`test_health_returns_200_with_expected_body`) passes.
+  Host Python is 3.14 (not the 3.13 target); it happened to pass natively
+  in a scratch venv too, but the authoritative check was running the same
+  test inside a real `python:3.13-slim` container (`1 passed`) — this is
+  also what `make payment-test` and CI's `actions/setup-python` do.
+- `services/payment-service/Dockerfile` (single-stage `python:3.13-slim`,
+  non-root user; no separate builder stage since all dependencies have
+  prebuilt wheels) builds successfully via `docker compose build` /
+  `make payment-build`.
+- `docker-compose.yml` updated with a `payment-service` entry (build,
+  port 8081, Python-`urllib`-based healthcheck, no PostgreSQL or
+  checkout-service dependency/credentials, default network only).
+- Verified `docker compose up -d` starts all three of `postgres`,
+  `checkout-service`, and `payment-service`, and all three independently
+  reach Docker-reported `healthy` status (bounded polling, not assumed).
+- Verified `curl http://localhost:8080/health` still returns HTTP 200
+  with `{"status":"UP","service":"checkout-service"}` (unaffected by
+  adding payment-service).
+- Verified `curl http://localhost:8081/health` returns HTTP 200 with
+  `{"status":"UP","service":"payment-service"}`.
+- Verified the `payment-service` container process runs as a non-root
+  user (`uid=999(app)`), and that `docker compose logs payment-service`
+  returns real Uvicorn log output.
+- Verified `docker compose down` (without `-v`) stops all three
+  containers while the PostgreSQL named volume remains present afterward.
+- `Makefile` extended with `payment-build`, `payment-test` (runs inside a
+  `python:3.13-slim` container for reproducibility regardless of host
+  Python version), and `payment-logs`; existing `db-*` and `checkout-*`
+  targets continue to work unchanged.
+- `.github/workflows/ci.yml` updated to install `payment-service`
+  dependencies and run its tests on a real Python 3.13 toolchain
+  (`actions/setup-python`), and to add a bounded health-check + HTTP
+  smoke test for it. `actions/checkout` and `actions/setup-java` were
+  bumped to their current major versions (`v5`) to resolve GitHub's
+  deprecation warnings from the previous verified run, with equivalent
+  behavior. Locally reproduced the full updated CI path end-to-end (all
+  three services healthy, all smoke tests, logs, cleanup) — **not yet
+  verified running on GitHub Actions itself.**

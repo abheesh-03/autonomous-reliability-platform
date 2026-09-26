@@ -7,9 +7,23 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 1A.1, the repository contains foundational scaffolding, a
-running infrastructure dependency, and the first application service
-bootstrap:
+As of Phase 1A.2, the repository contains foundational scaffolding, a
+running infrastructure dependency, and two application service
+bootstraps. Conceptually, the current demo application shape is:
+
+```
+Client
+  |
+  +--> checkout-service :8080
+  |
+  +--> payment-service :8081
+```
+
+Both boxes are standalone health-only bootstraps today — there is no
+arrow between them yet, and neither talks to PostgreSQL, which exists
+alongside them as a separate, currently-unused infrastructure dependency.
+
+Full inventory:
 
 - Repository-level documentation (`README.md`, this document, ADR records)
 - Standard configuration files (`.gitignore`, `.editorconfig`, `.env.example`)
@@ -37,6 +51,28 @@ bootstrap:
   **Not implemented in this service:**
   - Any actual checkout workflow or business logic
   - Payment integration
+  - Inventory integration
+  - Database access of any kind
+  - Telemetry / observability
+  - Communication with any other service
+  - Agent functionality of any kind
+
+- **`payment-service`** (`services/payment-service`), a Python 3.13 /
+  FastAPI project (`src`-layout, `pyproject.toml`) — the second piece of
+  the planned "demonstration target system" below to actually exist. It
+  runs through the same Docker Compose environment as PostgreSQL and
+  `checkout-service`, but does not connect to or communicate with either.
+
+  **Implemented in this service:**
+  - Application bootstrap (`payment_service.main:app`)
+  - `GET /health` — a small typed (Pydantic) JSON health response
+  - Automated tests (health endpoint test via FastAPI's `TestClient`)
+  - A single-stage Dockerfile producing a runnable, non-root container image
+  - Docker Compose integration with its own healthcheck
+
+  **Not implemented in this service:**
+  - Any actual payment processing or business logic
+  - Checkout integration
   - Inventory integration
   - Database access of any kind
   - Telemetry / observability
@@ -87,10 +123,11 @@ destructive or high-risk.
 ### Demonstration target system
 A set of small **demo commerce microservices** that the platform monitors
 and (eventually) remediates against, giving the agent a realistic
-distributed system to investigate rather than a synthetic one. A first
-service, `checkout-service`, now exists as a bootstrap (see Current
-Implementation above); it has no business logic yet, and
-payment/inventory services do not exist.
+distributed system to investigate rather than a synthetic one. Two
+services, `checkout-service` and `payment-service`, now exist as
+bootstraps (see Current Implementation above); neither has business
+logic yet, they do not call each other, and an inventory service does
+not exist.
 
 ### Observability
 - **OpenTelemetry** for traces, metrics, and logs emitted by the demo

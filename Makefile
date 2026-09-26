@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart checkout-build checkout-test checkout-logs
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart checkout-build checkout-test checkout-logs payment-build payment-test payment-logs
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -13,6 +13,9 @@ help: ## Show available targets
 	@echo "  checkout-build  Build the checkout-service Docker image"
 	@echo "  checkout-test   Run checkout-service tests locally (requires Java 21)"
 	@echo "  checkout-logs   Show recent checkout-service logs"
+	@echo "  payment-build   Build the payment-service Docker image"
+	@echo "  payment-test    Run payment-service tests on Python 3.13 (via Docker)"
+	@echo "  payment-logs    Show recent payment-service logs"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -44,3 +47,16 @@ checkout-test: ## Run checkout-service tests locally (requires Java 21)
 
 checkout-logs: ## Show recent checkout-service logs
 	docker compose logs --tail=100 checkout-service
+
+payment-build: ## Build the payment-service Docker image
+	docker compose build payment-service
+
+# Host Python versions vary (this repo targets 3.13); running tests
+# inside a python:3.13-slim container keeps results reproducible and
+# consistent with CI regardless of the developer's local Python version.
+payment-test: ## Run payment-service tests on Python 3.13 (via Docker)
+	docker run --rm -v "$(CURDIR)/services/payment-service:/app" -w /app python:3.13-slim \
+		bash -c "pip install -q -e '.[dev]' && pytest"
+
+payment-logs: ## Show recent payment-service logs
+	docker compose logs --tail=100 payment-service
