@@ -13,3 +13,12 @@ management:
   endpoint:
     health:
       show-details: never
+
+# Downstream service base URLs used by the checkout orchestration flow.
+# Defaults resolve to localhost so checkout-service can also run outside
+# Docker Compose; Compose supplies container-network values instead.
+checkout:
+  downstream:
+    payment-base-url: ${CHECKOUT_PAYMENT_BASE_URL:http://localhost:8081}
+    inventory-base-url: ${CHECKOUT_INVENTORY_BASE_URL:http://localhost:8082}
+    notification-base-url: ${CHECKOUT_NOTIFICATION_BASE_URL:http://localhost:8083}

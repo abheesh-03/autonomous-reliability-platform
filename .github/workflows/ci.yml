@@ -219,6 +219,23 @@ jobs:
           echo "$body"
           echo "$body" | jq -e '.status == "UP" and .service == "notification-service"'
 
+      - name: End-to-end checkout orchestration smoke test
+        run: |
+          body="$(curl -fsS -X POST http://localhost:8080/checkouts \
+            -H 'Content-Type: application/json' \
+            -d '{"sku":"sku_keyboard_001","quantity":2,"amount_cents":2599,"currency":"USD","recipient":"customer@example.com"}')"
+          echo "$body"
+          echo "$body" | jq -e '
+            (.checkout_id | type == "string" and startswith("chk_"))
+            and .status == "COMPLETED"
+            and (.payment.payment_id | type == "string" and length > 0)
+            and .payment.status == "AUTHORIZED"
+            and (.inventory.reservation_id | type == "string" and length > 0)
+            and .inventory.status == "RESERVED"
+            and (.notification.notification_id | type == "string" and length > 0)
+            and .notification.status == "ACCEPTED"
+          '
+
       - name: Show service logs
         if: always()
         run: |

@@ -17,12 +17,13 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 1B.3 — Minimal Notification Trigger API**. `checkout-service`
-remains a health-only bootstrap; `payment-service` has a simulated
-`POST /payments/authorize` endpoint, `inventory-service` has a simulated
-`POST /inventory/reservations` endpoint, and `notification-service` now
-also has a simulated `POST /notifications` endpoint. None of the
-services talk to each other yet, and no AI functionality exists.
+**Phase 1B.4 — Checkout Orchestration**. `checkout-service` now
+synchronously orchestrates the other three application services via
+`POST /checkouts` — the first real service-to-service workflow in this
+repository. `payment-service`, `inventory-service`, and
+`notification-service` still only implement their own simulated
+business endpoints and never call each other or call back into
+`checkout-service`. No AI functionality exists.
 
 ## Problem this project will eventually solve
 
@@ -71,19 +72,19 @@ for the current-vs-planned breakdown.
 
 Repository-level scaffolding exists (baseline documentation, an
 environment-check script, and standard configuration files), a local
-PostgreSQL database run via Docker Compose, and four application service
-bootstraps: `checkout-service` (Java / Spring Boot), `payment-service`
+PostgreSQL database run via Docker Compose, and four application
+services: `checkout-service` (Java / Spring Boot), `payment-service`
 (Python / FastAPI), `inventory-service` (Go / standard library), and
-`notification-service` (Node.js / TypeScript / Fastify). `checkout-service`
-currently only exposes a health endpoint; `payment-service` additionally
-has one simulated business endpoint (`POST /payments/authorize`, not
-connected to any real payment provider), `inventory-service`
-additionally has one simulated business endpoint
-(`POST /inventory/reservations`, no real stock tracking), and
-`notification-service` additionally has one simulated business endpoint
-(`POST /notifications`, no real message delivery). None of the services
-connect to PostgreSQL or communicate with each other yet. No AI
-integration has been added yet.
+`notification-service` (Node.js / TypeScript / Fastify). `payment-service`,
+`inventory-service`, and `notification-service` each expose one
+simulated business endpoint of their own (`POST /payments/authorize`,
+`POST /inventory/reservations`, `POST /notifications` respectively —
+none connected to a real payment provider, stock system, or message
+provider) and never call each other. `checkout-service` now has
+`POST /checkouts`, which synchronously calls all three of them in
+sequence — the first real service-to-service workflow in this
+repository — and returns a combined result. None of the services
+connect to PostgreSQL yet. No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -140,15 +141,50 @@ make db-down         # stop PostgreSQL — preserves the data volume
 ## Checkout Service
 
 `services/checkout-service` is the first application service: a Java 21 /
-Spring Boot 3 project built with Maven. At this stage it is a bootstrap
-only — it exposes health endpoints and nothing else. It does not
-implement checkout logic, does not talk to any other service, and does
-not connect to PostgreSQL.
+Spring Boot 3 project built with Maven. It is now the **orchestrator**:
+`POST /checkouts` synchronously calls `payment-service`,
+`inventory-service`, and `notification-service`, in that exact order,
+and returns a combined result. This is the first real
+service-to-service workflow in this repository. It still does not
+connect to PostgreSQL.
 
 Endpoints:
 
 - `GET /health` — a small typed JSON response: `{"status": "UP", "service": "checkout-service"}`
 - `GET /actuator/health` — Spring Boot Actuator's own health endpoint (only `health` is exposed)
+- `POST /checkouts` — accepts `{"sku": str, "quantity": int, "amount_cents": int, "currency": str, "recipient": str}`
+  and returns HTTP 200 with a generated `checkout_id` (`chk_<uuid>`) and
+  the combined downstream results:
+
+  ```json
+  {
+    "checkout_id": "chk_550e8400-e29b-41d4-a716-446655440000",
+    "status": "COMPLETED",
+    "payment": {"payment_id": "<uuid>", "status": "AUTHORIZED"},
+    "inventory": {"reservation_id": "<uuid>", "status": "RESERVED"},
+    "notification": {"notification_id": "<uuid>", "status": "ACCEPTED"}
+  }
+  ```
+
+  **Orchestration sequence:** Payment → Inventory → Notification. If a
+  step fails, later steps are not called — there is intentionally **no
+  rollback/compensation** for steps that already succeeded (e.g. a
+  reservation failure does not reverse an already-authorized payment).
+  Any downstream failure is normalized to a safe HTTP 502 from
+  `checkout-service`:
+  `{"error": "downstream_failure", "service": "<payment-service|inventory-service|notification-service>", "message": "Downstream service request failed"}`
+  — no stack traces, internal URLs, or downstream response bodies are
+  ever exposed to the caller. This covers non-2xx responses, connection
+  failures, an empty response, an unexpected business status, and a
+  malformed/inconsistent successful (HTTP 200) response — specifically a
+  missing or blank required result ID (`payment_id`/`reservation_id`/
+  `notification_id`) or a returned `checkout_id` that doesn't match the
+  one `checkout-service` generated and sent.
+
+Downstream base URLs are configurable via `CHECKOUT_PAYMENT_BASE_URL`,
+`CHECKOUT_INVENTORY_BASE_URL`, and `CHECKOUT_NOTIFICATION_BASE_URL`
+(defaulting to `localhost` for running outside Compose; Docker Compose
+supplies the container-network values).
 
 **Build and test locally** (requires a local Java 21 toolchain — if your
 machine only has an older Java version, this will fail to compile; use
@@ -166,15 +202,25 @@ image build compiles and runs the tests on Java 21 inside the build):
 make checkout-build
 ```
 
-**Run it through Docker Compose**, alongside PostgreSQL:
+**Run it through Docker Compose**, alongside the other three services and PostgreSQL:
 
 ```bash
 make db-up
 curl http://localhost:8080/health
 curl http://localhost:8080/actuator/health
+curl -X POST http://localhost:8080/checkouts \
+  -H 'Content-Type: application/json' \
+  -d '{"sku":"sku_keyboard_001","quantity":2,"amount_cents":2599,"currency":"USD","recipient":"customer@example.com"}'
 make checkout-logs
 make db-down
 ```
+
+**Not implemented anywhere in this workflow yet:** business/checkout
+persistence, PostgreSQL usage by any application service, distributed
+transactions, retries, backoff, circuit breakers, idempotency keys,
+queues/eventing (Kafka/Redpanda/Redis), real payment/inventory/notification
+processing, observability/distributed tracing, and any AI/agent
+functionality. These are deliberately deferred to later phases.
 
 ## Payment Service
 
@@ -370,8 +416,11 @@ its tests pass (Python 3.13 via `actions/setup-python`), that
 (`npm ci`), typechecks, tests, and builds (Node 24 via `actions/setup-node`),
 that Docker Compose config resolves, that PostgreSQL and all four
 application services start and reach a healthy state (bounded retry
-loops, not assumed), a basic SQL smoke test, and HTTP smoke tests against
-all four application services' health endpoints — then always tears the
+loops, not assumed), a basic SQL smoke test, HTTP smoke tests against
+all four application services' health endpoints, and — new in this
+phase — an end-to-end smoke test that calls `POST /checkouts` and
+verifies the real orchestrated response (`checkout_id` prefix, all four
+statuses) over the actual Compose network — then always tears the
 environment down (without deleting volumes).
 
 The repository has a GitHub remote
@@ -380,13 +429,12 @@ workflow covering repository baseline checks, `checkout-service`,
 `payment-service`, and `inventory-service` (Java + Python + Go setup,
 build/test, Compose, PostgreSQL, and all three services' health/smoke
 tests) has been verified running successfully on a GitHub-hosted runner
-(CI run `36272398003`). The updated workflow (with the
-`notification-service` Node setup, `npm ci`/typecheck/test/build,
-health-check, and smoke-test steps added in this phase, plus
-`actions/setup-go` given an explicit `cache-dependency-path` to resolve
-a Go module cache warning from the previous run) has been locally
-validated by reproducing its steps, but has **not yet run on GitHub
-Actions** — that will only be true once it runs there after a push.
+(CI run `36272398003`). The workflow has since been updated further
+(`notification-service` Node setup/build/test steps, and now this
+phase's checkout-orchestration steps and end-to-end smoke test) and has
+been locally validated end-to-end by reproducing its steps against the
+real Compose network, but has **not yet run on GitHub Actions in this
+updated form** — that will only be true once it runs there after a push.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -631,3 +679,64 @@ problem today.
   concrete compatibility problem). Locally reproduced the full updated
   CI path end-to-end (all five services healthy, all smoke tests, logs,
   cleanup) — **not yet verified running on GitHub Actions itself.**
+- `services/checkout-service` gained `POST /checkouts`: a `CheckoutController`
+  → `CheckoutOrchestrationService` → three small `RestClient`-based
+  clients (`PaymentClient`, `InventoryClient`, `NotificationClient`),
+  with typed request/response DTOs throughout (no `Map<String, Object>`)
+  and a `@RestControllerAdvice` translating downstream failures to a
+  safe HTTP 502. `spring-boot-starter-validation` was added for Bean
+  Validation (`@NotBlank`/`@Positive`/`@Pattern`) on the request DTO.
+  Downstream base URLs are configurable via `CHECKOUT_PAYMENT_BASE_URL` /
+  `CHECKOUT_INVENTORY_BASE_URL` / `CHECKOUT_NOTIFICATION_BASE_URL`
+  (`localhost` defaults; Compose supplies container-network values).
+- Verified `./mvnw test` (via `eclipse-temurin:21-jdk` Docker, since
+  local Java is 17) — **36/36 tests pass**: 14 controller contract tests
+  (valid request, each validation rule, 502 mapping with no leaked
+  detail), 14 orchestration-service unit tests (Mockito — call order,
+  shared `checkout_id`, payment/inventory/notification failure short-
+  circuiting, unexpected-status handling for all three services, and
+  response-contract validation for each service: missing/blank required
+  downstream IDs and mismatched returned `checkout_id`), 6 client
+  serialization tests (`MockRestServiceServer` — snake_case
+  request/response mapping and 5xx → `DownstreamServiceException` for
+  each of the three clients), plus the existing 2 health tests. The full
+  Spring context also loads successfully with the new configuration.
+- Verified `docker compose build checkout-service` and the full
+  five-service Compose environment: all five containers reached
+  Docker-reported `healthy`.
+- Verified `POST /checkouts` end-to-end through the real Compose network
+  (`checkout-service` → `payment-service` → `inventory-service` →
+  `notification-service`): HTTP 200, `checkout_id` prefixed `chk_`,
+  `status: "COMPLETED"`, and real `payment_id`/`reservation_id`/
+  `notification_id` values with `AUTHORIZED`/`RESERVED`/`ACCEPTED`.
+- Verified invalid requests (lowercase currency, zero quantity) return
+  HTTP 400, and that `GET /health`, `POST /health` (405, `Allow: GET`),
+  `/actuator/health` (200), and `/actuator/env` (404) on checkout-service
+  are all unchanged.
+- Verified a real downstream-failure scenario by stopping the running
+  `payment-service` container (no committed configuration changed):
+  `POST /checkouts` returned exactly
+  `{"error":"downstream_failure","service":"payment-service","message":"Downstream service request failed"}`
+  with HTTP 502 — no stack trace, URL, or exception class name leaked.
+  After restarting `payment-service` and it becoming healthy again, a
+  repeat request succeeded normally.
+- Inspected logs across all five services after this testing: the only
+  `WARN`/exception entries present were the ones directly caused by
+  these deliberate test requests (validation failures, the induced
+  downstream outage, a manual `POST /health` check) — no unexpected
+  errors.
+- Verified `docker compose down` (without `-v`) stops all five
+  containers while the PostgreSQL named volume remains present afterward.
+- `docker-compose.yml` updated with `checkout-service`'s three
+  `CHECKOUT_*_BASE_URL` environment variables (container-network values);
+  no `depends_on` was added (checkout-service's own healthcheck doesn't
+  check downstream, and no additional startup coupling was introduced).
+  `.env.example` updated: the stale "no variables are consumed" comment
+  was removed, and the three `CHECKOUT_*_BASE_URL` variables are
+  documented as optional local overrides.
+- `.github/workflows/ci.yml` extended with an end-to-end
+  "checkout orchestration smoke test" step (`curl` + `jq`) run after all
+  four services report healthy; the exact `jq` assertion was verified
+  against a real captured orchestration response before being added.
+  Locally reproduced the full updated CI path — **not yet verified
+  running on GitHub Actions itself.**

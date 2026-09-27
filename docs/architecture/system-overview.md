@@ -7,14 +7,16 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 1B.3, the repository contains foundational scaffolding, a
-running infrastructure dependency, and four application service
-bootstraps. Conceptually, the current demo application shape is:
+As of Phase 1B.4, the repository contains foundational scaffolding, a
+running infrastructure dependency, and four application services, with
+the **first real service-to-service workflow**. Conceptually, the
+current demo application shape is:
 
 ```
 Client
   |
-  +--> checkout-service      :8080
+  v
+checkout-service :8080
   |
   +--> payment-service       :8081  (POST /payments/authorize — simulated)
   |
@@ -23,12 +25,15 @@ Client
   +--> notification-service  :8083  (POST /notifications — simulated)
 ```
 
-`checkout-service` remains a standalone health-only bootstrap.
-`payment-service`, `inventory-service`, and `notification-service` each
-additionally have one simulated business endpoint (see below). There
-are still no arrows between the application services, and none of them
-talks to PostgreSQL, which exists alongside them as a separate,
-currently-unused infrastructure dependency.
+`checkout-service`'s `POST /checkouts` synchronously calls the other
+three services, in that exact order (payment, then inventory, then
+notification), stopping immediately on the first failure. Payment,
+inventory, and notification never call each other or call back into
+checkout-service. None of the four services talks to PostgreSQL, which
+exists alongside them as a separate, currently-unused infrastructure
+dependency. There is intentionally no rollback/compensation for
+already-succeeded steps, no retries, and no persistence of the checkout
+itself — see the `checkout-service` entry below for detail.
 
 Full inventory:
 
@@ -43,32 +48,63 @@ Full inventory:
   application connecting to it.
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
-  target system" below to actually exist. It runs through the same Docker
-  Compose environment as PostgreSQL, but does not connect to it.
+  target system" below to actually exist, and now its **orchestrator**.
+  It runs through the same Docker Compose environment as PostgreSQL, but
+  does not connect to it.
 
   **Implemented in this service:**
   - Application bootstrap (`CheckoutServiceApplication`)
   - `GET /health` — a small typed JSON health response
   - `GET /actuator/health` — Spring Boot Actuator health (only `health`
     is exposed)
-  - Automated tests (application context load + health endpoint test)
+  - `POST /checkouts` — generates a `checkout_id` (`chk_<uuid>`), then
+    synchronously calls `payment-service` → `inventory-service` →
+    `notification-service` (via small `RestClient`-based client classes,
+    `PaymentClient`/`InventoryClient`/`NotificationClient`, each doing
+    only HTTP transport). `CheckoutOrchestrationService` validates each
+    response before proceeding to the next step: the required downstream
+    result ID (`payment_id`/`reservation_id`/`notification_id`) is
+    non-null/non-blank, the returned `checkout_id` matches the one it
+    generated and sent, and the response has the expected business
+    status. Stops immediately on the first failure — no later step is
+    called. Returns a typed `CheckoutResponse` combining all three
+    downstream results.
+  - Downstream failures — non-2xx, connection failure, empty response,
+    an unexpected business status, or a malformed/inconsistent
+    successful (HTTP 200) response (a missing/blank required result ID
+    or a mismatched `checkout_id`) — are normalized by a
+    `@RestControllerAdvice` into a safe HTTP 502 with a fixed
+    `{"error": "downstream_failure", "service": "...", "message": "Downstream service request failed"}`
+    body — no stack traces, URLs, or downstream bodies are ever exposed.
+  - Request validation (`spring-boot-starter-validation`: `@NotBlank`,
+    `@Positive`, `@Pattern`) on `POST /checkouts`
+  - Downstream base URLs configurable via `CHECKOUT_PAYMENT_BASE_URL` /
+    `CHECKOUT_INVENTORY_BASE_URL` / `CHECKOUT_NOTIFICATION_BASE_URL`
+  - Automated tests: controller contract tests, orchestration-service
+    unit tests (Mockito, including call order and failure short-
+    circuiting), and downstream-client serialization tests
+    (`MockRestServiceServer`), plus the existing health tests
   - A multi-stage Dockerfile producing a runnable, non-root container image
   - Docker Compose integration with its own healthcheck
 
   **Not implemented in this service:**
-  - Any actual checkout workflow or business logic
-  - Payment integration
-  - Inventory integration
-  - Database access of any kind
-  - Telemetry / observability
-  - Communication with any other service
+  - Rollback/compensation for an already-authorized payment or
+    already-reserved inventory if a later step fails
+  - Retries, backoff, circuit breakers, or timeouts configuration beyond
+    Spring/JDK defaults
+  - Idempotency (identical requests currently produce independent
+    checkouts with different IDs)
+  - Persistence of checkouts (nothing is stored; PostgreSQL is untouched)
+  - Distributed tracing / correlation IDs / observability
+  - Asynchronous messaging, queues, or event-driven communication
   - Agent functionality of any kind
 
 - **`payment-service`** (`services/payment-service`), a Python 3.13 /
   FastAPI project (`src`-layout, `pyproject.toml`) — the second piece of
   the planned "demonstration target system" below to actually exist. It
-  runs through the same Docker Compose environment as PostgreSQL and
-  `checkout-service`, but does not connect to or communicate with either.
+  runs through the same Docker Compose environment as PostgreSQL. It is
+  now called by `checkout-service` (the first step of `POST /checkouts`);
+  it does not call `checkout-service`, or any other service, itself.
 
   **Implemented in this service:**
   - Application bootstrap (`payment_service.main:app`)
@@ -86,7 +122,7 @@ Full inventory:
   - Any real payment processing (no payment provider, e.g. Stripe)
   - Declines, failures, or artificial latency (every authorization
     currently succeeds deterministically)
-  - Checkout integration (Checkout Service does not call this endpoint yet)
+  - Calling out to any other service itself (it is only ever called)
   - Inventory integration
   - Database access or payment history of any kind
   - Telemetry / observability
@@ -96,9 +132,10 @@ Full inventory:
 - **`inventory-service`** (`services/inventory-service`), a Go 1.27
   project using only the standard library — the third piece of the
   planned "demonstration target system" below to actually exist. It runs
-  through the same Docker Compose environment as PostgreSQL,
-  `checkout-service`, and `payment-service`, but does not connect to or
-  communicate with any of them.
+  through the same Docker Compose environment as PostgreSQL. It is now
+  called by `checkout-service` (the second step of `POST /checkouts`,
+  after a successful payment authorization); it does not call
+  `checkout-service`, `payment-service`, or any other service itself.
 
   **Implemented in this service:**
   - Application bootstrap with graceful shutdown (`SIGTERM`/`SIGINT`)
@@ -126,20 +163,19 @@ Full inventory:
     behavior (every valid reservation currently succeeds deterministically)
   - Persistence of reservations (nothing is stored; identical requests
     produce different `reservation_id`s each time)
-  - Checkout integration (Checkout Service does not call this endpoint yet)
-  - Payment integration
+  - Calling out to any other service itself (it is only ever called)
   - Database access of any kind
   - Telemetry / observability
-  - Communication with any other service
   - Agent functionality of any kind
 
 - **`notification-service`** (`services/notification-service`), a
   Node.js 24 / TypeScript (strict) / Fastify project using npm — the
   fourth piece of the planned "demonstration target system" below to
   actually exist. It runs through the same Docker Compose environment as
-  PostgreSQL, `checkout-service`, `payment-service`, and
-  `inventory-service`, but does not connect to or communicate with any
-  of them.
+  PostgreSQL. It is now called by `checkout-service` (the third and
+  final step of `POST /checkouts`, after a successful inventory
+  reservation); it does not call `checkout-service`, `payment-service`,
+  `inventory-service`, or any other service itself.
 
   **Implemented in this service:**
   - A Fastify application factory (`src/app.ts`) that builds the app
@@ -170,9 +206,7 @@ Full inventory:
     provider (no SendGrid/Twilio/SES)
   - Persistence of notifications or a notification history
   - Event consumption, a message queue, or Kafka/Redpanda usage
-  - Checkout integration (Checkout Service does not call this endpoint yet)
-  - Payment integration
-  - Inventory integration
+  - Calling out to any other service itself (it is only ever called)
   - Database access of any kind
   - Telemetry / observability
   - Agent functionality of any kind
@@ -223,11 +257,13 @@ A set of small **demo commerce microservices** that the platform monitors
 and (eventually) remediates against, giving the agent a realistic
 distributed system to investigate rather than a synthetic one. Four
 services — `checkout-service`, `payment-service`, `inventory-service`,
-and `notification-service` — now exist as bootstraps (see Current
-Implementation above); `payment-service`, `inventory-service`, and
-`notification-service` each have one simulated business endpoint,
-`checkout-service` remains health-only, and they do not call each
-other.
+and `notification-service` — now exist (see Current Implementation
+above), each with one simulated business endpoint of its own.
+`checkout-service` is now the orchestrator: `POST /checkouts`
+synchronously calls the other three, in order, and returns their
+combined result — the first real service-to-service workflow in this
+repository. Payment, inventory, and notification never call each other
+or call back into checkout-service.
 
 ### Observability
 - **OpenTelemetry** for traces, metrics, and logs emitted by the demo

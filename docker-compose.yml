@@ -2,18 +2,20 @@
 # Reliability Platform.
 #
 # Services:
-#   - postgres: local PostgreSQL database (Phase 0.2)
-#   - checkout-service: first application service bootstrap (Phase 1A.1).
-#     It does not connect to PostgreSQL yet and has no business logic.
-#   - payment-service: second application service bootstrap (Phase 1A.2).
-#     It does not connect to PostgreSQL and does not talk to
-#     checkout-service yet; it has no payment business logic.
-#   - inventory-service: third application service bootstrap (Phase 1A.3).
-#     It does not connect to PostgreSQL and does not talk to
-#     checkout-service or payment-service yet; it has no inventory logic.
-#   - notification-service: fourth application service bootstrap
-#     (Phase 1A.4). It does not connect to PostgreSQL and does not talk
-#     to any other service yet; it has no notification delivery logic.
+#   - postgres: local PostgreSQL database (Phase 0.2). Not used by any
+#     application service for business data yet.
+#   - checkout-service: orchestrates payment authorization, inventory
+#     reservation, and notification triggering via POST /checkouts
+#     (Phase 1B.4) — the first service-to-service workflow in this
+#     repository. It calls payment-service, inventory-service, and
+#     notification-service sequentially; they never call each other or
+#     call back into checkout-service. It does not connect to PostgreSQL.
+#   - payment-service: exposes a simulated POST /payments/authorize
+#     (Phase 1B.1). No real payment provider, persistence, or database.
+#   - inventory-service: exposes a simulated POST /inventory/reservations
+#     (Phase 1B.2). No real stock tracking, persistence, or database.
+#   - notification-service: exposes a simulated POST /notifications
+#     (Phase 1B.3). No real message delivery, persistence, or database.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -47,6 +49,10 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    environment:
+      CHECKOUT_PAYMENT_BASE_URL: http://payment-service:8081
+      CHECKOUT_INVENTORY_BASE_URL: http://inventory-service:8082
+      CHECKOUT_NOTIFICATION_BASE_URL: http://notification-service:8083
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
       interval: 5s
