@@ -7,7 +7,7 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 1B.2, the repository contains foundational scaffolding, a
+As of Phase 1B.3, the repository contains foundational scaffolding, a
 running infrastructure dependency, and four application service
 bootstraps. Conceptually, the current demo application shape is:
 
@@ -20,11 +20,11 @@ Client
   |
   +--> inventory-service     :8082  (POST /inventory/reservations — simulated)
   |
-  +--> notification-service  :8083
+  +--> notification-service  :8083  (POST /notifications — simulated)
 ```
 
-`checkout-service` and `notification-service` remain standalone
-health-only bootstraps. `payment-service` and `inventory-service` each
+`checkout-service` remains a standalone health-only bootstrap.
+`payment-service`, `inventory-service`, and `notification-service` each
 additionally have one simulated business endpoint (see below). There
 are still no arrows between the application services, and none of them
 talks to PostgreSQL, which exists alongside them as a separate,
@@ -147,7 +147,16 @@ Full inventory:
     it and shuts it down gracefully on `SIGTERM`/`SIGINT`
   - `GET /health` — a small typed JSON health response (`POST /health`
     returns HTTP 404, not the valid response)
-  - Automated tests (`node:test` + Fastify's `inject()`, run via `tsx`)
+  - `POST /notifications` — a **simulated** notification trigger:
+    validates `checkout_id`/`kind`/`recipient` using Fastify's built-in
+    JSON-schema (Ajv) request validation (`kind` constrained to exactly
+    `"ORDER_CONFIRMATION"`), generates a `notification_id` via
+    `crypto.randomUUID()`, and always returns `status: "ACCEPTED"`. No
+    real email/SMS/push provider, no persistence, no queue; other
+    methods on this path are not registered, so they get Fastify's
+    normal 404.
+  - Automated tests (`node:test` + Fastify's `inject()`, run via `tsx`,
+    covering both endpoints)
   - A multi-stage Dockerfile (`node:24` builder running `npm ci`,
     typecheck, tests, and the TypeScript build → `node:24-slim` runtime
     with only production dependencies, running as the official image's
@@ -157,9 +166,11 @@ Full inventory:
     solely for this purpose)
 
   **Not implemented in this service:**
-  - Any actual notification delivery (email, SMS, push)
-  - Event consumption or Kafka/Redpanda usage
-  - Checkout integration
+  - Any actual notification delivery (email, SMS, push) or external
+    provider (no SendGrid/Twilio/SES)
+  - Persistence of notifications or a notification history
+  - Event consumption, a message queue, or Kafka/Redpanda usage
+  - Checkout integration (Checkout Service does not call this endpoint yet)
   - Payment integration
   - Inventory integration
   - Database access of any kind
@@ -213,9 +224,9 @@ and (eventually) remediates against, giving the agent a realistic
 distributed system to investigate rather than a synthetic one. Four
 services — `checkout-service`, `payment-service`, `inventory-service`,
 and `notification-service` — now exist as bootstraps (see Current
-Implementation above); `payment-service` and `inventory-service` each
-have one simulated business endpoint, `checkout-service` and
-`notification-service` remain health-only, and they do not call each
+Implementation above); `payment-service`, `inventory-service`, and
+`notification-service` each have one simulated business endpoint,
+`checkout-service` remains health-only, and they do not call each
 other.
 
 ### Observability

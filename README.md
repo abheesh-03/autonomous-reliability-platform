@@ -17,12 +17,12 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 1B.2 — Minimal Inventory Reservation API**. `checkout-service`
-and `notification-service` remain health-only bootstraps;
-`payment-service` has a simulated `POST /payments/authorize` endpoint,
-and `inventory-service` now also has a simulated
-`POST /inventory/reservations` endpoint. None of the services talk to
-each other yet, and no AI functionality exists.
+**Phase 1B.3 — Minimal Notification Trigger API**. `checkout-service`
+remains a health-only bootstrap; `payment-service` has a simulated
+`POST /payments/authorize` endpoint, `inventory-service` has a simulated
+`POST /inventory/reservations` endpoint, and `notification-service` now
+also has a simulated `POST /notifications` endpoint. None of the
+services talk to each other yet, and no AI functionality exists.
 
 ## Problem this project will eventually solve
 
@@ -75,13 +75,15 @@ PostgreSQL database run via Docker Compose, and four application service
 bootstraps: `checkout-service` (Java / Spring Boot), `payment-service`
 (Python / FastAPI), `inventory-service` (Go / standard library), and
 `notification-service` (Node.js / TypeScript / Fastify). `checkout-service`
-and `notification-service` currently only expose health endpoints;
-`payment-service` additionally has one simulated business endpoint
-(`POST /payments/authorize`, not connected to any real payment
-provider), and `inventory-service` additionally has one simulated
-business endpoint (`POST /inventory/reservations`, no real stock
-tracking). None of the services connect to PostgreSQL or
-communicate with each other yet. No AI integration has been added yet.
+currently only exposes a health endpoint; `payment-service` additionally
+has one simulated business endpoint (`POST /payments/authorize`, not
+connected to any real payment provider), `inventory-service`
+additionally has one simulated business endpoint
+(`POST /inventory/reservations`, no real stock tracking), and
+`notification-service` additionally has one simulated business endpoint
+(`POST /notifications`, no real message delivery). None of the services
+connect to PostgreSQL or communicate with each other yet. No AI
+integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -289,17 +291,29 @@ calls directly.
 ## Notification Service
 
 `services/notification-service` is the fourth application service: a
-Node.js 24 / TypeScript (strict) / Fastify project using npm. At this
-stage it is a bootstrap only — it exposes a health endpoint and nothing
-else. It does **not** send email, SMS, or push notifications, does
+Node.js 24 / TypeScript (strict) / Fastify project using npm. It now has
+one real business endpoint, `POST /notifications` — a **simulated**
+notification trigger (no real email/SMS/push provider, no persistence,
+no queue). It does **not** send email, SMS, or push notifications, does
 **not** consume events, does **not** use Kafka/Redpanda, does **not**
 connect to PostgreSQL, and does **not** communicate with any other
 service.
 
-Endpoint:
+Endpoints:
 
 - `GET /health` — a small typed JSON response: `{"status": "UP", "service": "notification-service"}`
   (only `GET` is handled; `POST /health` returns `404`, not the valid response)
+- `POST /notifications` — accepts `{"checkout_id": str, "kind": "ORDER_CONFIRMATION", "recipient": str}`
+  (validated via Fastify's built-in JSON-schema/Ajv support: `checkout_id`
+  1–100 chars, `kind` must be exactly `"ORDER_CONFIRMATION"`, `recipient`
+  1–254 chars, opaque — no email-format validation) and returns HTTP 200
+  with a generated `notification_id` (via `crypto.randomUUID()`, no
+  external UUID package), the echoed `checkout_id`/`kind`/`recipient`,
+  and `status: "ACCEPTED"`. `ACCEPTED` means only that this demo service
+  accepted the simulated trigger — no message is actually delivered.
+  Invalid requests return Fastify's normal HTTP 400 validation error.
+  Only `POST` is registered on this path; other methods get Fastify's
+  normal `404`.
 
 `src/app.ts` builds the Fastify instance without binding a port, so
 tests exercise it via Fastify's `inject()` rather than a live network
