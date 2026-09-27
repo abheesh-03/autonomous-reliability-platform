@@ -1,24 +1,27 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs
 
 help: ## Show available targets
 	@echo "Available targets:"
-	@echo "  help            Show this help"
-	@echo "  check           Verify local developer prerequisites"
-	@echo "  compose-config  Validate docker-compose.yml"
-	@echo "  db-up           Start the Compose environment (docker compose up -d)"
-	@echo "  db-down         Stop the Compose environment, preserving the data volume"
-	@echo "  db-status       Show container status"
-	@echo "  db-logs         Show recent PostgreSQL logs"
-	@echo "  db-restart      Restart PostgreSQL without removing data"
-	@echo "  checkout-build  Build the checkout-service Docker image"
-	@echo "  checkout-test   Run checkout-service tests locally (requires Java 21)"
-	@echo "  checkout-logs   Show recent checkout-service logs"
-	@echo "  payment-build   Build the payment-service Docker image"
-	@echo "  payment-test    Run payment-service tests on Python 3.13 (via Docker)"
-	@echo "  payment-logs    Show recent payment-service logs"
-	@echo "  inventory-build Build the inventory-service Docker image"
-	@echo "  inventory-test  Run inventory-service gofmt/vet/test on Go 1.27 (via Docker)"
-	@echo "  inventory-logs  Show recent inventory-service logs"
+	@echo "  help                Show this help"
+	@echo "  check               Verify local developer prerequisites"
+	@echo "  compose-config      Validate docker-compose.yml"
+	@echo "  db-up               Start the Compose environment (docker compose up -d)"
+	@echo "  db-down             Stop the Compose environment, preserving the data volume"
+	@echo "  db-status           Show container status"
+	@echo "  db-logs             Show recent PostgreSQL logs"
+	@echo "  db-restart          Restart PostgreSQL without removing data"
+	@echo "  checkout-build      Build the checkout-service Docker image"
+	@echo "  checkout-test       Run checkout-service tests locally (requires Java 21)"
+	@echo "  checkout-logs       Show recent checkout-service logs"
+	@echo "  payment-build       Build the payment-service Docker image"
+	@echo "  payment-test        Run payment-service tests on Python 3.13 (via Docker)"
+	@echo "  payment-logs        Show recent payment-service logs"
+	@echo "  inventory-build     Build the inventory-service Docker image"
+	@echo "  inventory-test      Run inventory-service gofmt/vet/test on Go 1.27 (via Docker)"
+	@echo "  inventory-logs      Show recent inventory-service logs"
+	@echo "  notification-build  Build the notification-service Docker image"
+	@echo "  notification-test   Run notification-service typecheck/test/build on Node 24 (via Docker)"
+	@echo "  notification-logs   Show recent notification-service logs"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -76,3 +79,16 @@ inventory-test: ## Run inventory-service gofmt/vet/test on Go 1.27 (via Docker)
 
 inventory-logs: ## Show recent inventory-service logs
 	docker compose logs --tail=100 inventory-service
+
+notification-build: ## Build the notification-service Docker image
+	docker compose build notification-service
+
+# Host Node differs from this repo's Node 24 target; running npm
+# ci/typecheck/test/build inside node:24 keeps results reproducible and
+# consistent with CI regardless of the developer's local Node version.
+notification-test: ## Run notification-service typecheck/test/build on Node 24 (via Docker)
+	docker run --rm -v "$(CURDIR)/services/notification-service:/app" -w /app node:24 \
+		bash -c "npm ci && npm run typecheck && npm test && npm run build"
+
+notification-logs: ## Show recent notification-service logs
+	docker compose logs --tail=100 notification-service

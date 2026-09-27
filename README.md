@@ -17,10 +17,10 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 1A.3 — Inventory Service Bootstrap**. `checkout-service`,
-`payment-service`, and `inventory-service` all exist only as health-only
-bootstraps; none has real business logic, they do not talk to each
-other, and no AI functionality exists.
+**Phase 1A.4 — Notification Service Bootstrap**. `checkout-service`,
+`payment-service`, `inventory-service`, and `notification-service` all
+exist only as health-only bootstraps; none has real business logic, they
+do not talk to each other, and no AI functionality exists.
 
 ## Problem this project will eventually solve
 
@@ -69,12 +69,13 @@ for the current-vs-planned breakdown.
 
 Repository-level scaffolding exists (baseline documentation, an
 environment-check script, and standard configuration files), a local
-PostgreSQL database run via Docker Compose, and three application service
+PostgreSQL database run via Docker Compose, and four application service
 bootstraps: `checkout-service` (Java / Spring Boot), `payment-service`
-(Python / FastAPI), and `inventory-service` (Go / standard library). All
-three currently only expose health endpoints — none has real business
-logic, none connects to PostgreSQL, and they do not communicate with
-each other. No AI integration has been added yet.
+(Python / FastAPI), `inventory-service` (Go / standard library), and
+`notification-service` (Node.js / TypeScript / Fastify). All four
+currently only expose health endpoints — none has real business logic,
+none connects to PostgreSQL, and they do not communicate with each
+other. No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -259,6 +260,62 @@ Compose healthcheck, the same binary exposes a built-in `healthcheck`
 subcommand (a plain HTTP GET against its own `/health`) that Compose
 calls directly.
 
+## Notification Service
+
+`services/notification-service` is the fourth application service: a
+Node.js 24 / TypeScript (strict) / Fastify project using npm. At this
+stage it is a bootstrap only — it exposes a health endpoint and nothing
+else. It does **not** send email, SMS, or push notifications, does
+**not** consume events, does **not** use Kafka/Redpanda, does **not**
+connect to PostgreSQL, and does **not** communicate with any other
+service.
+
+Endpoint:
+
+- `GET /health` — a small typed JSON response: `{"status": "UP", "service": "notification-service"}`
+  (only `GET` is handled; `POST /health` returns `404`, not the valid response)
+
+`src/app.ts` builds the Fastify instance without binding a port, so
+tests exercise it via Fastify's `inject()` rather than a live network
+listener. `src/server.ts` starts the listener and shuts it down cleanly
+on `SIGTERM`/`SIGINT`.
+
+**Test and build locally** (requires a local Node 24 toolchain — if your
+machine has a different Node version, use the Docker path below instead):
+
+```bash
+cd services/notification-service
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+**Test on Node 24 via Docker** (reproducible regardless of your local
+Node version):
+
+```bash
+make notification-test
+```
+
+**Run it through Docker Compose**, alongside PostgreSQL, checkout-service,
+payment-service, and inventory-service:
+
+```bash
+make db-up
+curl http://localhost:8083/health
+make notification-logs
+make db-down
+```
+
+The container image is built in two stages: a `node:24` builder (which
+also runs `npm ci`, typecheck, and `node --test` via `tsx`) producing
+compiled JavaScript in `dist/`, and a `node:24-slim` runtime with only
+production dependencies, running as the official image's built-in
+`node` user. Since installing `curl` solely for a healthcheck was to be
+avoided, the Compose healthcheck instead uses Node's built-in `fetch`
+(with a bounded 3-second timeout) via `node -e`.
+
 ## Continuous Integration
 
 A GitHub Actions workflow (`.github/workflows/ci.yml`) has been added. It
@@ -269,25 +326,32 @@ usable, that `checkout-service` builds and its tests pass (Java 21 via
 `actions/setup-java`), that `payment-service`'s dependencies install and
 its tests pass (Python 3.13 via `actions/setup-python`), that
 `inventory-service` is `gofmt`-clean and passes `go vet`/`go test`/build
-(Go 1.27 via `actions/setup-go`), that Docker Compose config resolves,
-that PostgreSQL, `checkout-service`, `payment-service`, and
-`inventory-service` all start and reach a healthy state (bounded retry
+(Go 1.27 via `actions/setup-go`), that `notification-service` installs
+(`npm ci`), typechecks, tests, and builds (Node 24 via `actions/setup-node`),
+that Docker Compose config resolves, that PostgreSQL and all four
+application services start and reach a healthy state (bounded retry
 loops, not assumed), a basic SQL smoke test, and HTTP smoke tests against
-all three application services' health endpoints — then always tears the
+all four application services' health endpoints — then always tears the
 environment down (without deleting volumes).
 
 The repository has a GitHub remote
 (`abheesh-03/autonomous-reliability-platform`). The version of this
-workflow covering repository baseline checks, `checkout-service`, and
-`payment-service` (Java + Python setup, build/test, Compose, PostgreSQL,
-and both services' health/smoke-tests) has been verified running
-successfully on a GitHub-hosted runner (CI run `36269437529`). The
-updated workflow (with the `inventory-service` Go setup, formatting/vet/
-test/build, health-check, and smoke-test steps added in this phase, plus
-`actions/setup-python` bumped from `v5` to `v6` to resolve a Node.js 20
-deprecation warning from the previous run) has been locally validated by
-reproducing its steps, but has **not yet run on GitHub Actions** — that
-will only be true once it runs there after a push.
+workflow covering repository baseline checks, `checkout-service`,
+`payment-service`, and `inventory-service` (Java + Python + Go setup,
+build/test, Compose, PostgreSQL, and all three services' health/smoke
+tests) has been verified running successfully on a GitHub-hosted runner
+(CI run `36272398003`). The updated workflow (with the
+`notification-service` Node setup, `npm ci`/typecheck/test/build,
+health-check, and smoke-test steps added in this phase, plus
+`actions/setup-go` given an explicit `cache-dependency-path` to resolve
+a Go module cache warning from the previous run) has been locally
+validated by reproducing its steps, but has **not yet run on GitHub
+Actions** — that will only be true once it runs there after a push.
+
+The previous run also noted an informational warning that `ubuntu-latest`
+will migrate to Ubuntu 26 in the future; per guidance, the runner has
+been left as `ubuntu-latest` since there is no concrete compatibility
+problem today.
 
 ## VERIFIED COMPLETED FEATURES
 
@@ -338,9 +402,9 @@ will only be true once it runs there after a push.
   `checkout-service` build/test + Docker Compose + PostgreSQL health/SQL
   smoke test + `checkout-service` health/HTTP smoke test) executed
   successfully on a real GitHub-hosted runner (CI run `36268092550`)
-  after the repository was pushed to `main` on GitHub, and this coverage
-  was later re-verified together with `payment-service` in CI run
-  `36269437529`.
+  after the repository was pushed to `main` on GitHub; this coverage was
+  re-verified together with `payment-service` in CI run `36269437529`,
+  and again together with `inventory-service` in CI run `36272398003`.
 - `services/checkout-service` created: a Java 21 / Spring Boot 3.5.16
   Maven project exposing `GET /health` and `GET /actuator/health` only,
   with no checkout, payment, inventory, or database logic.
@@ -463,7 +527,67 @@ will only be true once it runs there after a push.
   bounded health-check + HTTP smoke test for it. `actions/setup-python`
   was bumped from `v5` to `v6` (confirmed to move from `node20` to
   `node24`) to resolve the Node.js 20 deprecation warning noted from the
-  previous run, with equivalent behavior. Locally reproduced the full
-  updated CI path end-to-end (all four services healthy, all smoke
-  tests, logs, cleanup) — **not yet verified running on GitHub Actions
-  itself.**
+  previous run, with equivalent behavior — **verified running
+  successfully on GitHub Actions** (CI run `36272398003`).
+- `services/notification-service` created: a Node.js 24 / TypeScript
+  (strict) / Fastify project using npm, exposing `GET /health` only,
+  with no notification, checkout, payment, inventory, or database logic.
+- Host Node is v20.20.2 (not the 24 target); `package-lock.json` was
+  generated, and `npm ci`/typecheck/`node --test`/build were all run,
+  authoritatively inside a real `node:24` container (`node -v` → 24.x
+  confirmed) — this is also what `make notification-test` and CI's
+  `actions/setup-node` do.
+- `tsc --noEmit` (typecheck) passed clean; `node --test` (via `tsx`)
+  passed both tests (GET /health body/content-type, POST /health
+  returns non-200); `tsc -p tsconfig.json` (build) produced compiled
+  `dist/app.js`, `dist/server.js`, `dist/routes/health.js` — verified
+  both standalone (via `docker run node:24`) and again inside the Docker
+  image build itself.
+- `services/notification-service/Dockerfile` (multi-stage: `node:24`
+  builder running `npm ci`/typecheck/test/build then `npm prune
+  --omit=dev` → `node:24-slim` runtime with only production
+  dependencies, running as the official image's built-in `node` user)
+  builds successfully via `docker compose build` / `make
+  notification-build`.
+- Verified the container's built-in `node` user is used (`uid=1000`),
+  and that the Compose healthcheck (Node's `fetch` with a bounded
+  3-second timeout, no curl/wget installed) exits 0 against a running
+  instance.
+- `docker-compose.yml` updated with a `notification-service` entry
+  (build, port 8083, exec-form Node-`fetch`-based healthcheck, no
+  PostgreSQL or other service dependency/credentials, default network
+  only).
+- Verified `docker compose up -d` starts all five of `postgres`,
+  `checkout-service`, `payment-service`, `inventory-service`, and
+  `notification-service`, and all five independently reach
+  Docker-reported `healthy` status (bounded polling, not assumed).
+- Verified `curl http://localhost:8080/health`,
+  `curl http://localhost:8081/health`, and
+  `curl http://localhost:8082/health` still return their expected bodies
+  (unaffected by adding notification-service).
+- Verified `curl http://localhost:8083/health` returns HTTP 200 with
+  `{"status":"UP","service":"notification-service"}`.
+- Verified `curl -X POST http://localhost:8083/health` returns HTTP 404
+  Not Found, not the valid health response.
+- Verified the `notification-service` container process runs as `node`
+  (`uid=1000`), and that `docker compose logs notification-service`
+  returns real structured (pino) log output.
+- Verified `docker compose down` (without `-v`) stops all five
+  containers while the PostgreSQL named volume remains present afterward.
+- `Makefile` extended with `notification-build`, `notification-test`
+  (runs `npm ci`/typecheck/test/build inside a `node:24` container for
+  reproducibility regardless of the developer's local Node version), and
+  `notification-logs`; existing `db-*`, `checkout-*`, `payment-*`, and
+  `inventory-*` targets continue to work unchanged.
+- `.github/workflows/ci.yml` updated to set up Node 24 (`actions/setup-node`,
+  confirmed to run on `node24` itself), install/typecheck/test/build
+  `notification-service`, and add a bounded health-check + HTTP smoke
+  test for it. `actions/setup-go` was given an explicit
+  `cache-dependency-path: services/inventory-service/go.mod` to resolve
+  the "Dependencies file is not found" cache warning noted from the
+  previous run (confirmed the input is supported by `setup-go@v7`), with
+  equivalent behavior otherwise. `ubuntu-latest` was left unchanged per
+  instructions (informational Ubuntu 26 migration notice only, no
+  concrete compatibility problem). Locally reproduced the full updated
+  CI path end-to-end (all five services healthy, all smoke tests, logs,
+  cleanup) — **not yet verified running on GitHub Actions itself.**

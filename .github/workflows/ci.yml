@@ -56,6 +56,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27"
+          cache-dependency-path: services/inventory-service/go.mod
 
       - name: Check inventory-service formatting
         working-directory: services/inventory-service
@@ -72,6 +73,29 @@ jobs:
       - name: Build inventory-service binary
         working-directory: services/inventory-service
         run: CGO_ENABLED=0 GOOS=linux go build -o /tmp/inventory-service ./cmd/inventory-service
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: services/notification-service/package-lock.json
+
+      - name: Install notification-service dependencies
+        working-directory: services/notification-service
+        run: npm ci
+
+      - name: Run notification-service typecheck
+        working-directory: services/notification-service
+        run: npm run typecheck
+
+      - name: Run notification-service tests
+        working-directory: services/notification-service
+        run: npm test
+
+      - name: Build notification-service
+        working-directory: services/notification-service
+        run: npm run build
 
       - name: Create runtime .env from .env.example
         run: cp .env.example .env
@@ -174,6 +198,27 @@ jobs:
           echo "$body"
           echo "$body" | jq -e '.status == "UP" and .service == "inventory-service"'
 
+      - name: Wait for notification-service to become healthy
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            cid="$(docker compose ps -q notification-service)"
+            health="$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || true)"
+            echo "Attempt $i/$attempts: health=$health"
+            if [ "$health" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "notification-service did not become healthy in time" >&2
+          exit 1
+
+      - name: HTTP smoke test for notification-service
+        run: |
+          body="$(curl -fsS http://localhost:8083/health)"
+          echo "$body"
+          echo "$body" | jq -e '.status == "UP" and .service == "notification-service"'
+
       - name: Show service logs
         if: always()
         run: |
@@ -181,6 +226,7 @@ jobs:
           docker compose logs --tail=100 checkout-service
           docker compose logs --tail=100 payment-service
           docker compose logs --tail=100 inventory-service
+          docker compose logs --tail=100 notification-service
 
       - name: Stop Compose environment (preserve volumes)
         if: always()
