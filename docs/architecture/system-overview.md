@@ -7,7 +7,7 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 1A.4, the repository contains foundational scaffolding, a
+As of Phase 1B.1, the repository contains foundational scaffolding, a
 running infrastructure dependency, and four application service
 bootstraps. Conceptually, the current demo application shape is:
 
@@ -16,17 +16,19 @@ Client
   |
   +--> checkout-service      :8080
   |
-  +--> payment-service       :8081
+  +--> payment-service       :8081  (POST /payments/authorize — simulated)
   |
   +--> inventory-service     :8082
   |
   +--> notification-service  :8083
 ```
 
-All four boxes are standalone health-only bootstraps today — there are
-no arrows between them yet, and none of them talks to PostgreSQL, which
-exists alongside them as a separate, currently-unused infrastructure
-dependency.
+`checkout-service`, `inventory-service`, and `notification-service`
+remain standalone health-only bootstraps. `payment-service` additionally
+has one simulated business endpoint (see below). There are still no
+arrows between the application services, and none of them talks to
+PostgreSQL, which exists alongside them as a separate,
+currently-unused infrastructure dependency.
 
 Full inventory:
 
@@ -71,15 +73,22 @@ Full inventory:
   **Implemented in this service:**
   - Application bootstrap (`payment_service.main:app`)
   - `GET /health` — a small typed (Pydantic) JSON health response
-  - Automated tests (health endpoint test via FastAPI's `TestClient`)
+  - `POST /payments/authorize` — a **simulated** payment authorization:
+    validates `checkout_id`/`amount_cents`/`currency` (integer cents, no
+    floats), generates a `payment_id` (UUID), and always returns
+    `status: "AUTHORIZED"`. Not connected to any real payment provider.
+  - Automated tests (health endpoint + authorization endpoint, including
+    validation-failure cases, via FastAPI's `TestClient`)
   - A single-stage Dockerfile producing a runnable, non-root container image
   - Docker Compose integration with its own healthcheck
 
   **Not implemented in this service:**
-  - Any actual payment processing or business logic
-  - Checkout integration
+  - Any real payment processing (no payment provider, e.g. Stripe)
+  - Declines, failures, or artificial latency (every authorization
+    currently succeeds deterministically)
+  - Checkout integration (Checkout Service does not call this endpoint yet)
   - Inventory integration
-  - Database access of any kind
+  - Database access or payment history of any kind
   - Telemetry / observability
   - Communication with any other service
   - Agent functionality of any kind
@@ -193,8 +202,8 @@ and (eventually) remediates against, giving the agent a realistic
 distributed system to investigate rather than a synthetic one. Four
 services — `checkout-service`, `payment-service`, `inventory-service`,
 and `notification-service` — now exist as bootstraps (see Current
-Implementation above); none has business logic yet, and they do not call
-each other.
+Implementation above); `payment-service` has one simulated business
+endpoint, the others remain health-only, and they do not call each other.
 
 ### Observability
 - **OpenTelemetry** for traces, metrics, and logs emitted by the demo

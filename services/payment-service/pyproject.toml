@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "payment-service"
 version = "0.1.0"
-description = "Payment service bootstrap for the Autonomous Production Reliability Platform demo application. Phase 1A.2 scope only: no payment, checkout, or database logic."
+description = "Payment service for the Autonomous Production Reliability Platform demo application. Provides a simulated payment authorization endpoint; no real payment provider, checkout integration, or database persistence."
 requires-python = ">=3.13"
 dependencies = [
     "fastapi==0.141.1",

@@ -17,10 +17,11 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 1A.4 — Notification Service Bootstrap**. `checkout-service`,
-`payment-service`, `inventory-service`, and `notification-service` all
-exist only as health-only bootstraps; none has real business logic, they
-do not talk to each other, and no AI functionality exists.
+**Phase 1B.1 — Minimal Payment Authorization API**. `checkout-service`,
+`inventory-service`, and `notification-service` remain health-only
+bootstraps; `payment-service` now also has one simulated business
+endpoint (`POST /payments/authorize`). None of the services talk to each
+other yet, and no AI functionality exists.
 
 ## Problem this project will eventually solve
 
@@ -72,10 +73,12 @@ environment-check script, and standard configuration files), a local
 PostgreSQL database run via Docker Compose, and four application service
 bootstraps: `checkout-service` (Java / Spring Boot), `payment-service`
 (Python / FastAPI), `inventory-service` (Go / standard library), and
-`notification-service` (Node.js / TypeScript / Fastify). All four
-currently only expose health endpoints — none has real business logic,
-none connects to PostgreSQL, and they do not communicate with each
-other. No AI integration has been added yet.
+`notification-service` (Node.js / TypeScript / Fastify). `checkout-service`,
+`inventory-service`, and `notification-service` currently only expose
+health endpoints; `payment-service` additionally has one simulated
+business endpoint (`POST /payments/authorize`, not connected to any real
+payment provider). None of the services connect to PostgreSQL or
+communicate with each other yet. No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -172,14 +175,23 @@ make db-down
 
 `services/payment-service` is the second application service: a Python
 3.13 / FastAPI project using a standard `src`-layout package, installed
-via `pyproject.toml` (no Poetry/Pipenv). At this stage it is a bootstrap
-only — it exposes a health endpoint and nothing else. It does **not**
-process payments, does **not** connect to PostgreSQL, and does **not**
-communicate with `checkout-service`.
+via `pyproject.toml` (no Poetry/Pipenv). It now has one real business
+endpoint, `POST /payments/authorize` — a **simulated** payment
+authorization (no real payment provider, no persistence). It still does
+**not** connect to PostgreSQL and does **not** communicate with
+`checkout-service` or any other service.
 
-Endpoint:
+Endpoints:
 
 - `GET /health` — a small typed JSON response: `{"status": "UP", "service": "payment-service"}`
+- `POST /payments/authorize` — accepts `{"checkout_id": str, "amount_cents": int, "currency": str}`
+  (money as integer cents; `currency` must be exactly three uppercase
+  letters) and returns HTTP 200 with a generated `payment_id`, the
+  echoed `checkout_id`/`amount_cents`/`currency`, and `status: "AUTHORIZED"`.
+  Invalid requests return FastAPI/Pydantic's standard HTTP 422 validation
+  error. Every authorization in this phase deterministically succeeds —
+  there are no declines, no real payment processing, and no database
+  persistence yet.
 
 **Build and test locally** (requires a local Python 3.13 toolchain — if
 your machine has a different Python version, install may still work but
