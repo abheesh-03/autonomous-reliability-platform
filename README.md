@@ -17,11 +17,12 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 1B.1 — Minimal Payment Authorization API**. `checkout-service`,
-`inventory-service`, and `notification-service` remain health-only
-bootstraps; `payment-service` now also has one simulated business
-endpoint (`POST /payments/authorize`). None of the services talk to each
-other yet, and no AI functionality exists.
+**Phase 1B.2 — Minimal Inventory Reservation API**. `checkout-service`
+and `notification-service` remain health-only bootstraps;
+`payment-service` has a simulated `POST /payments/authorize` endpoint,
+and `inventory-service` now also has a simulated
+`POST /inventory/reservations` endpoint. None of the services talk to
+each other yet, and no AI functionality exists.
 
 ## Problem this project will eventually solve
 
@@ -73,11 +74,13 @@ environment-check script, and standard configuration files), a local
 PostgreSQL database run via Docker Compose, and four application service
 bootstraps: `checkout-service` (Java / Spring Boot), `payment-service`
 (Python / FastAPI), `inventory-service` (Go / standard library), and
-`notification-service` (Node.js / TypeScript / Fastify). `checkout-service`,
-`inventory-service`, and `notification-service` currently only expose
-health endpoints; `payment-service` additionally has one simulated
-business endpoint (`POST /payments/authorize`, not connected to any real
-payment provider). None of the services connect to PostgreSQL or
+`notification-service` (Node.js / TypeScript / Fastify). `checkout-service`
+and `notification-service` currently only expose health endpoints;
+`payment-service` additionally has one simulated business endpoint
+(`POST /payments/authorize`, not connected to any real payment
+provider), and `inventory-service` additionally has one simulated
+business endpoint (`POST /inventory/reservations`, no real stock
+tracking). None of the services connect to PostgreSQL or
 communicate with each other yet. No AI integration has been added yet.
 
 ## Local PostgreSQL
@@ -223,16 +226,27 @@ make db-down
 
 `services/inventory-service` is the third application service: a Go 1.27
 project using only the standard library (`net/http`, `encoding/json`,
-`net/http/httptest`, etc. — no web framework, no external dependencies).
-At this stage it is a bootstrap only — it exposes a health endpoint and
-nothing else. It does **not** track or reserve inventory, does **not**
-connect to PostgreSQL, and does **not** communicate with `checkout-service`
-or `payment-service`.
+`crypto/rand`, `net/http/httptest`, etc. — no web framework, no external
+dependencies). It now has one real business endpoint,
+`POST /inventory/reservations` — a **simulated** reservation. It does
+**not** track real stock levels, does **not** persist reservations, does
+**not** connect to PostgreSQL, and does **not** communicate with
+`checkout-service` or `payment-service`.
 
-Endpoint:
+Endpoints:
 
 - `GET /health` — a small typed JSON response: `{"status": "UP", "service": "inventory-service"}`
   (only `GET` is accepted; other methods return `405`)
+- `POST /inventory/reservations` — accepts `{"checkout_id": str, "sku": str, "quantity": int}`
+  (strict JSON: unknown fields and trailing data are rejected) and
+  returns HTTP 200 with a generated `reservation_id` (UUID v4, via
+  `crypto/rand` — no external UUID dependency), the echoed
+  `checkout_id`/`sku`/`quantity`, and `status: "RESERVED"`. Invalid
+  requests return HTTP 400 with `{"error": "invalid_request", "message": "..."}`.
+  Only `POST` is accepted on this path; other methods return `405` with
+  an `Allow: POST` header. Every valid reservation in this phase
+  deterministically succeeds — there is no real stock, so there is no
+  out-of-stock behavior yet.
 
 The HTTP server uses explicit `ReadHeaderTimeout`/`ReadTimeout`/
 `WriteTimeout`/`IdleTimeout` and shuts down gracefully on `SIGTERM`/`SIGINT`.

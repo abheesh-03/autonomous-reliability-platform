@@ -7,7 +7,7 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 1B.1, the repository contains foundational scaffolding, a
+As of Phase 1B.2, the repository contains foundational scaffolding, a
 running infrastructure dependency, and four application service
 bootstraps. Conceptually, the current demo application shape is:
 
@@ -18,16 +18,16 @@ Client
   |
   +--> payment-service       :8081  (POST /payments/authorize — simulated)
   |
-  +--> inventory-service     :8082
+  +--> inventory-service     :8082  (POST /inventory/reservations — simulated)
   |
   +--> notification-service  :8083
 ```
 
-`checkout-service`, `inventory-service`, and `notification-service`
-remain standalone health-only bootstraps. `payment-service` additionally
-has one simulated business endpoint (see below). There are still no
-arrows between the application services, and none of them talks to
-PostgreSQL, which exists alongside them as a separate,
+`checkout-service` and `notification-service` remain standalone
+health-only bootstraps. `payment-service` and `inventory-service` each
+additionally have one simulated business endpoint (see below). There
+are still no arrows between the application services, and none of them
+talks to PostgreSQL, which exists alongside them as a separate,
 currently-unused infrastructure dependency.
 
 Full inventory:
@@ -104,8 +104,16 @@ Full inventory:
   - Application bootstrap with graceful shutdown (`SIGTERM`/`SIGINT`)
   - `GET /health` — a small typed JSON health response (other methods
     on `/health` return HTTP 405)
+  - `POST /inventory/reservations` — a **simulated** inventory
+    reservation: strictly validates `checkout_id`/`sku`/`quantity`
+    (rejecting unknown fields and malformed JSON), generates a
+    `reservation_id` (UUID v4 via `crypto/rand`, no external UUID
+    dependency), and always returns `status: "RESERVED"`. Not backed by
+    a database or real stock; other methods on this path return HTTP 405
+    with `Allow: POST`.
   - An `http.Server` with explicit read/write/idle timeouts
-  - Automated tests (`go test`, using `net/http/httptest`)
+  - Automated tests (`go test`, using `net/http/httptest`, covering both
+    endpoints and the reservation/UUID business logic directly)
   - A multi-stage Dockerfile (`golang:1.27` builder running
     `gofmt`/`go vet`/`go test` → `distroless/static-debian12:nonroot`
     runtime) producing a runnable, non-root container image
@@ -114,8 +122,11 @@ Full inventory:
     has no shell or curl/wget)
 
   **Not implemented in this service:**
-  - Any actual inventory tracking, reservation, or business logic
-  - Checkout integration
+  - Real stock levels, stock decrementing/restoration, or out-of-stock
+    behavior (every valid reservation currently succeeds deterministically)
+  - Persistence of reservations (nothing is stored; identical requests
+    produce different `reservation_id`s each time)
+  - Checkout integration (Checkout Service does not call this endpoint yet)
   - Payment integration
   - Database access of any kind
   - Telemetry / observability
@@ -202,8 +213,10 @@ and (eventually) remediates against, giving the agent a realistic
 distributed system to investigate rather than a synthetic one. Four
 services — `checkout-service`, `payment-service`, `inventory-service`,
 and `notification-service` — now exist as bootstraps (see Current
-Implementation above); `payment-service` has one simulated business
-endpoint, the others remain health-only, and they do not call each other.
+Implementation above); `payment-service` and `inventory-service` each
+have one simulated business endpoint, `checkout-service` and
+`notification-service` remain health-only, and they do not call each
+other.
 
 ### Observability
 - **OpenTelemetry** for traces, metrics, and logs emitted by the demo

@@ -7,13 +7,15 @@ import (
 	"github.com/abheesh-03/autonomous-reliability-platform/services/inventory-service/internal/api"
 )
 
-// New builds an http.Server with only the /health route registered and
+// New builds an http.Server with the service's routes registered and
 // production-oriented timeouts. Using Go's method-specific ServeMux
-// pattern ("GET /health") means any other HTTP method on that path is
-// automatically rejected with 405, with no extra handler logic needed.
+// patterns (e.g. "GET /health") means any other HTTP method on that
+// path is automatically rejected with 405 (with a correct Allow
+// header), with no extra handler logic needed.
 func New(addr string) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", api.HealthHandler)
+	mux.HandleFunc("POST /inventory/reservations", api.ReservationsHandler)
 
 	return &http.Server{
 		Addr:              addr,
