@@ -307,6 +307,57 @@ jobs:
           echo "$datasources"
           echo "$datasources" | jq -e '[.[] | select(.type == "prometheus" and .url == "http://prometheus:9090")] | length > 0'
 
+      # The OTel Java agent's metric export interval and Prometheus's own
+      # scrape cycle are both asynchronous, so this is retried rather than
+      # checked once immediately after the smoke test above.
+      - name: Verify checkout-service application metrics reach Prometheus
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            if server_body="$(curl -fsS -G 'http://localhost:9090/api/v1/query' \
+                  --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="checkout-service",http_route="/checkouts"}')" \
+                && echo "$server_body" | jq -e '.data.result | length > 0' >/dev/null 2>&1 \
+                && client_body="$(curl -fsS -G 'http://localhost:9090/api/v1/query' \
+                  --data-urlencode 'query=count by (server_address) (http_client_request_duration_seconds_count{service_name="checkout-service"})')" \
+                && echo "$client_body" | jq -e '
+                    ([.data.result[].metric.server_address] | unique | sort) ==
+                    ["inventory-service", "notification-service", "payment-service"]
+                  ' >/dev/null 2>&1
+            then
+              echo "$server_body"
+              echo "$client_body"
+              exit 0
+            fi
+            echo "Attempt $i/$attempts: checkout-service HTTP server/client metrics not in Prometheus yet"
+            sleep 3
+          done
+          echo "checkout-service application metrics (HTTP server + HTTP client) never appeared in Prometheus" >&2
+          exit 1
+
+      # There is no trace backend yet (Phase 2A.2); traces are verified via
+      # the Collector's debug exporter output in its own container logs.
+      # Retried because the batch span processor's export delay is async.
+      - name: Verify checkout-service trace data reaches the Collector
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            if logs="$(docker compose logs otel-collector 2>&1)" \
+                && grep -qF 'service.name: Str(checkout-service)' <<<"$logs" \
+                && grep -qF 'Name           : POST /checkouts' <<<"$logs" \
+                && grep -qF 'Kind           : Server' <<<"$logs" \
+                && grep -qF 'Kind           : Client' <<<"$logs" \
+                && grep -qF 'url.full: Str(http://payment-service:8081/payments/authorize)' <<<"$logs" \
+                && grep -qF 'url.full: Str(http://inventory-service:8082/inventory/reservations)' <<<"$logs" \
+                && grep -qF 'url.full: Str(http://notification-service:8083/notifications)' <<<"$logs"
+            then
+              exit 0
+            fi
+            echo "Attempt $i/$attempts: checkout-service trace evidence not in Collector logs yet"
+            sleep 3
+          done
+          echo "checkout-service trace evidence (server span + 3 downstream client spans) never appeared in Collector logs" >&2
+          exit 1
+
       - name: Show service logs
         if: always()
         run: |

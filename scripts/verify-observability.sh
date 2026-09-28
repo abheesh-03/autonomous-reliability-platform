@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 #
-# verify-observability.sh — Bundled Phase 2A.1 verification.
+# verify-observability.sh — Bundled Phase 2A.1/2A.2 verification.
 #
 # Starts the full Docker Compose environment, waits for every
 # application and observability service to become healthy (with a
 # documented exception for otel-collector, whose official image has no
 # shell/wget/curl and therefore no Docker-level healthcheck), verifies
 # Prometheus's scrape targets and Grafana's provisioned datasource,
-# re-runs the POST /checkouts regression check, then always tears the
-# environment down (without deleting volumes) and confirms the named
-# volumes still exist.
+# re-runs the POST /checkouts regression check, then (Phase 2A.2) checks
+# that checkout-service's OTel Java agent telemetry actually reached
+# Prometheus (application metrics) and the Collector (trace spans),
+# then always tears the environment down (without deleting volumes) and
+# confirms the named volumes still exist.
 #
 # Exits non-zero immediately on the first failed check.
 
@@ -184,9 +186,69 @@ echo "$checkout_body" | jq -e '
 echo "  POST /checkouts OK"
 
 # --------------------------------------------------------------------
-# G. Container/log sanity
+# G. Observability: checkout-service application metrics in Prometheus
 # --------------------------------------------------------------------
-section "G. Container/log sanity"
+section "G. Observability: checkout-service application metrics in Prometheus"
+
+echo "-- waiting for checkout-service metrics to reach Prometheus (the OTel"
+echo "   Java agent's metric export interval and Prometheus's own scrape"
+echo "   cycle are both asynchronous) --"
+
+checkout_metrics_ok=false
+for i in $(seq 1 20); do
+  if server_body="$(curl -fsS -G 'http://127.0.0.1:9090/api/v1/query' \
+        --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="checkout-service",http_route="/checkouts"}' 2>/dev/null)" \
+      && echo "$server_body" | jq -e '.data.result | length > 0' >/dev/null 2>&1 \
+      && client_body="$(curl -fsS -G 'http://127.0.0.1:9090/api/v1/query' \
+        --data-urlencode 'query=count by (server_address) (http_client_request_duration_seconds_count{service_name="checkout-service"})' 2>/dev/null)" \
+      && echo "$client_body" | jq -e '
+          ([.data.result[].metric.server_address] | unique | sort) ==
+          ["inventory-service", "notification-service", "payment-service"]
+        ' >/dev/null 2>&1
+  then
+    checkout_metrics_ok=true
+    break
+  fi
+  echo "  attempt $i/20: checkout-service HTTP server/client metrics not in Prometheus yet"
+  sleep 3
+done
+[ "$checkout_metrics_ok" = true ] || fail "checkout-service application metrics (HTTP server + HTTP client) never appeared in Prometheus"
+echo "  checkout-service HTTP server metrics present (http_server_request_duration_seconds_count, service_name=checkout-service, http_route=/checkouts)"
+echo "  checkout-service HTTP client metrics present for all 3 downstream calls (payment-service, inventory-service, notification-service)"
+
+# --------------------------------------------------------------------
+# H. Observability: checkout-service trace evidence in Collector logs
+# --------------------------------------------------------------------
+section "H. Observability: checkout-service trace evidence in Collector logs"
+
+echo "-- Phase 2A.2 has no trace backend yet; traces are verified via the"
+echo "   Collector's debug exporter output in its own container logs --"
+
+trace_evidence_ok=false
+for i in $(seq 1 20); do
+  if logs="$(docker compose logs otel-collector 2>&1)" \
+      && grep -qF 'service.name: Str(checkout-service)' <<<"$logs" \
+      && grep -qF 'Name           : POST /checkouts' <<<"$logs" \
+      && grep -qF 'Kind           : Server' <<<"$logs" \
+      && grep -qF 'Kind           : Client' <<<"$logs" \
+      && grep -qF 'url.full: Str(http://payment-service:8081/payments/authorize)' <<<"$logs" \
+      && grep -qF 'url.full: Str(http://inventory-service:8082/inventory/reservations)' <<<"$logs" \
+      && grep -qF 'url.full: Str(http://notification-service:8083/notifications)' <<<"$logs"
+  then
+    trace_evidence_ok=true
+    break
+  fi
+  echo "  attempt $i/20: checkout-service trace evidence not in Collector logs yet"
+  sleep 3
+done
+[ "$trace_evidence_ok" = true ] || fail "checkout-service trace evidence (server span + 3 downstream client spans) never appeared in Collector logs"
+echo "  checkout-service SERVER span 'POST /checkouts' present in Collector logs"
+echo "  CLIENT spans present for all 3 downstream calls (payment-service, inventory-service, notification-service)"
+
+# --------------------------------------------------------------------
+# I. Container/log sanity
+# --------------------------------------------------------------------
+section "I. Container/log sanity"
 
 docker compose ps
 
@@ -217,9 +279,9 @@ echo "-- grafana logs (last 50 lines) --"
 docker compose logs --tail=50 grafana
 
 # --------------------------------------------------------------------
-# H. Persistence after cleanup
+# J. Persistence after cleanup
 # --------------------------------------------------------------------
-section "H. Persistence after cleanup"
+section "J. Persistence after cleanup"
 
 echo "-- docker compose down (preserving volumes) --"
 docker compose down
@@ -237,4 +299,4 @@ do
 done
 
 section "SUCCESS"
-echo "Phase 2A.1 observability verification passed."
+echo "Phase 2A.1/2A.2 observability verification passed."

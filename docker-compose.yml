@@ -59,6 +59,24 @@ services:
       CHECKOUT_PAYMENT_BASE_URL: http://payment-service:8081
       CHECKOUT_INVENTORY_BASE_URL: http://inventory-service:8082
       CHECKOUT_NOTIFICATION_BASE_URL: http://notification-service:8083
+      # OpenTelemetry Java agent (Phase 2A.2) — attached via
+      # JAVA_TOOL_OPTIONS rather than baked into the image's ENTRYPOINT,
+      # so the same image still runs with no telemetry when launched
+      # outside this Compose stack. checkout-service is the only
+      # instrumented service so far; payment/inventory/notification are
+      # not instrumented in this phase.
+      JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
+      OTEL_SERVICE_NAME: checkout-service
+      OTEL_RESOURCE_ATTRIBUTES: "service.version=0.1.0,deployment.environment.name=local"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_LOGS_EXPORTER: none
+      OTEL_PROPAGATORS: tracecontext,baggage
+      # Short export intervals for deterministic local verification.
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      OTEL_BSP_SCHEDULE_DELAY: "1000"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
       interval: 5s

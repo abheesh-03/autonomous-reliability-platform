@@ -1,11 +1,14 @@
 # OpenTelemetry Collector configuration for local development.
 #
-# Phase 2A.1 scope: infrastructure bootstrap only. No application
-# service sends telemetry here yet. The OTLP receiver and Prometheus
-# exporter pipeline below are wired up and ready for that, but carry no
-# data until a later phase instruments an application service. Until
-# then, the Collector's own internal ("self") telemetry on port 8888 is
-# what proves this observability path is alive end-to-end.
+# Phase 2A.1 scope: infrastructure bootstrap. Phase 2A.2 adds real
+# telemetry from checkout-service — the only instrumented application
+# service so far (payment/inventory/notification remain uninstrumented).
+#
+# Traces go to the "debug" exporter only, for Phase 2A.2. There is
+# intentionally no trace backend (Tempo/Jaeger/etc.) yet — that belongs
+# to a later phase. Metrics are re-exposed in Prometheus format and
+# scraped by Prometheus. The Collector's own internal ("self") telemetry
+# on port 8888 is unaffected by any of this.
 
 receivers:
   otlp:
@@ -19,11 +22,19 @@ processors:
   batch: {}
 
 exporters:
-  # Re-exposes any telemetry received over OTLP in Prometheus format.
-  # Empty today (no service sends OTLP telemetry yet) but ready for
-  # future application instrumentation.
+  # Re-exposes OTLP metrics in Prometheus format. resource_to_telemetry_conversion
+  # is the current (non-deprecated) mechanism for turning OTel resource
+  # attributes — e.g. service.name — into Prometheus labels (service_name),
+  # since Prometheus has no native resource concept of its own.
   prometheus:
     endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+  # Phase 2A.2 only: prints received traces to Collector logs so they
+  # can be inspected without a trace backend, which is intentionally not
+  # added yet. Not used for metrics.
+  debug:
+    verbosity: detailed
 
 extensions:
   health_check:
@@ -45,3 +56,7 @@ service:
       receivers: [otlp]
       processors: [batch]
       exporters: [prometheus]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

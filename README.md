@@ -17,14 +17,16 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 2A.1 — Observability Infrastructure Bootstrap**. An OpenTelemetry
-Collector, Prometheus, and Grafana now run via Docker Compose, but
-**no application service is instrumented yet** — none sends telemetry
-to the Collector or exposes a metrics endpoint. `checkout-service`
-still synchronously orchestrates `payment-service`, `inventory-service`,
-and `notification-service` via `POST /checkouts` (Phase 1B.4); none of
-the four application services connect to PostgreSQL. No AI functionality
-exists.
+**Phase 2A.2 — checkout-service OpenTelemetry Instrumentation**. An
+OpenTelemetry Collector, Prometheus, and Grafana run via Docker Compose
+(Phase 2A.1), and `checkout-service` is now instrumented with the
+OpenTelemetry Java auto-instrumentation agent (Phase 2A.2) — it exports
+HTTP server/client metrics and traces via OTLP. **`payment-service`,
+`inventory-service`, and `notification-service` are still not
+instrumented.** `checkout-service` still synchronously orchestrates
+them via `POST /checkouts` (Phase 1B.4), with no change to that
+business logic; none of the four application services connect to
+PostgreSQL. No AI functionality exists.
 
 ## Problem this project will eventually solve
 
@@ -48,10 +50,14 @@ The following components are **planned** and do not exist yet:
 - A Go infrastructure tool gateway for safely executing remediation actions
 - Demo commerce microservices as a realistic monitored target
 - Application-level observability: metrics/traces/logs emitted by the
-  demo services, distributed trace correlation, dashboards, and alerts
-  (the OTel Collector / Prometheus / Grafana infrastructure itself now
-  exists — see [Observability Infrastructure](#observability-infrastructure) below — but no
-  application service is instrumented yet)
+  demo services, distributed trace correlation, a real trace backend,
+  dashboards, and alerts (the OTel Collector / Prometheus / Grafana
+  infrastructure exists, and `checkout-service` now exports metrics and
+  traces to it — see
+  [Observability Infrastructure](#observability-infrastructure) below —
+  but `payment-service`, `inventory-service`, and `notification-service`
+  are not instrumented yet, there is no centralized trace backend or
+  application log pipeline, and no dashboards or alerts exist)
 - Kafka or Redpanda for event streaming
 - Kubernetes as the deployment target, provisioned via Terraform on AWS
 
@@ -92,14 +98,18 @@ repository — and returns a combined result. None of the four
 application services connect to PostgreSQL yet.
 
 An observability stack — an OpenTelemetry Collector, Prometheus, and
-Grafana — now also runs via Docker Compose (see
+Grafana — also runs via Docker Compose (see
 [Observability Infrastructure](#observability-infrastructure) below).
-**No application service sends it any telemetry yet** — none has an
-OpenTelemetry SDK, none exposes a metrics endpoint, and none has been
-modified in any way for this. The stack currently only proves its own
-internal path is alive (Prometheus scraping itself and the Collector's
-self-telemetry, with Grafana able to query Prometheus). No AI
-integration has been added yet.
+`checkout-service` is instrumented with the OpenTelemetry Java
+auto-instrumentation agent (pinned `v2.31.1`) and exports HTTP server
+metrics for `POST /checkouts`, HTTP client metrics for its three
+downstream calls, JVM runtime metrics, and trace spans (SERVER +
+3 CLIENT spans sharing one trace) via OTLP to the Collector.
+`payment-service`, `inventory-service`, and `notification-service`
+remain **not instrumented** — no OpenTelemetry SDK, no metrics
+endpoint, no code changes. Traces currently have no backend (the
+Collector's `debug` exporter prints them to its own logs; a real trace
+backend is a future phase). No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -420,35 +430,37 @@ avoided, the Compose healthcheck instead uses Node's built-in `fetch`
 ## Observability Infrastructure
 
 `observability/` contains configuration for a local OpenTelemetry
-Collector, Prometheus, and Grafana, all running via Docker Compose. This
-is **infrastructure only** — it is not yet fed by any application
-service. No application has an OpenTelemetry SDK, sends OTLP telemetry,
-or exposes a metrics endpoint; none was modified in any way for this
-phase.
+Collector, Prometheus, and Grafana, all running via Docker Compose
+(Phase 2A.1). As of Phase 2A.2, `checkout-service` is instrumented and
+feeds this stack real telemetry; `payment-service`, `inventory-service`,
+and `notification-service` are **not** instrumented and send nothing.
 
 ```
-(future) app services --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
+checkout-service --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
+checkout-service --OTLP (traces)--> otel-collector --debug exporter--> collector logs
+(payment/inventory/notification-service: not instrumented, send nothing)
 ```
-
-Today, only the Collector's own internal ("self") telemetry flows
-through this path — that's what proves it's alive end-to-end before any
-application is instrumented:
 
 - **`otel-collector`** (`otel/opentelemetry-collector-contrib`) — an OTLP
-  receiver (gRPC `:4317`, HTTP `:4318`) → `batch` processor → Prometheus
-  exporter (`:8889`) pipeline, ready for future application telemetry
-  but empty today. Its own internal metrics are exposed separately on
-  `:8888`. A `health_check` extension is exposed on `:13133`, but it
-  does **not** back a Docker Compose healthcheck: the official Contrib
-  image is a single static binary with no shell, `wget`, or `curl`, so
-  no `healthcheck:` block can be defined for it without modifying the
-  image. This is an intentional exception — `docker compose ps` shows it
-  as `running` with no health status, and its liveness is instead
-  verified functionally: a direct request to `:13133/` succeeds, and
-  more meaningfully, Prometheus reports its scrape target as `up`.
+  receiver (gRPC `:4317`, HTTP `:4318`) → `batch` processor, fanning out
+  to two pipelines: metrics → Prometheus exporter (`:8889`, with
+  `resource_to_telemetry_conversion` enabled so OTel resource attributes
+  like `service.name` become Prometheus labels), and traces → `debug`
+  exporter (prints detailed span data to the Collector's own container
+  logs — there is intentionally no trace backend yet). Its own internal
+  metrics are exposed separately on `:8888`. A `health_check` extension
+  is exposed on `:13133`, but it does **not** back a Docker Compose
+  healthcheck: the official Contrib image is a single static binary with
+  no shell, `wget`, or `curl`, so no `healthcheck:` block can be defined
+  for it without modifying the image. This is an intentional exception —
+  `docker compose ps` shows it as `running` with no health status, and
+  its liveness is instead verified functionally: a direct request to
+  `:13133/` succeeds, and more meaningfully, Prometheus reports its
+  scrape target as `up`.
 - **`prometheus`** — scrapes itself, the Collector's self-telemetry
-  (`:8888`), and the (currently empty) Collector telemetry-relay
-  endpoint (`:8889`), on a persistent named volume.
+  (`:8888`), and the Collector's application-telemetry-relay endpoint
+  (`:8889`), which now carries real `checkout-service` metrics, on a
+  persistent named volume.
 - **`grafana`** — Prometheus is auto-provisioned as its default
   datasource (`observability/grafana/provisioning/datasources/datasource.yml`,
   resolving `http://prometheus:9090` by Compose service name) so no
@@ -464,6 +476,37 @@ they are not reachable from other machines on the network even in local
 development. This differs from the four Phase 1 application services and
 PostgreSQL, whose ports remain published on all interfaces.
 
+### checkout-service instrumentation (Phase 2A.2)
+
+`checkout-service` is instrumented using the **OpenTelemetry Java
+auto-instrumentation agent**, pinned to `v2.31.1` (not the Spring Boot
+starter, and not `latest`). The agent JAR is fetched in the runtime
+stage of `services/checkout-service/Dockerfile` via
+`ADD --chmod=644 --checksum=sha256:...` (a pinned checksum, no
+curl/wget needed in the image) to `/opt/opentelemetry-javaagent.jar`,
+world-readable so the image's non-root `app` user can load it. It is
+**not** referenced by the Dockerfile's `ENTRYPOINT`, so the image still
+runs with no telemetry when launched standalone outside this Compose
+stack; Docker Compose attaches it only for `checkout-service` via
+`JAVA_TOOL_OPTIONS=-javaagent:/opt/opentelemetry-javaagent.jar`, along
+with `OTEL_*` environment variables configuring OTLP export over
+`http/protobuf` to `http://otel-collector:4318`, `tracecontext,baggage`
+propagation, `OTEL_LOGS_EXPORTER=none` (log export is explicitly
+deferred), and short export intervals (5s metrics, 1s span batch delay)
+for fast local feedback. `payment-service`, `inventory-service`, and
+`notification-service` are not instrumented and have not been modified.
+
+Auto-instrumentation captures, with no manual/custom spans or metrics
+added: a SERVER span and HTTP server metrics
+(`http_server_request_duration_seconds_*`) for `POST /checkouts`; CLIENT
+spans and HTTP client metrics (`http_client_request_duration_seconds_*`)
+for each of the three downstream calls made via Spring `RestClient`
+(to `payment-service`, `inventory-service`, `notification-service`);
+and JVM/runtime metrics (`jvm_*`). All four spans generated by a single
+`POST /checkouts` request share one trace ID, with each downstream
+CLIENT span's parent ID matching the SERVER span's own ID — verified
+against real Collector debug-exporter output, not assumed.
+
 **Run it through Docker Compose**, alongside the four application services and PostgreSQL:
 
 ```bash
@@ -475,18 +518,26 @@ make db-down
 ```
 
 **Bundled verification:** `make verify-observability` (or
-`scripts/verify-observability.sh`) runs the full Phase 2A.1 verification
-path in one deterministic script — starts Compose, waits for every
-service's health (with the `otel-collector` exception above),
+`scripts/verify-observability.sh`) runs the full Phase 2A.1/2A.2
+verification path in one deterministic script — starts Compose, waits
+for every service's health (with the `otel-collector` exception above),
 checks Prometheus targets and the Grafana datasource, re-runs the
-`POST /checkouts` regression check, then always tears the environment
+`POST /checkouts` regression check, then (Phase 2A.2) verifies
+`checkout-service` HTTP server and client metrics actually reached
+Prometheus (bounded retry, since the agent's export interval and
+Prometheus's scrape cycle are both async) and that trace evidence for
+the SERVER span and all three downstream CLIENT spans appears in the
+Collector's own logs (bounded retry), then always tears the environment
 down (without deleting volumes) and confirms the three named volumes
 still exist.
 
-**Not implemented in this phase:** any application-level metrics, traces,
-or logs; distributed trace correlation; dashboards beyond the minimal
-datasource-connectivity check; alerting rules; and any consumption of
-telemetry by an agent. Those are deliberately deferred to later phases.
+**Not implemented yet:** instrumentation of `payment-service`,
+`inventory-service`, or `notification-service`; distributed trace
+correlation across those services; a real trace backend (traces are
+only visible via the Collector's `debug` exporter logs); an application
+log pipeline; dashboards beyond the minimal datasource-connectivity
+check; alerting rules; and any consumption of telemetry by an agent.
+Those are deliberately deferred to later phases.
 
 ## Continuous Integration
 
@@ -505,13 +556,20 @@ application services start and reach a healthy state (bounded retry
 loops, not assumed), a basic SQL smoke test, HTTP smoke tests against
 all four application services' health endpoints, an end-to-end smoke
 test that calls `POST /checkouts` and verifies the real orchestrated
-response over the actual Compose network, and — new in this phase —
-that Prometheus and Grafana reach a healthy state, that Prometheus
-reports both itself and the `otel-collector` scrape target as `up`
-(bounded retry loop, since Prometheus needs a scrape cycle after
-startup), and that Grafana's health API and provisioned Prometheus
-datasource are reachable — then always tears the environment down
-(without deleting volumes).
+response over the actual Compose network, that Prometheus and Grafana
+reach a healthy state, that Prometheus reports all three scrape targets
+— `prometheus` (self), `otel-collector` (self-telemetry), and
+`otel-collector-app-metrics` (the application-telemetry relay) — as
+`up` (bounded retry loop, since Prometheus needs a scrape cycle after
+startup), that Grafana's health
+API and provisioned Prometheus datasource are reachable, and — new in
+this phase — that `checkout-service`'s HTTP server and client metrics
+actually reach Prometheus and that trace evidence (SERVER span plus all
+three downstream CLIENT spans) appears in the Collector's logs, both
+via bounded retry loops (the OTel Java agent's export interval,
+Prometheus's scrape cycle, and the Collector's batch export are all
+asynchronous) — then always tears the environment down (without
+deleting volumes).
 
 The repository has a GitHub remote
 (`abheesh-03/autonomous-reliability-platform`). The workflow version
@@ -520,12 +578,16 @@ covering repository baseline checks, all four application services
 all four services' health/smoke tests), and the `POST /checkouts`
 end-to-end orchestration smoke test has been verified running
 successfully on a GitHub-hosted runner (CI run `36350946497`, for commit
-`1ef34e6`). The workflow has since been updated further with this
-phase's observability steps (Prometheus/Grafana health waits, scrape-
-target verification, and datasource check) and has been locally
-validated end-to-end by reproducing its steps against the real Compose
-network, but has **not yet run on GitHub Actions in this updated
-form** — that will only be true once it runs there after a push.
+`1ef34e6`). The workflow has since been updated further, first with
+Phase 2A.1's observability steps (Prometheus/Grafana health waits,
+scrape-target verification, and datasource check), then with Phase
+2A.2's `checkout-service` telemetry checks (Prometheus metrics,
+Collector trace evidence). Both sets of additions have been locally
+validated end-to-end by reproducing the workflow's steps against the
+real Compose network (via `make verify-observability`, which covers
+equivalent ground), but the updated workflow has **not yet run on
+GitHub Actions in this form** — that will only be true once it runs
+there after a push.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -870,10 +932,110 @@ problem today.
   while all three named volumes (`postgres_data`, `prometheus_data`,
   `grafana_data`) remain present afterward.
 - `.github/workflows/ci.yml` extended with health waits for Prometheus
-  and Grafana, a bounded-retry check that Prometheus reports itself and
-  the `otel-collector` target as `up` (necessary since Prometheus needs
-  a scrape cycle after startup), and a Grafana health/datasource check —
+  and Grafana, a bounded-retry check that Prometheus reports all three
+  scrape targets — `prometheus` (self), `otel-collector` (self-telemetry),
+  and `otel-collector-app-metrics` (the application-telemetry relay) —
+  as `up` (necessary since Prometheus needs a scrape cycle after
+  startup), and a Grafana health/datasource check —
   every exact `jq` expression added was tested against real captured
   responses before being added. Locally reproduced the full updated CI
   path end-to-end — **not yet verified running on GitHub Actions in
   this updated form.**
+
+### Phase 2A.2 — checkout-service OpenTelemetry instrumentation
+
+- `services/checkout-service/Dockerfile` updated: the pinned
+  OpenTelemetry Java agent (`v2.31.1`, official GitHub release asset)
+  is fetched in the runtime stage via
+  `ADD --chmod=644 --checksum=sha256:bbf83c15... /opt/opentelemetry-javaagent.jar`
+  — no curl/wget added to the image, checksum verified against a
+  locally downloaded copy of the same release asset before use. Caught
+  and fixed a real bug during verification: the first version (without
+  `--chmod`) left the JAR `-rw-------` owned by `root`, unreadable by
+  the image's non-root `app` user — confirmed via
+  `docker run --entrypoint sh ... sha256sum` failing with "Permission
+  denied" before the fix, and succeeding after it. The agent is present
+  in the image but not referenced by `ENTRYPOINT`, so the image still
+  runs with no telemetry standalone.
+- `docker-compose.yml`'s `checkout-service` service (only) updated with
+  `JAVA_TOOL_OPTIONS=-javaagent:/opt/opentelemetry-javaagent.jar` and
+  `OTEL_*` variables (service name, resource attributes, OTLP endpoint
+  `http://otel-collector:4318` over `http/protobuf`, `tracecontext,baggage`
+  propagation, `OTEL_LOGS_EXPORTER=none`, 5s metric export interval, 1s
+  span batch delay). No other service was touched; no new host ports
+  were added.
+- `observability/otel-collector/config.yaml` updated: `prometheus`
+  exporter gained `resource_to_telemetry_conversion: enabled: true`
+  (confirmed this is what makes `service.name` etc. appear as
+  Prometheus labels); a new `debug` exporter (`verbosity: detailed`)
+  and `traces` pipeline (`otlp` → `batch` → `debug`) were added,
+  separate from the existing `metrics` pipeline. Collector self-telemetry
+  on `:8888` untouched.
+- Verified checkout-service's existing test suite: `36` tests, `0`
+  failures, via `./mvnw -B test` on Java 21 (Docker), confirming zero
+  business-logic regression from the Dockerfile/Compose changes.
+- Started the full 8-container Compose stack, confirmed via container
+  logs that the agent attaches cleanly (`Picked up JAVA_TOOL_OPTIONS`,
+  `opentelemetry-javaagent - version: 2.31.1`, no exporter connection
+  errors), and that `POST /checkouts` still returns the unchanged
+  `COMPLETED` orchestration response.
+- Inspected real Collector debug-exporter output for a live
+  `POST /checkouts` request (not assumed): `checkout-service` produced
+  one SERVER span (`Name: POST /checkouts`, `Kind: Server`,
+  `http.route: /checkouts`) and three CLIENT spans (`Kind: Client`, one
+  each with `url.full: http://payment-service:8081/payments/authorize`,
+  `.../inventory-service:8082/inventory/reservations`,
+  `.../notification-service:8083/notifications`) — all four spans
+  shared one Trace ID, and each CLIENT span's Parent ID matched the
+  SERVER span's own ID (not previously guaranteed — Spring's newer
+  `RestClient` was not known in advance to be covered by this agent
+  version, and turned out to be). This confirms the Java agent injects
+  W3C trace context on the outgoing `RestClient` calls; it does **not**
+  prove end-to-end propagation across the whole
+  checkout → payment → inventory → notification chain, since
+  `payment-service`, `inventory-service`, and `notification-service`
+  are uninstrumented and cannot be observed continuing (or even
+  receiving) that trace context until a later phase.
+- Queried Prometheus directly (not assumed) and confirmed the real
+  metric/label names actually emitted: series labeled
+  `service_name="checkout-service"` exist for
+  `http_server_request_duration_seconds_{count,sum,bucket}` (with
+  `http_route="/checkouts"`) and
+  `http_client_request_duration_seconds_{count,sum,bucket}` (with
+  distinct `server_address` values `payment-service`,
+  `inventory-service`, `notification-service`), plus `jvm_*` runtime
+  metrics — no custom business metrics were added. Resource labels
+  observed include `service_name`, `service_version="0.1.0"`,
+  `deployment_environment_name="local"`, `telemetry_distro_version="2.31.1"`.
+- `scripts/verify-observability.sh` extended (not replaced) with two
+  new sections after the existing `POST /checkouts` regression check:
+  a bounded-retry Prometheus query for checkout-service HTTP
+  server+client metrics, and a bounded-retry check of Collector logs
+  for the SERVER span and all three downstream CLIENT spans' evidence
+  strings. Hit and fixed a real bug while adding the trace-evidence
+  check: `echo "$logs" | grep -qF ...` under `set -o pipefail` produced
+  spurious `Broken pipe` failures, because `grep -q` exits as soon as
+  it finds a match, sending `echo` a `SIGPIPE` that `pipefail` then
+  reports as a failed pipeline — fixed by using `grep -qF '...' <<<"$logs"`
+  (a here-string, no pipe) instead. The full `make verify-observability`
+  run passed end-to-end after the fix, including both new sections and
+  the pre-existing persistence check (all three named volumes still
+  present after teardown).
+- `.github/workflows/ci.yml` extended with two new steps after the
+  existing Grafana datasource check: a bounded-retry Prometheus query
+  for checkout-service metrics, and a bounded-retry Collector-log check
+  for trace evidence — both using the same safe `if cmd1 && cmd2; then`
+  control-flow pattern (rather than a bare assignment) so an
+  expected-to-fail early attempt cannot abort the step under GitHub
+  Actions' default `bash -e`. Locally reproduced equivalent verification
+  via `make verify-observability` — **not yet verified running on
+  GitHub Actions in this updated form.**
+- **Limitation, honestly reported, not worked around:** Phase 2A.2 has
+  no real trace backend — trace evidence is only visible via the
+  Collector's `debug` exporter logs, which is acceptable for this phase
+  per the task's own scope but means traces are not queryable or
+  persisted anywhere. `payment-service`, `inventory-service`, and
+  `notification-service` remain fully uninstrumented; propagation past
+  checkout-service's own CLIENT spans (i.e. whether those downstream
+  services would continue a received trace context) is unverified and
+  out of scope until they are instrumented in a later phase.

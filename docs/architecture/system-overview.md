@@ -7,30 +7,33 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 2A.1, the repository contains foundational scaffolding, a
+As of Phase 2A.2, the repository contains foundational scaffolding, a
 running infrastructure dependency, four application services with the
-**first real service-to-service workflow**, and a bootstrapped
-**observability infrastructure stack**. Conceptually, the current demo
-application shape is:
+**first real service-to-service workflow**, and an
+**observability infrastructure stack now instrumented for one of those
+four services**. Conceptually, the current demo application shape is:
 
 ```
 Client
   |
   v
-checkout-service :8080
+checkout-service :8080  --OTLP (metrics+traces)--> otel-collector
+  |                                                    |
+  +--> payment-service       :8081  (POST /payments/authorize — simulated, NOT instrumented)
   |
-  +--> payment-service       :8081  (POST /payments/authorize — simulated)
+  +--> inventory-service     :8082  (POST /inventory/reservations — simulated, NOT instrumented)
   |
-  +--> inventory-service     :8082  (POST /inventory/reservations — simulated)
-  |
-  +--> notification-service  :8083  (POST /notifications — simulated)
+  +--> notification-service  :8083  (POST /notifications — simulated, NOT instrumented)
 
-(future) app services --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
+otel-collector --Prometheus format (metrics)--> prometheus --> grafana
+otel-collector --debug exporter (traces)--> collector logs (no trace backend yet)
 ```
 
-The observability path (bottom row) exists and is provably alive
-end-to-end, but **no application service is instrumented yet** — the top
-and bottom rows are not connected to each other in this phase.
+`checkout-service` is instrumented with the OpenTelemetry Java
+auto-instrumentation agent and exports real metrics and traces to the
+Collector. `payment-service`, `inventory-service`, and
+`notification-service` remain **not instrumented** — they send no
+telemetry and were not modified.
 
 `checkout-service`'s `POST /checkouts` synchronously calls the other
 three services, in that exact order (payment, then inventory, then
@@ -93,6 +96,14 @@ Full inventory:
     (`MockRestServiceServer`), plus the existing health tests
   - A multi-stage Dockerfile producing a runnable, non-root container image
   - Docker Compose integration with its own healthcheck
+  - **(Phase 2A.2) OpenTelemetry instrumentation** via the pinned Java
+    auto-instrumentation agent (`v2.31.1`), attached only in Docker
+    Compose (`JAVA_TOOL_OPTIONS`, not baked into the image's
+    `ENTRYPOINT`): exports a SERVER span + HTTP server metrics for
+    `POST /checkouts`, CLIENT spans + HTTP client metrics for each of
+    the three downstream `RestClient` calls, and JVM runtime metrics,
+    via OTLP to the Collector. No custom business metrics or manual
+    spans were added — this is auto-instrumentation only.
 
   **Not implemented in this service:**
   - Rollback/compensation for an already-authorized payment or
@@ -102,7 +113,9 @@ Full inventory:
   - Idempotency (identical requests currently produce independent
     checkouts with different IDs)
   - Persistence of checkouts (nothing is stored; PostgreSQL is untouched)
-  - Distributed tracing / correlation IDs / observability
+  - Application log export (`OTEL_LOGS_EXPORTER=none`, deliberately
+    deferred) and a real trace backend (traces are only visible via the
+    Collector's `debug` exporter logs this phase)
   - Asynchronous messaging, queues, or event-driven communication
   - Agent functionality of any kind
 
@@ -220,23 +233,26 @@ Full inventory:
 
 - **Observability infrastructure** (`observability/`) — an OpenTelemetry
   Collector, Prometheus, and Grafana, all running via Docker Compose
-  (`otel-collector`, `prometheus`, `grafana`). This is **infrastructure
-  only**: it is not fed by any application service, and no application
-  service was modified in any way for this.
+  (`otel-collector`, `prometheus`, `grafana`). As of Phase 2A.2, this is
+  fed by `checkout-service` only; `payment-service`, `inventory-service`,
+  and `notification-service` were not modified and send no telemetry.
 
   **Implemented:**
   - `otel-collector` (`otel/opentelemetry-collector-contrib:0.161.0`):
-    an OTLP receiver (gRPC `:4317`, HTTP `:4318`) → `batch` processor →
-    Prometheus exporter (`:8889`) pipeline, wired up and ready for
-    future application telemetry but carrying no data today; a
+    an OTLP receiver (gRPC `:4317`, HTTP `:4318`) → `batch` processor,
+    fanning out to two pipelines — metrics → Prometheus exporter
+    (`:8889`, with `resource_to_telemetry_conversion` enabled so OTel
+    resource attributes like `service.name` become Prometheus labels),
+    and traces → `debug` exporter (detailed span output to the
+    Collector's own container logs; no trace backend yet); a
     `health_check` extension (`:13133`); and separate internal
-    ("self") telemetry on `:8888`, which is what's actually scraped
-    today. The official Contrib image has no shell/wget/curl, so it has
-    no Docker-level healthcheck; its liveness is proven instead by
-    Prometheus successfully scraping it.
+    ("self") telemetry on `:8888`. The official Contrib image has no
+    shell/wget/curl, so it has no Docker-level healthcheck; its
+    liveness is proven instead by Prometheus successfully scraping it.
   - `prometheus` (`prom/prometheus:v3.15.0`): scrapes itself, the
-    Collector's self-telemetry, and the (currently empty) Collector
-    telemetry-relay endpoint, on a persistent named volume
+    Collector's self-telemetry, and the Collector's telemetry-relay
+    endpoint — which now carries real `checkout-service` HTTP
+    server/client and JVM metrics — on a persistent named volume
     (`prometheus_data`), with a `wget`-based healthcheck.
   - `grafana` (`grafana/grafana-oss:13.0.2`): Prometheus auto-provisioned
     as its default datasource via
@@ -256,10 +272,17 @@ Full inventory:
   interfaces.
 
   **Not implemented:**
-  - Any application service sending OTLP telemetry or exposing a
-    metrics endpoint (none has an OpenTelemetry SDK; none was modified)
-  - Application-level metrics, traces, or logs of any kind
-  - Distributed trace correlation
+  - `payment-service`, `inventory-service`, or `notification-service`
+    sending OTLP telemetry or exposing a metrics endpoint (none has an
+    OpenTelemetry SDK; none was modified)
+  - A real trace backend (Tempo, Jaeger, etc.) — traces are only
+    visible via the Collector's `debug` exporter logs this phase
+  - Application log export (`OTEL_LOGS_EXPORTER=none` on
+    `checkout-service`, and no other service emits logs via OTel either)
+  - Distributed trace correlation across the checkout → payment →
+    inventory → notification call chain (checkout-service's own SERVER
+    span and 3 downstream CLIENT spans are correlated; the downstream
+    services themselves do not continue or emit any trace context)
   - Dashboards beyond the minimal datasource-connectivity path, or any
     alerting rules
   - Any consumption of telemetry by an agent
@@ -320,14 +343,24 @@ or call back into checkout-service.
 
 ### Observability
 **CURRENT:** An OpenTelemetry Collector, Prometheus, and Grafana all run
-via Docker Compose (see Current Implementation above) — infrastructure
-only, provably alive end-to-end via the Collector's own self-telemetry.
+via Docker Compose (see Current Implementation above). `checkout-service`
+is instrumented with the OpenTelemetry Java auto-instrumentation agent
+(pinned `v2.31.1`) and exports HTTP server/client metrics, JVM runtime
+metrics, and trace spans via OTLP — verified against real Prometheus
+queries and real Collector `debug`-exporter output, not assumed.
+`payment-service`, `inventory-service`, and `notification-service`
+remain uninstrumented. Traces have no backend yet (Collector `debug`
+exporter logs only); there is no application log pipeline, and no
+dashboards or alerting rules exist.
 
 **FUTURE (not yet implemented):**
-- Application services emitting traces, metrics, and logs (an
-  OpenTelemetry SDK in each service, sending OTLP to the Collector)
-- Distributed trace correlation across the checkout → payment →
-  inventory → notification call chain
+- Instrumenting `payment-service`, `inventory-service`, and
+  `notification-service` so telemetry, distributed trace correlation
+  across the checkout → payment → inventory → notification call chain
+  becomes possible end-to-end
+- A real trace backend (e.g. Tempo/Jaeger) to replace the temporary
+  `debug` exporter
+- An application log export pipeline
 - Meaningful Grafana dashboards and Prometheus alerting rules
 - Consumption of this telemetry by an agent for incident detection
 
