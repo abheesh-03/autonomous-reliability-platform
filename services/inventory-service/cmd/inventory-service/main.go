@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/abheesh-03/autonomous-reliability-platform/services/inventory-service/internal/server"
+	"github.com/abheesh-03/autonomous-reliability-platform/services/inventory-service/internal/telemetry"
 )
 
 const (
@@ -32,7 +33,35 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
+	// Telemetry is only ever initialized here, in the normal server
+	// path — never for the "healthcheck" subcommand above, which
+	// os.Exit()s before run() is even called. A setup failure fails
+	// startup clearly rather than running with partial telemetry.
+	shutdownTelemetry, err := telemetry.Setup(context.Background())
+	if err != nil {
+		return err
+	}
+
+	// Deferred (rather than called once near the end of the happy
+	// path) so telemetry is still flushed/closed on every exit from
+	// run() after Setup succeeds — including an unexpected
+	// ListenAndServe error or a failed srv.Shutdown — not just the
+	// clean shutdown path. Uses its own fresh context/timeout, not the
+	// HTTP server's shutdownCtx: if HTTP shutdown consumes most or all
+	// of its timeout, telemetry must still get an independent flush
+	// window.
+	defer func() {
+		telemetryShutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+
+		if err := shutdownTelemetry(telemetryShutdownCtx); err != nil {
+			runErr = errors.Join(runErr, err)
+			return
+		}
+		log.Println("shutdown complete")
+	}()
+
 	srv := server.New(listenAddr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -62,7 +91,7 @@ func run() error {
 		return err
 	}
 
-	log.Println("shutdown complete")
+	log.Println("HTTP server shutdown complete")
 	return nil
 }
 

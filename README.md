@@ -17,23 +17,28 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 2A.3 — payment-service OpenTelemetry Instrumentation +
-Distributed Trace Continuation**. An OpenTelemetry Collector,
+**Phase 2A.4 — inventory-service OpenTelemetry Instrumentation +
+Second Distributed Trace Branch**. An OpenTelemetry Collector,
 Prometheus, and Grafana run via Docker Compose (Phase 2A.1);
 `checkout-service` is instrumented with the OpenTelemetry Java
-auto-instrumentation agent (Phase 2A.2); and `payment-service` is now
+auto-instrumentation agent (Phase 2A.2); `payment-service` is
 instrumented with OpenTelemetry Python zero-code auto-instrumentation
-(Phase 2A.3). A real `POST /checkouts` request now proves genuine
-distributed trace continuation from checkout-service's own SERVER span,
-through its CLIENT span for the payment call, into payment-service's
-own SERVER span — same Trace ID, correct parent/child Span IDs,
-verified against real Collector output, not assumed. **`inventory-service`
-and `notification-service` are still not instrumented,** so this
-distributed-trace proof covers only the checkout → payment segment, not
-the full four-service chain. `checkout-service` still synchronously
-orchestrates all three downstream services via `POST /checkouts`
-(Phase 1B.4), with no change to any business logic; none of the four
-application services connect to PostgreSQL. No AI functionality exists.
+(Phase 2A.3); and `inventory-service` is now instrumented with manual
+OpenTelemetry Go SDK initialization plus `otelhttp` (Phase 2A.4). A
+real `POST /checkouts` request now proves ONE trace contains checkout's
+own SERVER span, with two independent, correctly-parented downstream
+branches: CLIENT → payment SERVER, and CLIENT → inventory SERVER (these
+two branches are siblings — payment and inventory are **not**
+parent/child of each other) — plus a CLIENT span toward
+notification-service in that same trace (no SERVER span yet, since that
+service isn't instrumented). Same Trace ID, correct parent/child Span
+IDs on both branches, verified against real Collector output, not
+assumed. **`notification-service` is still not instrumented,** so this
+is not yet a complete four-service distributed trace. `checkout-service`
+still synchronously orchestrates all three downstream services via
+`POST /checkouts` (Phase 1B.4), with no change to any business logic;
+none of the four application services connect to PostgreSQL. No AI
+functionality exists.
 
 ## Problem this project will eventually solve
 
@@ -60,14 +65,15 @@ The following components are **planned** and do not exist yet:
   demo services, full distributed trace correlation across the whole
   checkout → payment → inventory → notification chain, a real trace
   backend, dashboards, and alerts (the OTel Collector / Prometheus /
-  Grafana infrastructure exists, and `checkout-service` and
-  `payment-service` now export metrics and traces to it, with a
-  verified distributed trace for the checkout → payment segment — see
+  Grafana infrastructure exists, and `checkout-service`,
+  `payment-service`, and `inventory-service` now export metrics and
+  traces to it, with a verified distributed trace covering both the
+  checkout → payment and checkout → inventory branches — see
   [Observability Infrastructure](#observability-infrastructure) below —
-  but `inventory-service` and `notification-service` are not
-  instrumented yet, so the distributed trace does not yet cover the
-  full chain, there is no centralized trace backend or application log
-  pipeline, and no dashboards or alerts exist)
+  but `notification-service` is not instrumented yet, so the
+  distributed trace does not yet cover the full chain, there is no
+  centralized trace backend or application log pipeline, and no
+  dashboards or alerts exist)
 - Kafka or Redpanda for event streaming
 - Kubernetes as the deployment target, provisioned via Terraform on AWS
 
@@ -115,20 +121,24 @@ auto-instrumentation agent (pinned `v2.31.1`) and exports HTTP server
 metrics for `POST /checkouts`, HTTP client metrics for its three
 downstream calls, JVM runtime metrics, and trace spans (SERVER +
 3 CLIENT spans sharing one trace) via OTLP to the Collector.
-`payment-service` is now instrumented too (Phase 2A.3), using
-OpenTelemetry Python zero-code auto-instrumentation, and exports HTTP
-server metrics and a SERVER span for `POST /payments/authorize`. A real
-`POST /checkouts` request proves the checkout → payment call is a
-genuine distributed trace: checkout-service's CLIENT span and
-payment-service's SERVER span share one Trace ID, and the payment span's
-Parent Span ID equals the checkout CLIENT span's own Span ID — verified
-against real Collector output. `inventory-service` and
-`notification-service` remain **not instrumented** — no OpenTelemetry
-SDK, no metrics endpoint, no code changes — so only the checkout → payment
-segment of the chain is proven distributed, not the full four-service
-chain. Traces currently have no backend (the Collector's `debug`
-exporter prints them to its own logs; a real trace backend is a future
-phase). No AI integration has been added yet.
+`payment-service` is instrumented (Phase 2A.3) using OpenTelemetry
+Python zero-code auto-instrumentation, and `inventory-service` is now
+instrumented too (Phase 2A.4), using manual OpenTelemetry Go SDK
+initialization plus `otelhttp`; both export HTTP server metrics and a
+SERVER span for their respective endpoints. A real `POST /checkouts`
+request proves ONE trace contains checkout-service's own SERVER span
+with two independently-verified downstream branches — CLIENT → payment
+SERVER, and CLIENT → inventory SERVER, siblings rather than parent/child
+of each other — plus a CLIENT span toward notification-service in that
+same trace: same Trace ID throughout, and each downstream SERVER span's
+Parent Span ID equals its own checkout CLIENT span's Span ID — verified
+against real Collector output. `notification-service` remains **not
+instrumented** — no OpenTelemetry SDK, no metrics endpoint, no code
+changes — so only checkout's own spans plus the payment and inventory
+branches are proven distributed, not the full four-service chain (there
+is no notification SERVER span yet). Traces currently have no backend
+(the Collector's `debug` exporter prints them to its own logs; a real
+trace backend is a future phase). No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -416,6 +426,63 @@ Compose healthcheck, the same binary exposes a built-in `healthcheck`
 subcommand (a plain HTTP GET against its own `/health`) that Compose
 calls directly.
 
+### inventory-service instrumentation (Phase 2A.4)
+
+Unlike checkout-service (Java auto-instrumentation agent) and
+payment-service (Python zero-code auto-instrumentation), Go has no
+equivalent auto-instrumentation mechanism, so `inventory-service` uses
+**explicit, minimal OpenTelemetry Go SDK initialization** in a new
+`internal/telemetry` package, plus
+`go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp` wrapping
+the whole `http.ServeMux` at the server boundary in `internal/server`
+(not inside the business handlers in `internal/api`). Pinned versions:
+`go.opentelemetry.io/otel`/`sdk` `v1.46.0`, `otlptracehttp`/`otlpmetrichttp`
+`v1.46.0`, `otelhttp` `v0.71.0` — resolved cleanly against Go 1.27 via
+`go mod tidy`, with `go.sum` committed. Zero changes to
+`internal/api/reservations.go` or `internal/reservation/` — no manual
+spans, no custom metrics.
+
+`internal/telemetry.Setup` builds a `resource.New(ctx, resource.WithFromEnv(), ...)`
+(reading `OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES` from the
+environment — never hard-coded), an OTLP/HTTP trace exporter feeding a
+`BatchSpanProcessor`, an OTLP/HTTP metric exporter feeding a
+`PeriodicReader`, and installs a global composite
+`tracecontext`+`baggage` propagator — critical for extracting
+checkout-service's incoming `traceparent` header and continuing that
+trace. Neither the batch processor's schedule delay nor the periodic
+reader's export interval are overridden in code, so both honor
+`OTEL_BSP_SCHEDULE_DELAY`/`OTEL_METRIC_EXPORT_INTERVAL` via the Go SDK's
+own env-aware defaults, confirmed by their real 5s/1s timing in
+practice.
+
+**Telemetry is only ever initialized in the normal server path**
+(`cmd/inventory-service/main.go`'s `run()`), never for the `healthcheck`
+subcommand, which still `os.Exit()`s before `run()` is even called —
+confirmed empirically: running `/inventory-service healthcheck`
+standalone (no server, no Collector reachable) fails in ~0.24s with a
+plain "connection refused" on `/health`, with no OTLP dial attempt or
+delay. A telemetry setup failure fails server startup clearly (`log.Fatal`)
+rather than running with partially configured telemetry. Graceful
+shutdown flushes and closes the trace/metric providers after the HTTP
+server itself has shut down.
+
+Auto-instrumentation captures a SERVER span and HTTP server metrics
+(`http_server_request_duration_seconds_*`,
+`http_server_request_body_size_bytes_*`,
+`http_server_response_body_size_bytes_*`) for `POST /inventory/reservations`
+— confirmed empirically that `otelhttp` v0.71.0 re-derives the span
+name/route from the standard library's own matched `ServeMux` pattern
+(`*http.Request.Pattern`, a Go 1.22+ field populated by `ServeMux`
+itself once the wrapped mux has dispatched) rather than needing a
+separate per-route tagging call. A real `POST /checkouts` request
+proves genuine distributed trace continuation into this service: the
+checkout-service CLIENT span for the inventory call and the
+inventory-service SERVER span for `POST /inventory/reservations` share
+one Trace ID, and the inventory span's Parent Span ID equals the
+checkout CLIENT span's own Span ID — confirmed against real Collector
+debug output, and independently re-confirmed on a second, fully
+torn-down-and-restarted run with a different (still-matching) trace ID.
+
 ## Notification Service
 
 `services/notification-service` is the fourth application service: a
@@ -488,17 +555,22 @@ avoided, the Compose healthcheck instead uses Node's built-in `fetch`
 
 `observability/` contains configuration for a local OpenTelemetry
 Collector, Prometheus, and Grafana, all running via Docker Compose
-(Phase 2A.1). `checkout-service` (Phase 2A.2) and `payment-service`
-(Phase 2A.3) both feed this stack real telemetry; `inventory-service`
-and `notification-service` are **not** instrumented and send nothing.
+(Phase 2A.1). `checkout-service` (Phase 2A.2), `payment-service`
+(Phase 2A.3), and `inventory-service` (Phase 2A.4) all feed this stack
+real telemetry; `notification-service` is **not** instrumented and
+sends nothing.
 
 ```
-checkout-service --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
-payment-service  --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
-checkout-service --OTLP (traces)--> otel-collector --debug exporter--> collector logs
-payment-service  --OTLP (traces)--> otel-collector --debug exporter--> collector logs
-(checkout SERVER span -> checkout payment CLIENT span -> payment SERVER span: one real trace)
-(inventory-service/notification-service: not instrumented, send nothing)
+checkout-service   --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
+payment-service    --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
+inventory-service  --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
+checkout-service/payment-service/inventory-service --OTLP (traces)--> otel-collector --debug exporter--> collector logs
+
+One real checkout trace:
+                    +-> checkout payment CLIENT    -> payment SERVER
+  checkout SERVER --|
+                    +-> checkout inventory CLIENT  -> inventory SERVER
+                    +-> checkout notification CLIENT   (no SERVER span yet — not instrumented)
 ```
 
 - **`otel-collector`** (`otel/opentelemetry-collector-contrib`) — an OTLP
@@ -519,8 +591,8 @@ payment-service  --OTLP (traces)--> otel-collector --debug exporter--> collector
   scrape target as `up`.
 - **`prometheus`** — scrapes itself, the Collector's self-telemetry
   (`:8888`), and the Collector's application-telemetry-relay endpoint
-  (`:8889`), which now carries real `checkout-service` and
-  `payment-service` metrics, on a persistent named volume.
+  (`:8889`), which now carries real `checkout-service`, `payment-service`,
+  and `inventory-service` metrics, on a persistent named volume.
 - **`grafana`** — Prometheus is auto-provisioned as its default
   datasource (`observability/grafana/provisioning/datasources/datasource.yml`,
   resolving `http://prometheus:9090` by Compose service name) so no
@@ -553,8 +625,9 @@ with `OTEL_*` environment variables configuring OTLP export over
 `http/protobuf` to `http://otel-collector:4318`, `tracecontext,baggage`
 propagation, `OTEL_LOGS_EXPORTER=none` (log export is explicitly
 deferred), and short export intervals (5s metrics, 1s span batch delay)
-for fast local feedback. `payment-service`, `inventory-service`, and
-`notification-service` are not instrumented and have not been modified.
+for fast local feedback. `payment-service` and `inventory-service` are
+now instrumented too, each its own way (see their own sections above);
+`notification-service` is not instrumented and has not been modified.
 
 Auto-instrumentation captures, with no manual/custom spans or metrics
 added: a SERVER span and HTTP server metrics
@@ -578,32 +651,36 @@ make db-down
 ```
 
 **Bundled verification:** `make verify-observability` (or
-`scripts/verify-observability.sh`) runs the full Phase 2A.1/2A.2/2A.3
-verification path in one deterministic script — starts Compose, waits
-for every service's health (with the `otel-collector` exception above),
-checks Prometheus targets and the Grafana datasource, re-runs the
-`POST /checkouts` regression check, then verifies `checkout-service`
-HTTP server/client metrics and `payment-service` HTTP server metrics
-actually reached Prometheus (bounded retry, since export intervals and
-Prometheus's scrape cycle are both async), that trace evidence for the
-checkout SERVER span and all three downstream CLIENT spans appears in
-the Collector's own logs, and (Phase 2A.3) that the checkout → payment
-segment is a real distributed trace — using a small deterministic
-parser (`scripts/parse-payment-trace.py`) that proves the checkout
-CLIENT span and payment SERVER span share a Trace ID with the correct
-parent/child Span IDs, rather than just grepping for both services'
-names appearing somewhere in the logs — then always tears the
-environment down (without deleting volumes) and confirms the three
-named volumes still exist.
+`scripts/verify-observability.sh`) runs the full
+Phase 2A.1/2A.2/2A.3/2A.4 verification path in one deterministic script
+— starts Compose, waits for every service's health (with the
+`otel-collector` exception above), checks Prometheus targets and the
+Grafana datasource, re-runs the `POST /checkouts` regression check,
+then verifies `checkout-service`, `payment-service`, and (Phase 2A.4)
+`inventory-service` HTTP server metrics (plus checkout's HTTP client
+metrics) actually reached Prometheus (bounded retry, since export
+intervals and Prometheus's scrape cycle are both async), that trace
+evidence for the checkout SERVER span and all three downstream CLIENT
+spans appears in the Collector's own logs, and that ONE checkout trace
+is a real distributed trace across **both** the checkout → payment
+**and** checkout → inventory branches (siblings, not parent/child of
+each other) — using a small deterministic parser
+(`scripts/parse-checkout-trace.py`, generalized in Phase 2A.4 from the
+Phase 2A.3 payment-only parser) that proves each downstream CLIENT span
+and its corresponding SERVER span share a Trace ID with the correct
+parent/child Span IDs, plus that the checkout notification CLIENT span
+belongs to that same trace, rather than just grepping for service names
+appearing somewhere in the logs — then always tears the environment
+down (without deleting volumes) and confirms the three named volumes
+still exist.
 
-**Not implemented yet:** instrumentation of `inventory-service` or
-`notification-service`; distributed trace correlation across those two
-services (only checkout → payment is proven distributed so far); a real
-trace backend (traces are only visible via the Collector's `debug`
-exporter logs); an application log pipeline; dashboards beyond the
-minimal datasource-connectivity check; alerting rules; and any
-consumption of telemetry by an agent. Those are deliberately deferred to
-later phases.
+**Not implemented yet:** instrumentation of `notification-service`;
+distributed trace correlation for that branch (there is no notification
+SERVER span, only checkout's own CLIENT span toward it); a real trace
+backend (traces are only visible via the Collector's `debug` exporter
+logs); an application log pipeline; dashboards beyond the minimal
+datasource-connectivity check; alerting rules; and any consumption of
+telemetry by an agent. Those are deliberately deferred to later phases.
 
 ## Continuous Integration
 
@@ -629,16 +706,18 @@ reach a healthy state, that Prometheus reports all three scrape targets
 `up` (bounded retry loop, since Prometheus needs a scrape cycle after
 startup), that Grafana's health
 API and provisioned Prometheus datasource are reachable, that
-`checkout-service`'s HTTP server/client metrics and (new in this phase)
-`payment-service`'s HTTP server metrics actually reach Prometheus, and
-that trace evidence (checkout SERVER span, all three downstream CLIENT
-spans) plus — new in this phase — a deterministic proof of the
-checkout → payment distributed trace (via the same
-`scripts/parse-payment-trace.py` the local verifier uses) appear in the
-Collector's logs, all via bounded retry loops (the OTel Java agent's
-and Python SDK's export intervals, Prometheus's scrape cycle, and the
-Collector's batch export are all asynchronous) — then always tears the
-environment down (without deleting volumes).
+`checkout-service`'s HTTP server/client metrics, `payment-service`'s
+HTTP server metrics, and (new in this phase) `inventory-service`'s HTTP
+server metrics actually reach Prometheus, and that trace evidence
+(checkout SERVER span, all three downstream CLIENT spans) plus a
+deterministic proof that ONE checkout trace is distributed across
+**both** the checkout → payment and — new in this phase — checkout →
+inventory branches (via the same generalized `scripts/parse-checkout-trace.py`
+the local verifier uses) appear in the Collector's logs, all via
+bounded retry loops (the OTel Java agent's, Python SDK's, and Go SDK's
+export intervals, Prometheus's scrape cycle, and the Collector's batch
+export are all asynchronous) — then always tears the environment down
+(without deleting volumes).
 
 The repository has a GitHub remote
 (`abheesh-03/autonomous-reliability-platform`). The workflow version
@@ -653,12 +732,15 @@ scrape-target verification, and datasource check), then with Phase
 2A.2's `checkout-service` telemetry checks (Prometheus metrics,
 Collector trace evidence), then with Phase 2A.3's `payment-service`
 telemetry and distributed-trace-continuation checks (extending, not
-duplicating, the existing checkout metrics/trace steps). All sets of
-additions have been locally validated end-to-end by reproducing the
+duplicating, the existing checkout metrics/trace steps) — the
+Phase 2A.3 version of the workflow was committed (`1118fda`) and has
+run successfully on GitHub Actions. Phase 2A.4 further extends the
+existing metrics and trace steps with `inventory-service`'s checks (see
+above); this has been locally validated end-to-end by reproducing the
 workflow's steps against the real Compose network (via
 `make verify-observability`, which covers equivalent ground), but the
-updated workflow has **not yet run on GitHub Actions in this form** —
-that will only be true once it runs there after a push.
+Phase 2A.4 version of the workflow has **not yet run on GitHub Actions**
+— that will only be true once it runs there after a push.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -1212,3 +1294,144 @@ problem today.
   distributed trace, and there is still no real trace backend (Collector
   `debug` exporter logs only), no application log pipeline, and no
   dashboards/alerts.
+
+### Phase 2A.4 — inventory-service OpenTelemetry instrumentation + second distributed trace branch
+
+- `services/inventory-service/go.mod`/`go.sum` updated: added the
+  pinned OpenTelemetry Go SDK/instrumentation family —
+  `go.opentelemetry.io/otel`/`sdk` `v1.46.0`,
+  `otlptracehttp`/`otlpmetrichttp` `v1.46.0`, `otelhttp` `v0.71.0` —
+  resolved cleanly against Go 1.27 via `go mod tidy` (verified twice:
+  once to generate `go.sum`, once more afterward to confirm the tree is
+  already minimal/stable, i.e. a no-op). `go.sum` is new and committed.
+- New `internal/telemetry/telemetry.go`: explicit, minimal Go SDK
+  initialization (no auto-instrumentation exists for Go, unlike the
+  Java agent or Python zero-code approach) — `resource.New(ctx,
+  resource.WithFromEnv(), ...)` (service name never hard-coded; read
+  from `OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES`), an OTLP/HTTP
+  trace exporter feeding a `BatchSpanProcessor`, an OTLP/HTTP metric
+  exporter feeding a `PeriodicReader` (neither's timing explicitly
+  overridden, so both honor `OTEL_BSP_SCHEDULE_DELAY`/
+  `OTEL_METRIC_EXPORT_INTERVAL` via the SDK's own env-aware defaults —
+  confirmed by real 5s/1s timing in practice), and a global composite
+  `tracecontext`+`baggage` propagator. Returns a `Shutdown` closure;
+  setup failure returns an error (→ `log.Fatal` in `main`) rather than
+  running with partial telemetry.
+- `cmd/inventory-service/main.go`: `telemetry.Setup` is called only
+  inside `run()`, never for the `healthcheck` subcommand (which still
+  `os.Exit()`s before `run()` is reached, unchanged). Confirmed
+  empirically: `docker run ... inventory-service healthcheck` with no
+  server or Collector running fails in ~0.24s with a plain "connection
+  refused" — no OTLP dial attempt, no delay. `shutdownTelemetry(ctx)` is
+  called after `srv.Shutdown(ctx)` during graceful shutdown.
+- `internal/server/server.go`: the whole `http.ServeMux` is wrapped with
+  `otelhttp.NewHandler(mux, "inventory-service")` at the server
+  boundary — zero changes to `internal/api/reservations.go` or
+  `internal/reservation/`, no manual spans, no custom metrics. Initial
+  attempt used `otelhttp.WithRouteTag` per route (matching a
+  now-outdated idiom); real dependency resolution showed that function
+  does not exist in `otelhttp` `v0.71.0` — inspected the actual
+  installed package source instead of guessing, and found the simpler
+  correct mechanism: this version's middleware re-derives the span name
+  from the standard library's own matched `ServeMux` pattern
+  (`*http.Request.Pattern`, populated by `ServeMux` itself post-dispatch)
+  with no separate per-route call needed.
+- `services/inventory-service/Dockerfile`: now `COPY go.mod go.sum ./`
+  followed by `RUN go mod download` (for layer caching) before copying
+  source; `gofmt`/`go vet`/`go test`/build all still run in the builder
+  stage unchanged. Runtime stage, `CGO_ENABLED=0`, and
+  `ENTRYPOINT ["/inventory-service"]` are all untouched — no shell,
+  curl, wget, or extra binary added; all OTel code compiles into the
+  same static distroless binary.
+- Verified inside the actual Docker build (not just locally): `gofmt`
+  clean, `go vet ./...` clean, `go test ./...` — all pre-existing tests
+  (health, reservations validation/method-rejection/ID-uniqueness,
+  server routing) still pass unchanged, plus the new (empty)
+  `internal/telemetry` package compiles with no test files. Zero
+  business-logic changes; the mux-wrapping change was verified not to
+  alter any externally-visible HTTP behavior (405s, `Allow` headers,
+  status codes, response bodies all unchanged) rather than rewriting
+  any test's expectations.
+- Started the full 8-container Compose stack, confirmed via container
+  logs that inventory-service starts cleanly with no OTLP exporter
+  errors, and directly exercised both `GET /health` and
+  `POST /inventory/reservations` outside of any checkout flow — both
+  return their unchanged response shapes.
+- **Distributed trace topology — the main goal of this phase — proven
+  against real Collector debug-exporter output for a live
+  `POST /checkouts` request, not assumed:** one Trace ID
+  (`4cb4f3d5f6a718f8aa06d1141dfd368b` in the first captured run) covers
+  the checkout SERVER span, its CLIENT span toward payment (parent =
+  checkout SERVER span ID) whose child is the payment SERVER span
+  (parent = that CLIENT span's own ID), its CLIENT span toward
+  inventory (also parented directly to the checkout SERVER span — a
+  **sibling** of the payment CLIENT span, not a parent/child of it)
+  whose child is the inventory SERVER span (parent = the inventory
+  CLIENT span's own ID), and its CLIENT span toward notification
+  (parented to the checkout SERVER span, with correctly no SERVER span
+  of its own, since notification-service is uninstrumented). Confirmed
+  the inventory SERVER span's resource carries
+  `service.name: Str(inventory-service)`, `telemetry.sdk.language: Str(go)`,
+  `telemetry.sdk.version: Str(1.46.0)`. Independently re-confirmed on a
+  second, fully torn-down-and-restarted run, which produced a different
+  (still internally consistent) Trace ID
+  (`17f15fccfa5d2b44e9438a22c4b004b3`), ruling out a one-off
+  coincidence. Empirically discovered and documented (not assumed): the
+  Go otelhttp SERVER span carries `url.path` but not a separate
+  `http.route` span attribute (unlike the Java/Python SERVER spans,
+  which have both) — the Prometheus *metric* `http_route` label is
+  still present and correct, this only affects trace-span attribute
+  matching, and the generalized parser was written to match on
+  `url.path` for the inventory branch accordingly.
+- Queried Prometheus directly (not assumed) for inventory-service's
+  real metric/label names: `http_server_request_duration_seconds_{count,sum,bucket}`,
+  `http_server_request_body_size_bytes_{count,sum,bucket}`,
+  `http_server_response_body_size_bytes_{count,sum,bucket}`, with
+  `service_name="inventory-service"`, `http_route="/inventory/reservations"`,
+  `http_request_method="POST"`, `http_response_status_code="200"`,
+  `service_version="0.1.0"`, `deployment_environment_name="local"`,
+  `telemetry_sdk_language="go"`, `telemetry_sdk_name="opentelemetry"`,
+  `telemetry_sdk_version="1.46.0"`, `otel_scope_name="go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"`,
+  `otel_scope_version="0.71.0"`. No custom inventory metrics were added.
+- Generalized the trace parser: `git mv scripts/parse-payment-trace.py
+  scripts/parse-checkout-trace.py`, then refactored its matching logic
+  (the span-parsing core is unchanged) into a `spans_matching()` helper
+  plus `find_client_then_server()`/`find_client()` helpers that require
+  a checkout SERVER span, then independently resolve the payment branch
+  (CLIENT → SERVER), the inventory branch (CLIENT → SERVER), and the
+  notification CLIENT span, all anchored to that one SERVER span's
+  Trace ID and Span ID. Preserved every Phase 2A.3 hardening rule
+  unchanged: Trace IDs exactly 32 lowercase hex chars, Span IDs exactly
+  16, fail-closed on any missing/invalid ID (no `None == None`), correct
+  `ResourceSpans` → `service.name` attribution (including the earlier
+  fix for `ResourceSpans #N`'s logger-prefixed line not matching a bare
+  `startswith` check). Exits 0 only when checkout SERVER + both full
+  branches + the notification CLIENT span are all found and correctly
+  correlated in one trace; prints all seven span IDs on success.
+- `scripts/verify-observability.sh` extended (not replaced): section G
+  gained a bounded-retry Prometheus query for inventory-service's HTTP
+  server metric; section H's parser call now invokes
+  `scripts/parse-checkout-trace.py` instead of the old payment-only
+  script. Every Phase 2A.1/2A.2/2A.3 check (including the
+  checkout-service/payment-service metrics and baseline checkout trace
+  grep-evidence checks) is unchanged. The full `make verify-observability`
+  run passed end-to-end from a fully torn-down state, including the new
+  inventory-metrics check and the generalized parser call, plus the
+  persistence check.
+- `.github/workflows/ci.yml` extended, not duplicated: the existing
+  combined checkout+payment metrics step gained an inventory-service
+  metrics query; the existing trace step now calls
+  `scripts/parse-checkout-trace.py` instead of the payment-only script.
+  Kept the same safe `if cmd1 && cmd2; then` control-flow pattern
+  throughout. Locally reproduced equivalent verification via
+  `make verify-observability` — **not yet verified running on GitHub
+  Actions in this updated form** (Phase 2A.3's version of the workflow
+  did run successfully there, per commit `1118fda`).
+- **Limitation, honestly reported, not worked around:** this proves
+  distributed tracing for the checkout → payment and checkout →
+  inventory segments only. `notification-service` remains fully
+  uninstrumented — checkout's CLIENT span toward it exists in the
+  trace, but there is no notification SERVER span, so the full
+  four-service chain is not yet a verified distributed trace. There is
+  still no real trace backend (Collector `debug` exporter logs only),
+  no application log pipeline, and no dashboards/alerts.

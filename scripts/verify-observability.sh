@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# verify-observability.sh — Bundled Phase 2A.1/2A.2/2A.3 verification.
+# verify-observability.sh — Bundled Phase 2A.1/2A.2/2A.3/2A.4 verification.
 #
 # Starts the full Docker Compose environment, waits for every
 # application and observability service to become healthy (with a
@@ -8,13 +8,15 @@
 # shell/wget/curl and therefore no Docker-level healthcheck), verifies
 # Prometheus's scrape targets and Grafana's provisioned datasource,
 # re-runs the POST /checkouts regression check, then checks that
-# checkout-service's (Phase 2A.2) and payment-service's (Phase 2A.3)
-# telemetry actually reached Prometheus (application metrics) and the
-# Collector (trace spans) — including, for Phase 2A.3, a deterministic
-# parse proving the checkout->payment call is a real distributed trace
-# (shared Trace ID, correct parent/child Span IDs) — then always tears
-# the environment down (without deleting volumes) and confirms the
-# named volumes still exist.
+# checkout-service's (Phase 2A.2), payment-service's (Phase 2A.3), and
+# inventory-service's (Phase 2A.4) telemetry actually reached Prometheus
+# (application metrics) and the Collector (trace spans) — including a
+# deterministic parse (scripts/parse-checkout-trace.py) proving that one
+# real checkout trace contains a valid checkout->payment branch AND a
+# valid checkout->inventory branch (shared Trace ID, correct parent/
+# child Span IDs on each branch) — then always tears the environment
+# down (without deleting volumes) and confirms the named volumes still
+# exist.
 #
 # Exits non-zero immediately on the first failed check.
 
@@ -238,11 +240,30 @@ done
 [ "$payment_metrics_ok" = true ] || fail "payment-service HTTP server metrics never appeared in Prometheus"
 echo "  payment-service HTTP server metrics present (http_server_request_duration_seconds_count, service_name=payment-service, http_route=/payments/authorize)"
 
+echo ""
+echo "-- waiting for inventory-service metrics to reach Prometheus (Phase"
+echo "   2A.4; same async export/scrape considerations as above) --"
+
+inventory_metrics_ok=false
+for i in $(seq 1 20); do
+  if inventory_body="$(curl -fsS -G 'http://127.0.0.1:9090/api/v1/query' \
+        --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="inventory-service",http_route="/inventory/reservations"}' 2>/dev/null)" \
+      && echo "$inventory_body" | jq -e '.data.result | length > 0' >/dev/null 2>&1
+  then
+    inventory_metrics_ok=true
+    break
+  fi
+  echo "  attempt $i/20: inventory-service HTTP server metrics not in Prometheus yet"
+  sleep 3
+done
+[ "$inventory_metrics_ok" = true ] || fail "inventory-service HTTP server metrics never appeared in Prometheus"
+echo "  inventory-service HTTP server metrics present (http_server_request_duration_seconds_count, service_name=inventory-service, http_route=/inventory/reservations)"
+
 # --------------------------------------------------------------------
-# H. Observability: trace evidence + checkout->payment distributed
-#    trace continuation in Collector logs
+# H. Observability: trace evidence + checkout distributed trace
+#    continuation (payment and inventory branches) in Collector logs
 # --------------------------------------------------------------------
-section "H. Observability: trace evidence + checkout->payment distributed trace continuation"
+section "H. Observability: trace evidence + checkout distributed trace continuation"
 
 echo "-- Phase 2A.2 has no trace backend yet; traces are verified via the"
 echo "   Collector's debug exporter output in its own container logs --"
@@ -269,23 +290,26 @@ echo "  checkout-service SERVER span 'POST /checkouts' present in Collector logs
 echo "  CLIENT spans present for all 3 downstream calls (payment-service, inventory-service, notification-service)"
 
 echo ""
-echo "-- Phase 2A.3: proving real distributed trace continuation from the"
-echo "   checkout-service CLIENT span to a payment-service SERVER span"
-echo "   (same Trace ID, payment span's Parent ID == checkout span's own"
-echo "   Span ID) using a small deterministic parser, not a brittle"
-echo "   grep-only heuristic --"
+echo "-- Phase 2A.4: proving real distributed trace continuation for both"
+echo "   downstream branches of ONE checkout trace — checkout SERVER ->"
+echo "   checkout payment CLIENT -> payment SERVER, and checkout SERVER ->"
+echo "   checkout inventory CLIENT -> inventory SERVER (siblings, not"
+echo "   parent/child of each other) — plus the checkout notification"
+echo "   CLIENT span in that same trace (no notification SERVER span yet,"
+echo "   since notification-service is not instrumented) — using a small"
+echo "   deterministic parser, not a brittle grep-only heuristic --"
 
-payment_trace_match=""
+checkout_trace_match=""
 for i in $(seq 1 20); do
-  if payment_trace_match="$(docker compose logs --no-log-prefix otel-collector 2>/dev/null | python3 scripts/parse-payment-trace.py)"; then
+  if checkout_trace_match="$(docker compose logs --no-log-prefix otel-collector 2>/dev/null | python3 scripts/parse-checkout-trace.py)"; then
     break
   fi
-  payment_trace_match=""
-  echo "  attempt $i/20: checkout->payment distributed trace correlation not found yet"
+  checkout_trace_match=""
+  echo "  attempt $i/20: checkout distributed trace correlation (payment + inventory branches) not found yet"
   sleep 3
 done
-[ -n "$payment_trace_match" ] || fail "checkout CLIENT span -> payment SERVER span correlation (shared Trace ID, matching Parent/Span ID) was never found in Collector logs"
-echo "  checkout->payment distributed trace continuation confirmed: $payment_trace_match"
+[ -n "$checkout_trace_match" ] || fail "checkout SERVER -> {payment,inventory} SERVER correlation (shared Trace ID, matching Parent/Span IDs on both branches) was never found in Collector logs"
+echo "  checkout distributed trace continuation confirmed (payment + inventory branches): $checkout_trace_match"
 
 # --------------------------------------------------------------------
 # I. Container/log sanity
@@ -341,4 +365,4 @@ do
 done
 
 section "SUCCESS"
-echo "Phase 2A.1/2A.2/2A.3 observability verification passed."
+echo "Phase 2A.1/2A.2/2A.3/2A.4 observability verification passed."

@@ -1,17 +1,17 @@
 # OpenTelemetry Collector configuration for local development.
 #
 # Phase 2A.1 scope: infrastructure bootstrap. Phase 2A.2 added real
-# telemetry from checkout-service. Phase 2A.3 adds payment-service —
-# both now send real OTLP metrics and traces. inventory-service and
-# notification-service remain uninstrumented.
+# telemetry from checkout-service, Phase 2A.3 added payment-service, and
+# Phase 2A.4 added inventory-service — all three now send real OTLP
+# metrics and traces. notification-service remains uninstrumented.
 #
 # Traces still go to the "debug" exporter only. There is intentionally
 # no trace backend (Tempo/Jaeger/etc.) yet — that belongs to a later
 # phase. Metrics are re-exposed in Prometheus format and scraped by
 # Prometheus. The Collector's own internal ("self") telemetry on port
-# 8888 is unaffected by any of this. No new pipelines or exporters were
-# added in Phase 2A.3 — payment-service's telemetry flows through the
-# same two pipelines below.
+# 8888 is unaffected by any of this. No new pipelines or exporters have
+# been added since Phase 2A.1 — every instrumented service's telemetry
+# flows through the same two pipelines below.
 
 receivers:
   otlp:

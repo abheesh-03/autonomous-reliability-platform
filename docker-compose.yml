@@ -17,10 +17,10 @@
 #   - notification-service: exposes a simulated POST /notifications
 #     (Phase 1B.3). No real message delivery, persistence, or database.
 #   - otel-collector / prometheus / grafana: observability infrastructure
-#     bootstrap (Phase 2A.1). As of Phase 2A.3, checkout-service and
-#     payment-service both send it real OTLP telemetry (metrics +
-#     traces); inventory-service and notification-service remain
-#     uninstrumented and send nothing. Prometheus scrapes itself, the
+#     bootstrap (Phase 2A.1). As of Phase 2A.4, checkout-service,
+#     payment-service, and inventory-service all send it real OTLP
+#     telemetry (metrics + traces); notification-service remains
+#     uninstrumented and sends nothing. Prometheus scrapes itself, the
 #     Collector's own telemetry, and the Collector's application-metrics
 #     relay; Grafana has Prometheus provisioned as its datasource.
 #
@@ -63,10 +63,10 @@ services:
       # OpenTelemetry Java agent (Phase 2A.2) — attached via
       # JAVA_TOOL_OPTIONS rather than baked into the image's ENTRYPOINT,
       # so the same image still runs with no telemetry when launched
-      # outside this Compose stack. As of Phase 2A.3, payment-service is
-      # also instrumented (Python zero-code auto-instrumentation, see
-      # its own service block below); inventory-service and
-      # notification-service remain uninstrumented.
+      # outside this Compose stack. As of Phase 2A.4, payment-service
+      # (Python zero-code auto-instrumentation) and inventory-service
+      # (manual Go SDK init, see its own service block below) are also
+      # instrumented; notification-service remains uninstrumented.
       JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
       OTEL_SERVICE_NAME: checkout-service
       OTEL_RESOURCE_ATTRIBUTES: "service.version=0.1.0,deployment.environment.name=local"
@@ -126,6 +126,20 @@ services:
     restart: unless-stopped
     ports:
       - "8082:8082"
+    environment:
+      # OpenTelemetry (Phase 2A.4) — manual Go SDK initialization in
+      # internal/telemetry, run only from the normal server startup
+      # path (cmd/inventory-service/main.go's run()), never from the
+      # "healthcheck" subcommand below, which exits before that code
+      # runs and so never touches the Collector.
+      OTEL_SERVICE_NAME: inventory-service
+      OTEL_RESOURCE_ATTRIBUTES: "service.version=0.1.0,deployment.environment.name=local"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      # Short export intervals for deterministic local verification;
+      # honored by the Go SDK's own env-aware BatchSpanProcessor/
+      # PeriodicReader defaults (not explicitly overridden in code).
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      OTEL_BSP_SCHEDULE_DELAY: "1000"
     # Runtime image is distroless (no shell, no curl/wget), so the
     # binary's own "healthcheck" subcommand is used via exec form.
     healthcheck:
