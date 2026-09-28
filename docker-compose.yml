@@ -148,7 +148,11 @@ services:
     image: grafana/grafana-oss:13.0.2
     restart: unless-stopped
     volumes:
-      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      # Mount only the datasources subdirectory, not the whole
+      # provisioning/ tree — the full tree would shadow Grafana's other
+      # built-in provisioning directories (plugins/dashboards/alerting)
+      # that we don't provide, causing startup errors reading them.
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - grafana_data:/var/lib/grafana
     # Bound to loopback only, in addition to Grafana's own admin auth.
     ports:

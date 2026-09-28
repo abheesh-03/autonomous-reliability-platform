@@ -275,20 +275,21 @@ jobs:
         run: |
           attempts=20
           for i in $(seq 1 "$attempts"); do
-            body="$(curl -fsS http://localhost:9090/api/v1/targets)"
-            up="$(echo "$body" | jq -e '
-              ([.data.activeTargets[] | select(.labels.job=="prometheus") | .health] | length > 0 and all(.[]; . == "up"))
-              and
-              ([.data.activeTargets[] | select(.labels.job=="otel-collector") | .health] | length > 0 and all(.[]; . == "up"))
-            ' 2>/dev/null)"
-            echo "Attempt $i/$attempts: prometheus+collector targets up=$up"
-            if [ "$up" = "true" ]; then
+            if body="$(curl -fsS http://localhost:9090/api/v1/targets)" && echo "$body" | jq -e '
+                ([.data.activeTargets[] | select(.labels.job=="prometheus") | .health] | length > 0 and all(.[]; . == "up"))
+                and
+                ([.data.activeTargets[] | select(.labels.job=="otel-collector") | .health] | length > 0 and all(.[]; . == "up"))
+                and
+                ([.data.activeTargets[] | select(.labels.job=="otel-collector-app-metrics") | .health] | length > 0 and all(.[]; . == "up"))
+              ' >/dev/null 2>&1
+            then
               echo "$body"
               exit 0
             fi
+            echo "Attempt $i/$attempts: prometheus/otel-collector/otel-collector-app-metrics targets not all UP yet"
             sleep 3
           done
-          echo "Prometheus and/or otel-collector scrape targets never reported UP" >&2
+          echo "Prometheus targets (prometheus, otel-collector, otel-collector-app-metrics) never all reported UP" >&2
           curl -fsS http://localhost:9090/api/v1/targets || true
           exit 1
 
