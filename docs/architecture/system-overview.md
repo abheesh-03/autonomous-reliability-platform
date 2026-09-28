@@ -7,13 +7,13 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 2A.4, the repository contains foundational scaffolding, a
+As of Phase 2A.5, the repository contains foundational scaffolding, a
 running infrastructure dependency, four application services with the
 **first real service-to-service workflow**, and an
-**observability infrastructure stack now instrumented for three of
-those four services, with two independently-verified distributed trace
-branches from checkout**. Conceptually, the current demo application
-shape is:
+**observability infrastructure stack now instrumented for all four
+services, with a complete, verified distributed trace across the whole
+checkout workflow**. Conceptually, the current demo application shape
+is:
 
 ```
 Client
@@ -21,40 +21,39 @@ Client
   v
 checkout-service :8080  --OTLP (metrics+traces)--> otel-collector
   |                                                    ^  ^  ^
-  +--> payment-service    :8081  (POST /payments/authorize — instrumented) --OTLP---+  |  |
-  |                                                                                     |  |
-  +--> inventory-service  :8082  (POST /inventory/reservations — instrumented) --OTLP--+  |
-  |                                                                                        |
-  +--> notification-service :8083  (POST /notifications — simulated, NOT instrumented) ---+
-                                                                                    (sends nothing)
+  +--> payment-service      :8081  (POST /payments/authorize — instrumented) --OTLP---+  |  |
+  |                                                                                       |  |
+  +--> inventory-service    :8082  (POST /inventory/reservations — instrumented) --OTLP--+  |
+  |                                                                                          |
+  +--> notification-service :8083  (POST /notifications — instrumented) --OTLP--------------+
 
 otel-collector --Prometheus format (metrics)--> prometheus --> grafana
 otel-collector --debug exporter (traces)--> collector logs (no trace backend yet)
 
-Verified distributed trace (one real POST /checkouts):
-                    +-> checkout payment CLIENT   -> payment SERVER
-  checkout SERVER --|
-                    +-> checkout inventory CLIENT -> inventory SERVER
-                    +-> checkout notification CLIENT   (no SERVER span — not instrumented)
-  (all spans share one Trace ID; each downstream SERVER span's Parent ID
-   == its own checkout CLIENT span's Span ID; payment and inventory are
-   sibling branches, not parent/child of each other)
+Complete distributed trace (one real POST /checkouts):
+                    +-> checkout payment CLIENT      -> payment SERVER
+  checkout SERVER --|-> checkout inventory CLIENT    -> inventory SERVER
+                    +-> checkout notification CLIENT -> notification SERVER
+  (all seven spans share one Trace ID; each downstream SERVER span's
+   Parent ID == its own checkout CLIENT span's Span ID; payment,
+   inventory, and notification are sibling branches off the one
+   checkout SERVER span — NOT a sequential chain)
 ```
 
 `checkout-service` is instrumented with the OpenTelemetry Java
-auto-instrumentation agent; `payment-service` is instrumented with
-OpenTelemetry Python zero-code auto-instrumentation (Phase 2A.3); and
-`inventory-service` is now instrumented too (Phase 2A.4), using
+auto-instrumentation agent; `payment-service` with OpenTelemetry Python
+zero-code auto-instrumentation (Phase 2A.3); `inventory-service` with
 explicit, minimal OpenTelemetry Go SDK initialization plus `otelhttp`
-(Go has no auto-instrumentation equivalent to the Java agent or Python
-zero-code approach). All three export real metrics and traces to the
-Collector, and a real `POST /checkouts` request proves ONE trace
-contains two independently-verified downstream branches — checkout →
-payment and checkout → inventory — plus a checkout → notification
-CLIENT span with correctly no SERVER span (verified against real
-Collector output, not assumed). `notification-service` remains **not
-instrumented** — it sends no telemetry and was not modified, so this is
-not yet a complete four-service distributed trace.
+(Phase 2A.4); and `notification-service` with explicit OpenTelemetry
+Node SDK initialization plus `@opentelemetry/instrumentation-http` and
+`@fastify/otel` (Phase 2A.5) — Go and Node have no auto-instrumentation
+equivalent to the Java agent or Python's zero-code distro. All four
+export real metrics and traces to the Collector, and a real
+`POST /checkouts` request proves a complete distributed trace: ONE
+trace contains checkout's own SERVER span as the common parent of three
+independently-verified downstream branches (verified against real
+Collector output, not assumed, and reconfirmed on a second, fully
+torn-down-and-restarted run).
 
 `checkout-service`'s `POST /checkouts` synchronously calls the other
 three services, in that exact order (payment, then inventory, then
@@ -266,6 +265,18 @@ Full inventory:
   - Docker Compose integration with its own healthcheck (Node's built-in
     `fetch` with a bounded timeout, since curl/wget were not installed
     solely for this purpose)
+  - **(Phase 2A.5) OpenTelemetry instrumentation** via explicit `NodeSDK`
+    initialization in a new `src/telemetry.ts` (`@opentelemetry/instrumentation-http`
+    plus `@fastify/otel`'s `FastifyOtelInstrumentation`, not the
+    deprecated `@opentelemetry/instrumentation-fastify`), started from a
+    new dedicated bootstrap entrypoint (`src/bootstrap.ts` →
+    `dist/bootstrap.js`, now the Dockerfile `CMD`) that starts telemetry
+    before dynamically importing `server.js` — required ESM ordering so
+    `@fastify/otel`'s module-patching takes effect before Fastify is
+    ever constructed. Zero changes to `src/routes/`, `src/services/`, or
+    `src/types/`; `app.ts` unchanged. Exports a SERVER span + HTTP
+    server metrics for `POST /notifications`. No custom metrics or
+    manual spans — auto-instrumentation only.
 
   **Not implemented in this service:**
   - Any actual notification delivery (email, SMS, push) or external
@@ -274,14 +285,14 @@ Full inventory:
   - Event consumption, a message queue, or Kafka/Redpanda usage
   - Calling out to any other service itself (it is only ever called)
   - Database access of any kind
-  - Telemetry / observability
+  - Application log export via OTel, and a real trace backend (traces
+    are only visible via the Collector's `debug` exporter logs)
   - Agent functionality of any kind
 
 - **Observability infrastructure** (`observability/`) — an OpenTelemetry
   Collector, Prometheus, and Grafana, all running via Docker Compose
-  (`otel-collector`, `prometheus`, `grafana`). As of Phase 2A.4, this is
-  fed by `checkout-service`, `payment-service`, and `inventory-service`;
-  `notification-service` was not modified and sends no telemetry.
+  (`otel-collector`, `prometheus`, `grafana`). As of Phase 2A.5, this is
+  fed by **all four** application services.
 
   **Implemented:**
   - `otel-collector` (`otel/opentelemetry-collector-contrib:0.161.0`):
@@ -297,10 +308,10 @@ Full inventory:
     liveness is proven instead by Prometheus successfully scraping it.
   - `prometheus` (`prom/prometheus:v3.15.0`): scrapes itself, the
     Collector's self-telemetry, and the Collector's telemetry-relay
-    endpoint — which now carries real `checkout-service` HTTP
-    server/client + JVM metrics, `payment-service` HTTP server metrics,
-    and `inventory-service` HTTP server metrics — on a persistent named
-    volume (`prometheus_data`), with a `wget`-based healthcheck.
+    endpoint — which now carries real HTTP server metrics (and, for
+    checkout-service, HTTP client + JVM metrics) from all four
+    application services — on a persistent named volume
+    (`prometheus_data`), with a `wget`-based healthcheck.
   - `grafana` (`grafana/grafana-oss:13.0.2`): Prometheus auto-provisioned
     as its default datasource via
     `observability/grafana/provisioning/datasources/datasource.yml`
@@ -319,25 +330,20 @@ Full inventory:
   interfaces.
 
   **Not implemented:**
-  - `notification-service` sending OTLP telemetry or exposing a metrics
-    endpoint (it has no OpenTelemetry SDK; it was not modified)
   - A real trace backend (Tempo, Jaeger, etc.) — traces are only
     visible via the Collector's `debug` exporter logs this phase
-  - Application log export (`OTEL_LOGS_EXPORTER=none` on all three
-    instrumented services; no service emits logs via OTel)
-  - **Full** distributed trace correlation across the checkout →
-    payment → inventory → notification call chain — the
-    checkout → payment segment AND the checkout → inventory segment
-    are both verified distributed traces within the same request
-    (checkout-service's SERVER span is the common parent of both
-    downstream CLIENT spans, each of which is in turn the parent of its
-    respective SERVER span, all sharing one Trace ID with correct
-    parent/child Span IDs); checkout's CLIENT span toward
-    notification-service is not continued by that service, since it is
-    not instrumented
+  - Application log export (`OTEL_LOGS_EXPORTER=none`/equivalent on all
+    four instrumented services; no service emits logs via OTel)
   - Dashboards beyond the minimal datasource-connectivity path, or any
     alerting rules
   - Any consumption of telemetry by an agent
+
+  As of Phase 2A.5, a real `POST /checkouts` request produces a
+  **complete** distributed trace: checkout-service's SERVER span is the
+  common parent of all three downstream CLIENT spans, each of which is
+  in turn the parent of its own branch's SERVER span (payment, inventory,
+  notification — siblings, not a sequential chain), all sharing one
+  Trace ID with correct parent/child Span IDs throughout.
 
 There are no other application services, no message brokers, no
 orchestration, no cloud infrastructure, and no AI provider integration.
@@ -395,35 +401,36 @@ or call back into checkout-service.
 
 ### Observability
 **CURRENT:** An OpenTelemetry Collector, Prometheus, and Grafana all run
-via Docker Compose (see Current Implementation above). `checkout-service`
-is instrumented with the OpenTelemetry Java auto-instrumentation agent
-(pinned `v2.31.1`); `payment-service` is instrumented with OpenTelemetry
-Python zero-code auto-instrumentation (pinned `opentelemetry-distro`
-`0.65b0` / `opentelemetry-exporter-otlp-proto-http` `1.44.0` family);
-`inventory-service` is instrumented with explicit, minimal OpenTelemetry
-Go SDK initialization plus `otelhttp` (pinned `go.opentelemetry.io/otel`/
-`sdk` `v1.46.0`, `otelhttp` `v0.71.0` family — Go has no
-auto-instrumentation equivalent to the other two languages). All three
+via Docker Compose (see Current Implementation above). All four
+application services are instrumented, each its own idiomatic way:
+`checkout-service` with the OpenTelemetry Java auto-instrumentation
+agent (pinned `v2.31.1`); `payment-service` with OpenTelemetry Python
+zero-code auto-instrumentation (pinned `opentelemetry-distro` `0.65b0` /
+`opentelemetry-exporter-otlp-proto-http` `1.44.0` family);
+`inventory-service` with explicit, minimal OpenTelemetry Go SDK
+initialization plus `otelhttp` (pinned `go.opentelemetry.io/otel`/`sdk`
+`v1.46.0`, `otelhttp` `v0.71.0` family); and `notification-service` with
+explicit OpenTelemetry Node SDK initialization plus
+`@opentelemetry/instrumentation-http` and `@fastify/otel` (pinned
+`0.222.0` / `0.21.0` family) — Go and Node have no auto-instrumentation
+equivalent to the Java agent or Python's zero-code distro. All four
 export HTTP metrics and trace spans via OTLP — verified against real
 Prometheus queries and real Collector `debug`-exporter output, not
-assumed. A real `POST /checkouts` request proves ONE trace is
-distributed across **two independent branches**: checkout-service's
-SERVER span is the common parent of a CLIENT span continued by
-payment-service's own SERVER span, and a separate CLIENT span continued
-by inventory-service's own SERVER span (siblings, not parent/child of
-each other) — each verified via a shared Trace ID and correct
-parent/child Span IDs. This is **not** yet "full distributed tracing"
-across all four services. `notification-service` remains uninstrumented
-and does not continue or emit any trace context (checkout's own CLIENT
-span toward it exists in the trace, with correctly no SERVER span).
-Traces have no backend yet (Collector `debug` exporter logs only);
-there is no application log pipeline, and no dashboards or alerting
-rules exist.
+assumed.
+
+It is now fair to say there is a **complete distributed trace across
+the four-service checkout workflow**: a real `POST /checkouts` request
+proves ONE trace where checkout-service's SERVER span is the common
+parent of three independent, sibling branches — CLIENT → payment
+SERVER, CLIENT → inventory SERVER, and CLIENT → notification SERVER
+(explicitly **not** a sequential payment → inventory → notification
+chain) — each verified via a shared Trace ID and correct parent/child
+Span IDs, reconfirmed on a second, independent run. Traces have no
+backend yet (Collector `debug` exporter logs only); there is no
+application log pipeline, and no dashboards or alerting rules exist;
+and none of this telemetry is yet consumed by an agent.
 
 **FUTURE (not yet implemented):**
-- Instrumenting `notification-service` so a complete, verified
-  distributed trace across the full checkout → payment → inventory →
-  notification call chain becomes possible
 - A real trace backend (e.g. Tempo/Jaeger) to replace the temporary
   `debug` exporter
 - An application log export pipeline

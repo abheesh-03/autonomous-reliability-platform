@@ -307,13 +307,13 @@ jobs:
           echo "$datasources"
           echo "$datasources" | jq -e '[.[] | select(.type == "prometheus" and .url == "http://prometheus:9090")] | length > 0'
 
-      # The OTel Java agent's/Python SDK's/Go SDK's metric export interval
-      # and Prometheus's own scrape cycle are both asynchronous, so this
-      # is retried rather than checked once immediately after the smoke
-      # test above. Phase 2A.4 extends this with inventory-service's HTTP
-      # server metrics (checkout-service's and payment-service's checks
-      # are unchanged).
-      - name: Verify checkout-service, payment-service, and inventory-service application metrics reach Prometheus
+      # The OTel Java agent's/Python SDK's/Go SDK's/Node SDK's metric
+      # export interval and Prometheus's own scrape cycle are both
+      # asynchronous, so this is retried rather than checked once
+      # immediately after the smoke test above. Phase 2A.5 extends this
+      # with notification-service's HTTP server metrics (the other three
+      # services' checks are unchanged).
+      - name: Verify all four application services' metrics reach Prometheus
         run: |
           attempts=20
           for i in $(seq 1 "$attempts"); do
@@ -331,32 +331,34 @@ jobs:
                 && echo "$payment_body" | jq -e '.data.result | length > 0' >/dev/null 2>&1 \
                 && inventory_body="$(curl -fsS -G 'http://localhost:9090/api/v1/query' \
                   --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="inventory-service",http_route="/inventory/reservations"}')" \
-                && echo "$inventory_body" | jq -e '.data.result | length > 0' >/dev/null 2>&1
+                && echo "$inventory_body" | jq -e '.data.result | length > 0' >/dev/null 2>&1 \
+                && notification_body="$(curl -fsS -G 'http://localhost:9090/api/v1/query' \
+                  --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="notification-service",http_route="/notifications"}')" \
+                && echo "$notification_body" | jq -e '.data.result | length > 0' >/dev/null 2>&1
             then
               echo "$server_body"
               echo "$client_body"
               echo "$payment_body"
               echo "$inventory_body"
+              echo "$notification_body"
               exit 0
             fi
-            echo "Attempt $i/$attempts: checkout-service/payment-service/inventory-service HTTP metrics not in Prometheus yet"
+            echo "Attempt $i/$attempts: application service HTTP metrics not all in Prometheus yet"
             sleep 3
           done
-          echo "checkout-service, payment-service, and/or inventory-service application metrics never appeared in Prometheus" >&2
+          echo "one or more application services' metrics never appeared in Prometheus" >&2
           exit 1
 
-      # There is no trace backend yet (Phase 2A.2/2A.3/2A.4); traces are
-      # verified via the Collector's debug exporter output in its own
-      # container logs. Retried because the batch/span export delay is
-      # async for the Java agent, the Python SDK, and the Go SDK alike.
-      # Phase 2A.4 extends this with a deterministic parse
-      # (scripts/parse-checkout-trace.py, the same generalized script the
-      # local verifier uses, replacing the payment-only parser from Phase
-      # 2A.3) proving that ONE checkout trace contains both a valid
-      # checkout->payment branch and a valid checkout->inventory branch
-      # (shared Trace ID, correct parent/child Span IDs on each branch)
-      # — not just that all three services appear somewhere in the logs.
-      - name: Verify checkout-service trace evidence and checkout distributed trace continuation
+      # There is no trace backend yet; traces are verified via the
+      # Collector's debug exporter output in its own container logs.
+      # Retried because the batch/span export delay is async for the
+      # Java agent, the Python SDK, the Go SDK, and the Node SDK alike.
+      # Phase 2A.5 extends the same generalized parser
+      # (scripts/parse-checkout-trace.py) to require all three downstream
+      # branches (payment, inventory, notification) — a COMPLETE
+      # distributed trace across the whole checkout workflow, not just
+      # that all four service names appear somewhere in the logs.
+      - name: Verify checkout-service trace evidence and complete checkout distributed trace
         run: |
           attempts=20
           for i in $(seq 1 "$attempts"); do
@@ -373,10 +375,10 @@ jobs:
               echo "$checkout_trace_match"
               exit 0
             fi
-            echo "Attempt $i/$attempts: checkout trace evidence and/or checkout distributed trace correlation (payment + inventory branches) not found yet"
+            echo "Attempt $i/$attempts: checkout trace evidence and/or complete checkout distributed trace correlation (payment + inventory + notification branches) not found yet"
             sleep 3
           done
-          echo "checkout-service trace evidence and/or checkout distributed trace correlation never appeared in Collector logs" >&2
+          echo "checkout-service trace evidence and/or complete checkout distributed trace correlation never appeared in Collector logs" >&2
           exit 1
 
       - name: Show service logs

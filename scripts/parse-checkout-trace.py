@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 # Parses `docker compose logs --no-log-prefix otel-collector` from
 # stdin into individual spans (grouping each Span block with the
-# service.name of its enclosing ResourceSpans block), then proves real
-# distributed trace continuation for one checkout trace:
+# service.name of its enclosing ResourceSpans block), then proves a
+# complete distributed checkout trace across all three downstream
+# branches:
 #
-#                     +-> checkout payment CLIENT -> payment SERVER
-#   checkout SERVER --|
-#                     +-> checkout inventory CLIENT -> inventory SERVER
-#                     +-> checkout notification CLIENT  (no SERVER yet —
-#                                                          notification-
-#                                                          service is not
-#                                                          instrumented)
+#                     +-> checkout payment CLIENT      -> payment SERVER
+#   checkout SERVER --|-> checkout inventory CLIENT    -> inventory SERVER
+#                     +-> checkout notification CLIENT -> notification SERVER
 #
-# All spans above must share one Trace ID; each downstream SERVER
-# span's Parent ID must equal its own checkout CLIENT span's Span ID
-# (payment and inventory are sibling branches, not parent/child of each
-# other). Exits 0 and prints the matched IDs if a complete, valid match
-# is found, else exits 1.
+# Payment, inventory, and notification are sibling branches off the one
+# checkout SERVER span — NOT a sequential payment -> inventory ->
+# notification chain. All seven spans above must share one Trace ID;
+# each downstream CLIENT span's Parent ID must equal the checkout
+# SERVER span's own Span ID, and each downstream SERVER span's Parent
+# ID must equal its own branch's CLIENT span's Span ID. Exits 0 and
+# prints the matched IDs if a complete, valid match is found, else
+# exits 1. Extra spans (e.g. notification-service's internal
+# @fastify/otel handler/hook child spans, or unrelated direct requests
+# outside the checkout flow) are ignored — matching is driven entirely
+# by the Trace ID / Parent ID / Span ID relationships, not by assuming
+# there is only one span of a given name.
 
 import re
 import sys
@@ -105,6 +109,7 @@ checkout_inventory_client = spans_matching('checkout-service', 'Client', 'url.fu
 # empirically, not assumed.
 inventory_server = spans_matching('inventory-service', 'Server', 'url.path', '/inventory/reservations')
 checkout_notification_client = spans_matching('checkout-service', 'Client', 'url.full', 'http://notification-service:8083/notifications')
+notification_server = spans_matching('notification-service', 'Server', 'http.route', '/notifications')
 
 trace_id_re = re.compile(r'^[0-9a-f]{32}$')
 span_id_re = re.compile(r'^[0-9a-f]{16}$')
@@ -138,16 +143,6 @@ def find_client_then_server(clients, servers, trace_id, parent_span_id):
     return None
 
 
-def find_client(clients, trace_id, parent_span_id):
-    for c in clients:
-        if (is_valid_hex_id(c['trace_id'], trace_id_re)
-                and is_valid_hex_id(c['span_id'], span_id_re)
-                and c['trace_id'] == trace_id
-                and c['parent_id'] == parent_span_id):
-            return c
-    return None
-
-
 for cs in checkout_server:
     if not (is_valid_hex_id(cs['trace_id'], trace_id_re) and is_valid_hex_id(cs['span_id'], span_id_re)):
         continue
@@ -161,12 +156,13 @@ for cs in checkout_server:
     if not inventory_match:
         continue
 
-    notification_client = find_client(checkout_notification_client, trace_id, checkout_span_id)
-    if not notification_client:
+    notification_match = find_client_then_server(checkout_notification_client, notification_server, trace_id, checkout_span_id)
+    if not notification_match:
         continue
 
     payment_client, payment_srv = payment_match
     inventory_client, inventory_srv = inventory_match
+    notification_client, notification_srv = notification_match
 
     print(
         f"trace_id={trace_id} "
@@ -175,7 +171,8 @@ for cs in checkout_server:
         f"payment_server_span_id={payment_srv['span_id']} "
         f"inventory_client_span_id={inventory_client['span_id']} "
         f"inventory_server_span_id={inventory_srv['span_id']} "
-        f"notification_client_span_id={notification_client['span_id']}"
+        f"notification_client_span_id={notification_client['span_id']} "
+        f"notification_server_span_id={notification_srv['span_id']}"
     )
     sys.exit(0)
 

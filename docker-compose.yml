@@ -17,12 +17,14 @@
 #   - notification-service: exposes a simulated POST /notifications
 #     (Phase 1B.3). No real message delivery, persistence, or database.
 #   - otel-collector / prometheus / grafana: observability infrastructure
-#     bootstrap (Phase 2A.1). As of Phase 2A.4, checkout-service,
-#     payment-service, and inventory-service all send it real OTLP
-#     telemetry (metrics + traces); notification-service remains
-#     uninstrumented and sends nothing. Prometheus scrapes itself, the
-#     Collector's own telemetry, and the Collector's application-metrics
-#     relay; Grafana has Prometheus provisioned as its datasource.
+#     bootstrap (Phase 2A.1). As of Phase 2A.5, all four application
+#     services send it real OTLP telemetry (metrics + traces), and one
+#     real POST /checkouts produces a complete distributed trace across
+#     checkout-service and all three of its downstream branches
+#     (payment, inventory, notification — siblings, not a sequential
+#     chain). Prometheus scrapes itself, the Collector's own telemetry,
+#     and the Collector's application-metrics relay; Grafana has
+#     Prometheus provisioned as its datasource.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -63,10 +65,11 @@ services:
       # OpenTelemetry Java agent (Phase 2A.2) — attached via
       # JAVA_TOOL_OPTIONS rather than baked into the image's ENTRYPOINT,
       # so the same image still runs with no telemetry when launched
-      # outside this Compose stack. As of Phase 2A.4, payment-service
-      # (Python zero-code auto-instrumentation) and inventory-service
-      # (manual Go SDK init, see its own service block below) are also
-      # instrumented; notification-service remains uninstrumented.
+      # outside this Compose stack. As of Phase 2A.5, payment-service
+      # (Python zero-code auto-instrumentation), inventory-service
+      # (manual Go SDK init), and notification-service (manual Node SDK
+      # init) are also instrumented — see their own service blocks
+      # below. All four application services now send telemetry.
       JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
       OTEL_SERVICE_NAME: checkout-service
       OTEL_RESOURCE_ATTRIBUTES: "service.version=0.1.0,deployment.environment.name=local"
@@ -155,6 +158,23 @@ services:
     restart: unless-stopped
     ports:
       - "8083:8083"
+    environment:
+      # OpenTelemetry (Phase 2A.5) — manual Node SDK initialization in
+      # src/telemetry.ts, started from a dedicated src/bootstrap.ts
+      # entrypoint (dist/bootstrap.js) that starts telemetry before
+      # dynamically importing dist/server.js — required so @fastify/otel's
+      # module-patching takes effect before Fastify is ever constructed.
+      # Unlike payment-service's Compose-activated approach, the
+      # Dockerfile's own CMD points at dist/bootstrap.js directly (ESM
+      # module-evaluation ordering makes a Compose-level command
+      # override impractical here); without OTLP env vars, the SDK
+      # still starts but has nothing configured to export to.
+      OTEL_SERVICE_NAME: notification-service
+      OTEL_RESOURCE_ATTRIBUTES: "service.version=0.1.0,deployment.environment.name=local"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      # Short export intervals for deterministic local verification.
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      OTEL_BSP_SCHEDULE_DELAY: "1000"
     # No curl/wget installed solely for the healthcheck — Node's
     # built-in fetch (with a bounded timeout) is used instead.
     healthcheck:

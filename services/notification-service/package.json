@@ -11,9 +11,15 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/health.test.ts test/notifications.test.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/server.js"
+    "start": "node dist/bootstrap.js"
   },
   "dependencies": {
+    "@fastify/otel": "0.21.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "0.222.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.222.0",
+    "@opentelemetry/instrumentation-http": "0.222.0",
+    "@opentelemetry/sdk-metrics": "2.11.0",
+    "@opentelemetry/sdk-node": "0.222.0",
     "fastify": "5.12.5"
   },
   "devDependencies": {

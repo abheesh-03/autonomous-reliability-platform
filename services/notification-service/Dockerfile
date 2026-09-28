@@ -31,4 +31,9 @@ USER node
 
 EXPOSE 8083
 
-CMD ["node", "dist/server.js"]
+# dist/bootstrap.js (not dist/server.js) is the entrypoint: it starts
+# OpenTelemetry (patching the `fastify` module via @fastify/otel) before
+# dynamically importing dist/server.js, which is what actually
+# constructs and starts the Fastify app — required ordering for
+# instrumentation to observe the application at all (see src/bootstrap.ts).
+CMD ["node", "dist/bootstrap.js"]

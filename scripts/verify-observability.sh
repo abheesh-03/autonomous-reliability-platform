@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
 #
-# verify-observability.sh — Bundled Phase 2A.1/2A.2/2A.3/2A.4 verification.
+# verify-observability.sh — Bundled Phase 2A.1-2A.5 verification.
 #
 # Starts the full Docker Compose environment, waits for every
 # application and observability service to become healthy (with a
 # documented exception for otel-collector, whose official image has no
 # shell/wget/curl and therefore no Docker-level healthcheck), verifies
 # Prometheus's scrape targets and Grafana's provisioned datasource,
-# re-runs the POST /checkouts regression check, then checks that
-# checkout-service's (Phase 2A.2), payment-service's (Phase 2A.3), and
-# inventory-service's (Phase 2A.4) telemetry actually reached Prometheus
-# (application metrics) and the Collector (trace spans) — including a
-# deterministic parse (scripts/parse-checkout-trace.py) proving that one
-# real checkout trace contains a valid checkout->payment branch AND a
-# valid checkout->inventory branch (shared Trace ID, correct parent/
-# child Span IDs on each branch) — then always tears the environment
-# down (without deleting volumes) and confirms the named volumes still
-# exist.
+# re-runs the POST /checkouts regression check, then checks that all
+# four application services' (checkout Phase 2A.2, payment Phase 2A.3,
+# inventory Phase 2A.4, notification Phase 2A.5) telemetry actually
+# reached Prometheus (application metrics) and the Collector (trace
+# spans) — including a deterministic parse (scripts/parse-checkout-trace.py)
+# proving that one real checkout trace is a complete distributed trace
+# across all three downstream branches (checkout->payment,
+# checkout->inventory, checkout->notification — siblings, not a
+# sequential chain; shared Trace ID, correct parent/child Span IDs on
+# every branch) — then always tears the environment down (without
+# deleting volumes) and confirms the named volumes still exist.
 #
 # Exits non-zero immediately on the first failed check.
 
@@ -259,11 +260,30 @@ done
 [ "$inventory_metrics_ok" = true ] || fail "inventory-service HTTP server metrics never appeared in Prometheus"
 echo "  inventory-service HTTP server metrics present (http_server_request_duration_seconds_count, service_name=inventory-service, http_route=/inventory/reservations)"
 
+echo ""
+echo "-- waiting for notification-service metrics to reach Prometheus (Phase"
+echo "   2A.5; same async export/scrape considerations as above) --"
+
+notification_metrics_ok=false
+for i in $(seq 1 20); do
+  if notification_body="$(curl -fsS -G 'http://127.0.0.1:9090/api/v1/query' \
+        --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="notification-service",http_route="/notifications"}' 2>/dev/null)" \
+      && echo "$notification_body" | jq -e '.data.result | length > 0' >/dev/null 2>&1
+  then
+    notification_metrics_ok=true
+    break
+  fi
+  echo "  attempt $i/20: notification-service HTTP server metrics not in Prometheus yet"
+  sleep 3
+done
+[ "$notification_metrics_ok" = true ] || fail "notification-service HTTP server metrics never appeared in Prometheus"
+echo "  notification-service HTTP server metrics present (http_server_request_duration_seconds_count, service_name=notification-service, http_route=/notifications)"
+
 # --------------------------------------------------------------------
-# H. Observability: trace evidence + checkout distributed trace
-#    continuation (payment and inventory branches) in Collector logs
+# H. Observability: trace evidence + complete checkout distributed
+#    trace (all three downstream branches) in Collector logs
 # --------------------------------------------------------------------
-section "H. Observability: trace evidence + checkout distributed trace continuation"
+section "H. Observability: trace evidence + complete checkout distributed trace"
 
 echo "-- Phase 2A.2 has no trace backend yet; traces are verified via the"
 echo "   Collector's debug exporter output in its own container logs --"
@@ -290,14 +310,13 @@ echo "  checkout-service SERVER span 'POST /checkouts' present in Collector logs
 echo "  CLIENT spans present for all 3 downstream calls (payment-service, inventory-service, notification-service)"
 
 echo ""
-echo "-- Phase 2A.4: proving real distributed trace continuation for both"
+echo "-- Phase 2A.5: proving a COMPLETE distributed trace across all three"
 echo "   downstream branches of ONE checkout trace — checkout SERVER ->"
-echo "   checkout payment CLIENT -> payment SERVER, and checkout SERVER ->"
-echo "   checkout inventory CLIENT -> inventory SERVER (siblings, not"
-echo "   parent/child of each other) — plus the checkout notification"
-echo "   CLIENT span in that same trace (no notification SERVER span yet,"
-echo "   since notification-service is not instrumented) — using a small"
-echo "   deterministic parser, not a brittle grep-only heuristic --"
+echo "   {payment CLIENT -> payment SERVER}, {inventory CLIENT -> inventory"
+echo "   SERVER}, and {notification CLIENT -> notification SERVER}, all as"
+echo "   siblings (not a sequential payment->inventory->notification"
+echo "   chain) — using a small deterministic parser, not a brittle"
+echo "   grep-only heuristic --"
 
 checkout_trace_match=""
 for i in $(seq 1 20); do
@@ -305,11 +324,11 @@ for i in $(seq 1 20); do
     break
   fi
   checkout_trace_match=""
-  echo "  attempt $i/20: checkout distributed trace correlation (payment + inventory branches) not found yet"
+  echo "  attempt $i/20: complete checkout distributed trace correlation (payment + inventory + notification branches) not found yet"
   sleep 3
 done
-[ -n "$checkout_trace_match" ] || fail "checkout SERVER -> {payment,inventory} SERVER correlation (shared Trace ID, matching Parent/Span IDs on both branches) was never found in Collector logs"
-echo "  checkout distributed trace continuation confirmed (payment + inventory branches): $checkout_trace_match"
+[ -n "$checkout_trace_match" ] || fail "checkout SERVER -> {payment,inventory,notification} SERVER correlation (shared Trace ID, matching Parent/Span IDs on every branch) was never found in Collector logs"
+echo "  complete checkout distributed trace confirmed (payment + inventory + notification branches): $checkout_trace_match"
 
 # --------------------------------------------------------------------
 # I. Container/log sanity
@@ -365,4 +384,4 @@ do
 done
 
 section "SUCCESS"
-echo "Phase 2A.1/2A.2/2A.3/2A.4 observability verification passed."
+echo "Phase 2A.1-2A.5 observability verification passed."

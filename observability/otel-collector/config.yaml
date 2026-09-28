@@ -1,9 +1,13 @@
 # OpenTelemetry Collector configuration for local development.
 #
 # Phase 2A.1 scope: infrastructure bootstrap. Phase 2A.2 added real
-# telemetry from checkout-service, Phase 2A.3 added payment-service, and
-# Phase 2A.4 added inventory-service — all three now send real OTLP
-# metrics and traces. notification-service remains uninstrumented.
+# telemetry from checkout-service, Phase 2A.3 added payment-service,
+# Phase 2A.4 added inventory-service, and Phase 2A.5 added
+# notification-service — all four application services now send real
+# OTLP metrics and traces, completing one distributed trace across the
+# whole checkout workflow (checkout-service and its three downstream
+# branches: payment, inventory, notification — siblings, not a
+# sequential chain).
 #
 # Traces still go to the "debug" exporter only. There is intentionally
 # no trace backend (Tempo/Jaeger/etc.) yet — that belongs to a later
