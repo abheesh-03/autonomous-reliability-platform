@@ -307,10 +307,12 @@ jobs:
           echo "$datasources"
           echo "$datasources" | jq -e '[.[] | select(.type == "prometheus" and .url == "http://prometheus:9090")] | length > 0'
 
-      # The OTel Java agent's metric export interval and Prometheus's own
-      # scrape cycle are both asynchronous, so this is retried rather than
-      # checked once immediately after the smoke test above.
-      - name: Verify checkout-service application metrics reach Prometheus
+      # The OTel Java agent's/Python SDK's metric export interval and
+      # Prometheus's own scrape cycle are both asynchronous, so this is
+      # retried rather than checked once immediately after the smoke
+      # test above. Phase 2A.3 extends this with payment-service's HTTP
+      # server metrics (checkout-service's checks are unchanged).
+      - name: Verify checkout-service and payment-service application metrics reach Prometheus
         run: |
           attempts=20
           for i in $(seq 1 "$attempts"); do
@@ -322,22 +324,32 @@ jobs:
                 && echo "$client_body" | jq -e '
                     ([.data.result[].metric.server_address] | unique | sort) ==
                     ["inventory-service", "notification-service", "payment-service"]
-                  ' >/dev/null 2>&1
+                  ' >/dev/null 2>&1 \
+                && payment_body="$(curl -fsS -G 'http://localhost:9090/api/v1/query' \
+                  --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="payment-service",http_route="/payments/authorize"}')" \
+                && echo "$payment_body" | jq -e '.data.result | length > 0' >/dev/null 2>&1
             then
               echo "$server_body"
               echo "$client_body"
+              echo "$payment_body"
               exit 0
             fi
-            echo "Attempt $i/$attempts: checkout-service HTTP server/client metrics not in Prometheus yet"
+            echo "Attempt $i/$attempts: checkout-service/payment-service HTTP metrics not in Prometheus yet"
             sleep 3
           done
-          echo "checkout-service application metrics (HTTP server + HTTP client) never appeared in Prometheus" >&2
+          echo "checkout-service and/or payment-service application metrics never appeared in Prometheus" >&2
           exit 1
 
-      # There is no trace backend yet (Phase 2A.2); traces are verified via
-      # the Collector's debug exporter output in its own container logs.
-      # Retried because the batch span processor's export delay is async.
-      - name: Verify checkout-service trace data reaches the Collector
+      # There is no trace backend yet (Phase 2A.2/2A.3); traces are
+      # verified via the Collector's debug exporter output in its own
+      # container logs. Retried because the batch/span export delay is
+      # async for both the Java agent and the Python SDK. Phase 2A.3
+      # extends this with a deterministic parse (scripts/parse-payment-trace.py,
+      # the same script the local verifier uses) proving the
+      # checkout-service CLIENT span and the payment-service SERVER span
+      # share a Trace ID with correct parent/child Span IDs — not just
+      # that both services appear somewhere in the logs.
+      - name: Verify checkout-service trace evidence and checkout->payment distributed trace continuation
         run: |
           attempts=20
           for i in $(seq 1 "$attempts"); do
@@ -348,14 +360,16 @@ jobs:
                 && grep -qF 'Kind           : Client' <<<"$logs" \
                 && grep -qF 'url.full: Str(http://payment-service:8081/payments/authorize)' <<<"$logs" \
                 && grep -qF 'url.full: Str(http://inventory-service:8082/inventory/reservations)' <<<"$logs" \
-                && grep -qF 'url.full: Str(http://notification-service:8083/notifications)' <<<"$logs"
+                && grep -qF 'url.full: Str(http://notification-service:8083/notifications)' <<<"$logs" \
+                && payment_trace_match="$(docker compose logs --no-log-prefix otel-collector | python3 scripts/parse-payment-trace.py)"
             then
+              echo "$payment_trace_match"
               exit 0
             fi
-            echo "Attempt $i/$attempts: checkout-service trace evidence not in Collector logs yet"
+            echo "Attempt $i/$attempts: checkout trace evidence and/or checkout->payment distributed trace correlation not found yet"
             sleep 3
           done
-          echo "checkout-service trace evidence (server span + 3 downstream client spans) never appeared in Collector logs" >&2
+          echo "checkout-service trace evidence and/or checkout->payment distributed trace correlation never appeared in Collector logs" >&2
           exit 1
 
       - name: Show service logs

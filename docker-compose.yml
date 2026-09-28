@@ -17,11 +17,12 @@
 #   - notification-service: exposes a simulated POST /notifications
 #     (Phase 1B.3). No real message delivery, persistence, or database.
 #   - otel-collector / prometheus / grafana: observability infrastructure
-#     bootstrap (Phase 2A.1). Not yet fed by any application service —
-#     no service sends OTLP telemetry or exposes a metrics endpoint yet.
-#     Prometheus scrapes itself and the Collector's own telemetry;
-#     Grafana has Prometheus provisioned as its datasource. This proves
-#     the observability path is alive ahead of future app instrumentation.
+#     bootstrap (Phase 2A.1). As of Phase 2A.3, checkout-service and
+#     payment-service both send it real OTLP telemetry (metrics +
+#     traces); inventory-service and notification-service remain
+#     uninstrumented and send nothing. Prometheus scrapes itself, the
+#     Collector's own telemetry, and the Collector's application-metrics
+#     relay; Grafana has Prometheus provisioned as its datasource.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -62,9 +63,10 @@ services:
       # OpenTelemetry Java agent (Phase 2A.2) — attached via
       # JAVA_TOOL_OPTIONS rather than baked into the image's ENTRYPOINT,
       # so the same image still runs with no telemetry when launched
-      # outside this Compose stack. checkout-service is the only
-      # instrumented service so far; payment/inventory/notification are
-      # not instrumented in this phase.
+      # outside this Compose stack. As of Phase 2A.3, payment-service is
+      # also instrumented (Python zero-code auto-instrumentation, see
+      # its own service block below); inventory-service and
+      # notification-service remain uninstrumented.
       JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
       OTEL_SERVICE_NAME: checkout-service
       OTEL_RESOURCE_ATTRIBUTES: "service.version=0.1.0,deployment.environment.name=local"
@@ -88,8 +90,29 @@ services:
     build:
       context: ./services/payment-service
     restart: unless-stopped
+    # OpenTelemetry zero-code auto-instrumentation (Phase 2A.3) — the
+    # Dockerfile's own CMD is plain Uvicorn with no telemetry, so this
+    # image still runs normally when launched standalone. Only this
+    # Compose environment opts into instrumentation, by wrapping the
+    # same Uvicorn invocation with `opentelemetry-instrument`.
+    command: ["opentelemetry-instrument", "uvicorn", "payment_service.main:app", "--host", "0.0.0.0", "--port", "8081"]
     ports:
       - "8081:8081"
+    environment:
+      OTEL_SERVICE_NAME: payment-service
+      OTEL_RESOURCE_ATTRIBUTES: "service.version=0.1.0,deployment.environment.name=local"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_LOGS_EXPORTER: none
+      OTEL_PROPAGATORS: tracecontext,baggage
+      # Short export intervals for deterministic local verification.
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      OTEL_BSP_SCHEDULE_DELAY: "1000"
+      # Aligns HTTP semantic conventions with checkout-service's Java
+      # agent (which already emits the stable conventions by default).
+      OTEL_SEMCONV_STABILITY_OPT_IN: http
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8081/health', timeout=3)\" || exit 1"]
       interval: 5s

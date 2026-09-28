@@ -8,7 +8,12 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src/ src/
 
-RUN pip install --no-cache-dir .
+# The "observability" extra (OpenTelemetry zero-code auto-instrumentation,
+# Phase 2A.3) is installed into the image so it's available, but CMD below
+# still launches plain Uvicorn — this image runs with no telemetry when
+# used standalone. Docker Compose is what opts into instrumentation, by
+# overriding the command to run through `opentelemetry-instrument`.
+RUN pip install --no-cache-dir ".[observability]"
 
 RUN groupadd --system app && useradd --system --gid app --no-create-home app
 USER app

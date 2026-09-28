@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 #
-# verify-observability.sh — Bundled Phase 2A.1/2A.2 verification.
+# verify-observability.sh — Bundled Phase 2A.1/2A.2/2A.3 verification.
 #
 # Starts the full Docker Compose environment, waits for every
 # application and observability service to become healthy (with a
 # documented exception for otel-collector, whose official image has no
 # shell/wget/curl and therefore no Docker-level healthcheck), verifies
 # Prometheus's scrape targets and Grafana's provisioned datasource,
-# re-runs the POST /checkouts regression check, then (Phase 2A.2) checks
-# that checkout-service's OTel Java agent telemetry actually reached
-# Prometheus (application metrics) and the Collector (trace spans),
-# then always tears the environment down (without deleting volumes) and
-# confirms the named volumes still exist.
+# re-runs the POST /checkouts regression check, then checks that
+# checkout-service's (Phase 2A.2) and payment-service's (Phase 2A.3)
+# telemetry actually reached Prometheus (application metrics) and the
+# Collector (trace spans) — including, for Phase 2A.3, a deterministic
+# parse proving the checkout->payment call is a real distributed trace
+# (shared Trace ID, correct parent/child Span IDs) — then always tears
+# the environment down (without deleting volumes) and confirms the
+# named volumes still exist.
 #
 # Exits non-zero immediately on the first failed check.
 
@@ -216,10 +219,30 @@ done
 echo "  checkout-service HTTP server metrics present (http_server_request_duration_seconds_count, service_name=checkout-service, http_route=/checkouts)"
 echo "  checkout-service HTTP client metrics present for all 3 downstream calls (payment-service, inventory-service, notification-service)"
 
+echo ""
+echo "-- waiting for payment-service metrics to reach Prometheus (Phase"
+echo "   2A.3; same async export/scrape considerations as above) --"
+
+payment_metrics_ok=false
+for i in $(seq 1 20); do
+  if payment_body="$(curl -fsS -G 'http://127.0.0.1:9090/api/v1/query' \
+        --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="payment-service",http_route="/payments/authorize"}' 2>/dev/null)" \
+      && echo "$payment_body" | jq -e '.data.result | length > 0' >/dev/null 2>&1
+  then
+    payment_metrics_ok=true
+    break
+  fi
+  echo "  attempt $i/20: payment-service HTTP server metrics not in Prometheus yet"
+  sleep 3
+done
+[ "$payment_metrics_ok" = true ] || fail "payment-service HTTP server metrics never appeared in Prometheus"
+echo "  payment-service HTTP server metrics present (http_server_request_duration_seconds_count, service_name=payment-service, http_route=/payments/authorize)"
+
 # --------------------------------------------------------------------
-# H. Observability: checkout-service trace evidence in Collector logs
+# H. Observability: trace evidence + checkout->payment distributed
+#    trace continuation in Collector logs
 # --------------------------------------------------------------------
-section "H. Observability: checkout-service trace evidence in Collector logs"
+section "H. Observability: trace evidence + checkout->payment distributed trace continuation"
 
 echo "-- Phase 2A.2 has no trace backend yet; traces are verified via the"
 echo "   Collector's debug exporter output in its own container logs --"
@@ -244,6 +267,25 @@ done
 [ "$trace_evidence_ok" = true ] || fail "checkout-service trace evidence (server span + 3 downstream client spans) never appeared in Collector logs"
 echo "  checkout-service SERVER span 'POST /checkouts' present in Collector logs"
 echo "  CLIENT spans present for all 3 downstream calls (payment-service, inventory-service, notification-service)"
+
+echo ""
+echo "-- Phase 2A.3: proving real distributed trace continuation from the"
+echo "   checkout-service CLIENT span to a payment-service SERVER span"
+echo "   (same Trace ID, payment span's Parent ID == checkout span's own"
+echo "   Span ID) using a small deterministic parser, not a brittle"
+echo "   grep-only heuristic --"
+
+payment_trace_match=""
+for i in $(seq 1 20); do
+  if payment_trace_match="$(docker compose logs --no-log-prefix otel-collector 2>/dev/null | python3 scripts/parse-payment-trace.py)"; then
+    break
+  fi
+  payment_trace_match=""
+  echo "  attempt $i/20: checkout->payment distributed trace correlation not found yet"
+  sleep 3
+done
+[ -n "$payment_trace_match" ] || fail "checkout CLIENT span -> payment SERVER span correlation (shared Trace ID, matching Parent/Span ID) was never found in Collector logs"
+echo "  checkout->payment distributed trace continuation confirmed: $payment_trace_match"
 
 # --------------------------------------------------------------------
 # I. Container/log sanity
@@ -299,4 +341,4 @@ do
 done
 
 section "SUCCESS"
-echo "Phase 2A.1/2A.2 observability verification passed."
+echo "Phase 2A.1/2A.2/2A.3 observability verification passed."

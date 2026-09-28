@@ -18,6 +18,15 @@ dev = [
     "pytest==9.1.1",
     "httpx==0.28.1",
 ]
+# OpenTelemetry zero-code auto-instrumentation (Phase 2A.3), kept
+# separate from core runtime dependencies. Only installed/activated in
+# the Docker Compose environment via `opentelemetry-instrument`; the
+# service's own source is unmodified and does not import these.
+observability = [
+    "opentelemetry-distro==0.65b0",
+    "opentelemetry-instrumentation-fastapi==0.65b0",
+    "opentelemetry-exporter-otlp-proto-http==1.44.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
