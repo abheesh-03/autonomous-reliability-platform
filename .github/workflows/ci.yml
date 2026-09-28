@@ -14,7 +14,7 @@ jobs:
   repository-validation:
     name: Repository validation
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -236,6 +236,76 @@ jobs:
             and .notification.status == "ACCEPTED"
           '
 
+      - name: Wait for Prometheus to become healthy
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            cid="$(docker compose ps -q prometheus)"
+            health="$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || true)"
+            echo "Attempt $i/$attempts: health=$health"
+            if [ "$health" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Prometheus did not become healthy in time" >&2
+          exit 1
+
+      - name: Wait for Grafana to become healthy
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            cid="$(docker compose ps -q grafana)"
+            health="$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || true)"
+            echo "Attempt $i/$attempts: health=$health"
+            if [ "$health" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Grafana did not become healthy in time" >&2
+          exit 1
+
+      # otel-collector's official image has no shell/wget/curl, so it has
+      # no Docker-level healthcheck (see docker-compose.yml comment). Its
+      # liveness is instead proven here: Prometheus can only report this
+      # scrape target "up" if it actually reached the Collector over the
+      # Compose network and got a valid response.
+      - name: Verify Prometheus reports itself and the Collector as UP
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            body="$(curl -fsS http://localhost:9090/api/v1/targets)"
+            up="$(echo "$body" | jq -e '
+              ([.data.activeTargets[] | select(.labels.job=="prometheus") | .health] | length > 0 and all(.[]; . == "up"))
+              and
+              ([.data.activeTargets[] | select(.labels.job=="otel-collector") | .health] | length > 0 and all(.[]; . == "up"))
+            ' 2>/dev/null)"
+            echo "Attempt $i/$attempts: prometheus+collector targets up=$up"
+            if [ "$up" = "true" ]; then
+              echo "$body"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Prometheus and/or otel-collector scrape targets never reported UP" >&2
+          curl -fsS http://localhost:9090/api/v1/targets || true
+          exit 1
+
+      - name: Verify Grafana health and provisioned Prometheus datasource
+        run: |
+          set -a
+          . ./.env
+          set +a
+
+          health="$(curl -fsS http://localhost:3000/api/health)"
+          echo "$health"
+          echo "$health" | jq -e '.database == "ok"'
+
+          datasources="$(curl -fsS -u "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD" http://localhost:3000/api/datasources)"
+          echo "$datasources"
+          echo "$datasources" | jq -e '[.[] | select(.type == "prometheus" and .url == "http://prometheus:9090")] | length > 0'
+
       - name: Show service logs
         if: always()
         run: |
@@ -244,6 +314,9 @@ jobs:
           docker compose logs --tail=100 payment-service
           docker compose logs --tail=100 inventory-service
           docker compose logs --tail=100 notification-service
+          docker compose logs --tail=100 otel-collector
+          docker compose logs --tail=100 prometheus
+          docker compose logs --tail=100 grafana
 
       - name: Stop Compose environment (preserve volumes)
         if: always()

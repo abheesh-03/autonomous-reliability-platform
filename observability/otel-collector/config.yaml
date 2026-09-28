@@ -1,0 +1,47 @@
+# OpenTelemetry Collector configuration for local development.
+#
+# Phase 2A.1 scope: infrastructure bootstrap only. No application
+# service sends telemetry here yet. The OTLP receiver and Prometheus
+# exporter pipeline below are wired up and ready for that, but carry no
+# data until a later phase instruments an application service. Until
+# then, the Collector's own internal ("self") telemetry on port 8888 is
+# what proves this observability path is alive end-to-end.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  # Re-exposes any telemetry received over OTLP in Prometheus format.
+  # Empty today (no service sends OTLP telemetry yet) but ready for
+  # future application instrumentation.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]

@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs verify-observability
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -22,6 +22,10 @@ help: ## Show available targets
 	@echo "  notification-build  Build the notification-service Docker image"
 	@echo "  notification-test   Run notification-service typecheck/test/build on Node 24 (via Docker)"
 	@echo "  notification-logs   Show recent notification-service logs"
+	@echo "  otel-logs           Show recent otel-collector logs"
+	@echo "  prometheus-logs     Show recent Prometheus logs"
+	@echo "  grafana-logs        Show recent Grafana logs"
+	@echo "  verify-observability Bundled Phase 2A.1 verification (starts Compose, checks everything, tears down)"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -92,3 +96,15 @@ notification-test: ## Run notification-service typecheck/test/build on Node 24 (
 
 notification-logs: ## Show recent notification-service logs
 	docker compose logs --tail=100 notification-service
+
+otel-logs: ## Show recent otel-collector logs
+	docker compose logs --tail=100 otel-collector
+
+prometheus-logs: ## Show recent Prometheus logs
+	docker compose logs --tail=100 prometheus
+
+grafana-logs: ## Show recent Grafana logs
+	docker compose logs --tail=100 grafana
+
+verify-observability: ## Bundled Phase 2A.1 verification (starts Compose, checks everything, tears down)
+	./scripts/verify-observability.sh

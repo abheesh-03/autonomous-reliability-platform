@@ -16,6 +16,12 @@
 #     (Phase 1B.2). No real stock tracking, persistence, or database.
 #   - notification-service: exposes a simulated POST /notifications
 #     (Phase 1B.3). No real message delivery, persistence, or database.
+#   - otel-collector / prometheus / grafana: observability infrastructure
+#     bootstrap (Phase 2A.1). Not yet fed by any application service —
+#     no service sends OTLP telemetry or exposes a metrics endpoint yet.
+#     Prometheus scrapes itself and the Collector's own telemetry;
+#     Grafana has Prometheus provisioned as its datasource. This proves
+#     the observability path is alive ahead of future app instrumentation.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -103,5 +109,68 @@ services:
       retries: 5
       start_period: 15s
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.161.0
+    restart: unless-stopped
+    volumes:
+      - ./observability/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    # Bound to loopback only — these ports (OTLP + health_check) have no
+    # authentication, so they should not be reachable from outside this
+    # machine even in local development.
+    ports:
+      - "127.0.0.1:4317:4317" # OTLP gRPC (future application telemetry)
+      - "127.0.0.1:4318:4318" # OTLP HTTP (future application telemetry)
+      - "127.0.0.1:13133:13133" # health_check extension
+    # The official Contrib image is a single static binary with no
+    # shell, wget, or curl, so no Docker-level HEALTHCHECK can be
+    # defined here without modifying the image. Liveness is instead
+    # verified via the exposed health_check port (13133, reachable from
+    # the host/other containers) and, more meaningfully, via Prometheus
+    # reporting this service's scrape target as "up".
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    restart: unless-stopped
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    # Bound to loopback only — no authentication in front of Prometheus.
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:9090/-/ready || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana-oss:13.0.2
+    restart: unless-stopped
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    # Bound to loopback only, in addition to Grafana's own admin auth.
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Local-development-only placeholders — see .env.example. Grafana
+      # is only reachable on localhost in this environment.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-local_dev_only_change_me}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # Disable auto-update of bundled/preinstalled plugins (e.g.
+      # Elasticsearch), so the pinned Grafana container doesn't attempt
+      # runtime mutation of its own bundled plugin files on startup.
+      GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
 volumes:
   postgres_data:
+  prometheus_data:
+  grafana_data:

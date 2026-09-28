@@ -7,10 +7,11 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 1B.4, the repository contains foundational scaffolding, a
-running infrastructure dependency, and four application services, with
-the **first real service-to-service workflow**. Conceptually, the
-current demo application shape is:
+As of Phase 2A.1, the repository contains foundational scaffolding, a
+running infrastructure dependency, four application services with the
+**first real service-to-service workflow**, and a bootstrapped
+**observability infrastructure stack**. Conceptually, the current demo
+application shape is:
 
 ```
 Client
@@ -23,7 +24,13 @@ checkout-service :8080
   +--> inventory-service     :8082  (POST /inventory/reservations — simulated)
   |
   +--> notification-service  :8083  (POST /notifications — simulated)
+
+(future) app services --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
 ```
+
+The observability path (bottom row) exists and is provably alive
+end-to-end, but **no application service is instrumented yet** — the top
+and bottom rows are not connected to each other in this phase.
 
 `checkout-service`'s `POST /checkouts` synchronously calls the other
 three services, in that exact order (payment, then inventory, then
@@ -211,6 +218,52 @@ Full inventory:
   - Telemetry / observability
   - Agent functionality of any kind
 
+- **Observability infrastructure** (`observability/`) — an OpenTelemetry
+  Collector, Prometheus, and Grafana, all running via Docker Compose
+  (`otel-collector`, `prometheus`, `grafana`). This is **infrastructure
+  only**: it is not fed by any application service, and no application
+  service was modified in any way for this.
+
+  **Implemented:**
+  - `otel-collector` (`otel/opentelemetry-collector-contrib:0.161.0`):
+    an OTLP receiver (gRPC `:4317`, HTTP `:4318`) → `batch` processor →
+    Prometheus exporter (`:8889`) pipeline, wired up and ready for
+    future application telemetry but carrying no data today; a
+    `health_check` extension (`:13133`); and separate internal
+    ("self") telemetry on `:8888`, which is what's actually scraped
+    today. The official Contrib image has no shell/wget/curl, so it has
+    no Docker-level healthcheck; its liveness is proven instead by
+    Prometheus successfully scraping it.
+  - `prometheus` (`prom/prometheus:v3.15.0`): scrapes itself, the
+    Collector's self-telemetry, and the (currently empty) Collector
+    telemetry-relay endpoint, on a persistent named volume
+    (`prometheus_data`), with a `wget`-based healthcheck.
+  - `grafana` (`grafana/grafana-oss:13.0.2`): Prometheus auto-provisioned
+    as its default datasource via
+    `observability/grafana/provisioning/datasources/datasource.yml`
+    (resolving `http://prometheus:9090` by Compose service name, not
+    `localhost`) — no manual click-through setup needed after
+    `docker compose up`. Persistent named volume (`grafana_data`).
+    Anonymous auth disabled; admin credentials come from `.env`
+    (`GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`), local-only
+    placeholders, never a real credential.
+
+  All three services' host-published ports (`otel-collector`'s
+  `4317`/`4318`/`13133`, `prometheus`'s `9090`, `grafana`'s `3000`) are
+  bound to `127.0.0.1` only, since none of them (aside from Grafana's
+  own admin login) sit behind authentication — unlike the four Phase 1
+  application services and PostgreSQL, which remain published on all
+  interfaces.
+
+  **Not implemented:**
+  - Any application service sending OTLP telemetry or exposing a
+    metrics endpoint (none has an OpenTelemetry SDK; none was modified)
+  - Application-level metrics, traces, or logs of any kind
+  - Distributed trace correlation
+  - Dashboards beyond the minimal datasource-connectivity path, or any
+    alerting rules
+  - Any consumption of telemetry by an agent
+
 There are no other application services, no message brokers, no
 orchestration, no cloud infrastructure, and no AI provider integration.
 
@@ -266,10 +319,17 @@ repository. Payment, inventory, and notification never call each other
 or call back into checkout-service.
 
 ### Observability
-- **OpenTelemetry** for traces, metrics, and logs emitted by the demo
-  services and platform components.
-- **Prometheus** for metrics storage and alerting.
-- **Grafana** for dashboards.
+**CURRENT:** An OpenTelemetry Collector, Prometheus, and Grafana all run
+via Docker Compose (see Current Implementation above) — infrastructure
+only, provably alive end-to-end via the Collector's own self-telemetry.
+
+**FUTURE (not yet implemented):**
+- Application services emitting traces, metrics, and logs (an
+  OpenTelemetry SDK in each service, sending OTLP to the Collector)
+- Distributed trace correlation across the checkout → payment →
+  inventory → notification call chain
+- Meaningful Grafana dashboards and Prometheus alerting rules
+- Consumption of this telemetry by an agent for incident detection
 
 ### Event streaming
 **Kafka or Redpanda** for propagating incident signals and telemetry

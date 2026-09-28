@@ -1,0 +1,30 @@
+# Prometheus configuration for local development.
+#
+# Phase 2A.1 scope: infrastructure bootstrap only. Scrapes Prometheus
+# itself and the OpenTelemetry Collector — no application service is
+# scraped yet (none currently exposes a Prometheus-compatible metrics
+# endpoint, and none is being modified in this phase to add one).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # The Collector's own internal telemetry — always present, and what
+  # proves this observability path is alive before any application is
+  # instrumented.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  # Telemetry the Collector received over OTLP and re-exposed in
+  # Prometheus format. Empty until a later phase instruments an
+  # application service, but scraped now so no further Prometheus
+  # config change is needed when that happens.
+  - job_name: otel-collector-app-metrics
+    static_configs:
+      - targets: ["otel-collector:8889"]
