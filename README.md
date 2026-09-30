@@ -17,7 +17,7 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 2B.3 — Grafana Dashboards**. An OpenTelemetry Collector, Prometheus, and
+**Phase 2B.4 — Production-Style Alerting**. An OpenTelemetry Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
 services are instrumented, each its own idiomatic way: `checkout-service`
 with the OpenTelemetry Java auto-instrumentation agent (Phase 2A.2);
@@ -68,9 +68,21 @@ panel was verified against real telemetry from a running stack before
 being added, and a dedicated validator
 (`scripts/verify-grafana-dashboards.py`) independently re-executes
 every panel's own query directly against Prometheus/Loki, with
-dashboard/interval variables substituted for real values. There is
-still no alerting (Grafana has no alert rules, and Prometheus has no
-Alertmanager), and no AI functionality.
+dashboard/interval variables substituted for real values. As of
+Phase 2B.4, Prometheus evaluates four real alert rules
+(`observability/prometheus/rules/alerts.yml`) and routes firing alerts
+to **Prometheus Alertmanager 0.34.1**, which receives, groups, and
+tracks their state through its own real API — a genuine, empirically
+verified lifecycle test stopped `otel-collector`, watched
+`TelemetryPipelineUnavailable` transition `inactive → pending → firing`
+in Prometheus, confirmed the same alert active in Alertmanager,
+restarted the Collector, and confirmed both systems returned to
+`inactive`/resolved and that application telemetry resumed. There is
+deliberately **no outbound notification integration** yet (email,
+Slack, PagerDuty, or any webhook) — Alertmanager's single receiver is
+a no-op local sink, so this phase builds the alert pipeline itself, not
+a notification channel — and no automatic remediation, control plane,
+or AI functionality of any kind.
 
 ## Problem this project will eventually solve
 
@@ -93,20 +105,25 @@ The following components are **planned** and do not exist yet:
 - A LangGraph-based agent runtime for investigation and hypothesis formation
 - A Go infrastructure tool gateway for safely executing remediation actions
 - Demo commerce microservices as a realistic monitored target
-- Alerting (the OTel Collector / Prometheus / Grafana infrastructure
-  exists, all four application services export metrics and traces to
-  it, one real `POST /checkouts` request produces a complete, verified
-  distributed trace across checkout-service and all three of its
-  downstream branches — payment, inventory, notification, as siblings,
-  not a sequential chain — that trace is retrievable from a persistent
-  trace backend, Grafana Tempo (Phase 2B.1), the four services'
-  existing stdout/stderr logs are centrally collected and persisted via
-  Grafana Alloy + Grafana Loki (Phase 2B.2), and, as of Phase 2B.3,
-  three dashboards built from real, verified queries are
-  auto-provisioned in Grafana — see
+- Outbound alert notification and an operator-facing control plane
+  (the OTel Collector / Prometheus / Grafana infrastructure exists, all
+  four application services export metrics and traces to it, one real
+  `POST /checkouts` request produces a complete, verified distributed
+  trace across checkout-service and all three of its downstream
+  branches — payment, inventory, notification, as siblings, not a
+  sequential chain — that trace is retrievable from a persistent trace
+  backend, Grafana Tempo (Phase 2B.1), the four services' existing
+  stdout/stderr logs are centrally collected and persisted via Grafana
+  Alloy + Grafana Loki (Phase 2B.2), three dashboards built from real,
+  verified queries are auto-provisioned in Grafana (Phase 2B.3), and,
+  as of Phase 2B.4, Prometheus evaluates four real alert rules and
+  routes firing alerts into Prometheus Alertmanager, with an
+  empirically verified full inactive→firing→resolved lifecycle — see
   [Observability Infrastructure](#observability-infrastructure) below —
-  but there is still no alerting, and logs are not yet correlated with
-  traces)
+  but Alertmanager's only receiver is a no-op local sink today, with no
+  email/Slack/PagerDuty/webhook integration and no control plane to
+  consume these incident signals yet, no automatic remediation, and
+  logs are not yet correlated with traces)
 - Kafka or Redpanda for event streaming
 - Kubernetes as the deployment target, provisioned via Terraform on AWS
 
@@ -148,9 +165,10 @@ application services connect to PostgreSQL yet.
 
 An observability stack — an OpenTelemetry Collector, Prometheus,
 Grafana (with three auto-provisioned dashboards as of Phase 2B.3),
-(Phase 2B.1) Grafana Tempo, and (Phase 2B.2) Grafana Loki + Grafana
-Alloy — also runs via Docker Compose (see
-[Observability Infrastructure](#observability-infrastructure) below).
+(Phase 2B.1) Grafana Tempo, (Phase 2B.2) Grafana Loki + Grafana Alloy,
+and (Phase 2B.4) Prometheus Alertmanager — also runs via Docker Compose
+(see [Observability Infrastructure](#observability-infrastructure)
+below).
 `checkout-service` is instrumented with the OpenTelemetry Java
 auto-instrumentation agent (pinned `v2.31.1`) and exports HTTP server
 metrics for `POST /checkouts`, HTTP client metrics for its three
@@ -197,8 +215,16 @@ traces are not yet correlated — see
 for details. As of Phase 2B.3, Grafana auto-provisions three
 dashboards (Application Health, Centralized Logging, Observability
 Infrastructure) built entirely from metrics/logs confirmed to exist
-against a real running stack. There is still no alerting. No AI
-integration has been added yet.
+against a real running stack. As of Phase 2B.4, Prometheus evaluates
+four real alert rules and routes firing alerts to **Prometheus
+Alertmanager** (pinned `v0.34.1`), which receives, groups, and tracks
+alert state through its own real API; a genuine controlled failure
+(stopping `otel-collector`) was used to empirically prove a real rule's
+full `inactive → pending → firing → (Alertmanager) → resolved →
+inactive` lifecycle, and that application telemetry resumes afterward.
+Alertmanager's only receiver is a no-op local sink — no outbound
+notification integration exists yet, and no control plane consumes
+these incident signals yet. No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -774,23 +800,41 @@ now persisted in and independently re-verified from Tempo's own HTTP query API:
   shell but no curl/wget, so — like loki — readiness is checked
   externally, via its own `GET /api/v0/web/components` API (all 4
   pipeline components must report `health.state: healthy`).
-- **`grafana`** — Prometheus (default), Tempo (Phase 2B.1), and Loki
-  (Phase 2B.2) are all auto-provisioned as datasources
+- **`alertmanager`** (`prom/alertmanager:v0.34.1`, Phase 2B.4) —
+  receives alerts Prometheus fires from
+  `observability/prometheus/rules/alerts.yml`, groups them
+  (`group_by: [alertname, severity]`), and tracks their firing/resolved
+  state through its own real HTTP API (`GET /api/v2/alerts`,
+  `GET /api/v2/status`). Single-instance, persistent local storage
+  (`alertmanager_data`, `--storage.path=/alertmanager`). Its single
+  receiver (`observability/alertmanager/alertmanager.yml`) is a no-op
+  local sink with no integration configured at all — a normal, fully
+  valid Alertmanager receiver that still receives/groups/tracks every
+  alert routed to it, it just never sends anything anywhere; see
+  [alertmanager configuration](#alertmanager-configuration-phase-2b4)
+  below. Has both a shell and `wget` (confirmed via `docker run
+  --entrypoint /bin/sh ... -c "which wget"`), so — unlike loki/alloy —
+  it has a real Docker-level healthcheck.
+- **`grafana`** — Prometheus (default), Tempo (Phase 2B.1), Loki
+  (Phase 2B.2), and Alertmanager (Phase 2B.4) are all auto-provisioned
+  as datasources
   (`observability/grafana/provisioning/datasources/datasource.yml`,
   resolving `http://prometheus:9090`/`http://tempo:3200`/
-  `http://loki:3100` by Compose service name) so no manual click-through
-  setup is needed after `docker compose up`. As of Phase 2B.3, three
-  dashboards (`observability/grafana/provisioning/dashboards/json/`)
-  are also auto-provisioned — see
+  `http://loki:3100`/`http://alertmanager:9093` by Compose service
+  name) so no manual click-through setup is needed after `docker
+  compose up`. As of Phase 2B.3, three dashboards
+  (`observability/grafana/provisioning/dashboards/json/`) are also
+  auto-provisioned — see
   [grafana dashboards (Phase 2B.3)](#grafana-dashboards-phase-2b3)
   below. Anonymous auth is disabled; the admin password is a local-only
   placeholder from `.env.example`, never a real credential.
 
 All host ports above (`4317`/`4318`/`13133` for otel-collector, `9090`
 for prometheus, `3200` for tempo, `3100` for loki, `12345` for alloy,
-`3000` for grafana) are published bound to `127.0.0.1` only — none of
-them sit behind authentication (Grafana is the exception, via its own
-admin login), so they are not reachable from other machines on the
+`9093` for alertmanager, `3000` for grafana) are published bound to
+`127.0.0.1` only — none of them sit behind authentication (Grafana is
+the exception, via its own admin login), so they are not reachable
+from other machines on the
 network even in local development. This differs from the four Phase 1
 application services and PostgreSQL, whose ports remain published on
 all interfaces.
@@ -1038,15 +1082,143 @@ variables (`$__rate_interval`/`$__interval` → `5m`) for concrete
 values, and **re-executes that exact substituted expression** directly
 against Prometheus's or Loki's own HTTP API — bypassing Grafana's query
 proxy entirely. A query is recognized as legitimately allowed to be
-empty (5xx error rate, refused-telemetry counters) by inspecting its
-own expression text for a `"5.."` status-code match or a `refused`
-metric name, not a hand-maintained list; every other target — and every
-panel as a whole, unless every one of its targets is of the
-legitimately-empty kind — is required to return real, nonempty data.
+empty (HTTP 4xx **or** 5xx error rate, refused-telemetry counters) by
+inspecting its own expression text for a `"[45].."` status-code match
+or a `refused` metric name, not a hand-maintained list — a CI run that
+only issues successful requests against the running Compose application
+produces no 4xx or 5xx samples in Prometheus at all (client-side 400s
+in CI logs from a service's own unit/build tests never reach the
+running application's telemetry, so they must not be mistaken for
+evidence this query will have data; this was a real CI failure, fixed
+after GitHub Actions run #19 caught it, not a hypothetical); every
+other target — and every panel as a whole, unless every one of its
+targets is of the legitimately-empty kind — is required to return
+real, nonempty data.
 This script cannot and does not verify that a panel visually renders
 correctly in a browser — only that Grafana served the expected
 provisioned structure and that its actual queries are valid and return
 real data.
+
+### alertmanager configuration (Phase 2B.4)
+
+`observability/alertmanager/alertmanager.yml` was validated against the
+actual pinned `prom/alertmanager:v0.34.1` image's own `amtool
+check-config`, not just YAML-parsed. Version selection: the Alertmanager
+image was pulled and its own `--version` output inspected directly
+(not assumed) across every tag from `v0.28.1` up through `v0.34.1`,
+confirming `v0.35.0` and `v0.34.2` do not exist — `v0.34.1` (built
+2026-09-17, less than two weeks before this phase) is the genuine
+latest stable release. A simple local `route`/`receiver` pair:
+`group_by: [alertname, severity]`, `group_wait: 10s`,
+`group_interval: 30s`, `repeat_interval: 1h`, routing to a single
+receiver, `local-null`, with **no integration configured on it at
+all**. This is a normal, fully valid Alertmanager receiver — not a
+fake or invented notification service — confirmed empirically to still
+receive, group, and track the full firing/resolved lifecycle of every
+alert routed to it, visible through Alertmanager's own real
+`GET /api/v2/alerts` and `GET /api/v2/status` APIs; it simply never
+sends a notification anywhere. `observability/prometheus/prometheus.yml`
+gained `rule_files: [/etc/prometheus/rules/*.yml]` and
+`alerting.alertmanagers` pointed at `alertmanager:9093` — confirmed via
+Prometheus's own `GET /api/v1/alertmanagers` that it discovered exactly
+that one target. Prometheus is the only rule evaluator in this stack;
+Alertmanager never evaluates a PromQL expression itself, only receives
+what Prometheus already decided is firing.
+
+### alert rules (Phase 2B.4)
+
+`observability/prometheus/rules/alerts.yml`, validated against the
+actual pinned `prom/prometheus:v3.15.0` image's own `promtool check
+rules` (4 rules found, no errors). Every metric/label referenced below
+was queried directly against a real running stack (with real checkout
+traffic) before being written into a rule — none are assumed. `for:`
+durations are chosen relative to this stack's real 15s
+`scrape_interval`/`evaluation_interval`, so a single scrape hiccup can
+never flip a rule to firing.
+
+- **`TelemetryPipelineUnavailable`** — the deterministic rule used for
+  the lifecycle test below.
+  `up{job=~"otel-collector|otel-collector-app-metrics"} == 0`,
+  `for: 1m` (4 consecutive failed 15s scrapes). Labels:
+  `severity=critical`, `component=otel-collector`,
+  `category=observability-infrastructure`.
+- **`CheckoutServerErrors`** — real HTTP 5xx activity from
+  checkout-service, using the real `http_response_status_code` label; a
+  genuine 4xx never contributes.
+  `sum(rate(http_server_request_duration_seconds_count{service_name="checkout-service",
+  http_response_status_code=~"5.."}[5m])) > 0`, `for: 2m`. Labels:
+  `severity=critical`, `component=checkout-service`,
+  `service=checkout-service`.
+- **`CheckoutHighLatency`** — p95 latency for `POST /checkouts` via
+  `histogram_quantile` over the real histogram buckets, threshold
+  chosen from this stack's own observed baseline, not guessed: 20 real
+  checkout requests were fired and measured directly — 19/20 completed
+  within 10ms, 20/20 within 250ms (every downstream call is a local
+  Docker-network hop). The `1s` threshold is roughly 40-100x that
+  baseline, so it will not false-fire under normal local/CI load, and
+  is deliberately **not** forced to fire during verification (doing so
+  would require artificially slowing business logic, out of this
+  phase's scope — it is expected to stay inactive throughout
+  verification, same as `CheckoutServerErrors`).
+  `histogram_quantile(0.95, sum by (le)
+  (rate(http_server_request_duration_seconds_bucket{service_name="checkout-service",
+  http_route="/checkouts"}[5m]))) > 1`, `for: 2m`. Labels:
+  `severity=warning`, `component=checkout-service`,
+  `service=checkout-service`.
+- **`CollectorRefusingTelemetry`** — real refusal activity at the
+  Collector's OTLP receiver, using the real
+  `otelcol_receiver_refused_spans`/`otelcol_receiver_refused_metric_points`
+  counters (confirmed always present as real series, value `0` at
+  rest — not absent — so no `or vector(0)` guard is needed).
+  `sum(rate(otelcol_receiver_refused_spans{job="otel-collector"}[5m]))
+  + sum(rate(otelcol_receiver_refused_metric_points{job="otel-collector"}[5m])) > 0`,
+  `for: 1m`. Labels: `severity=warning`, `component=otel-collector`,
+  `category=observability-infrastructure`.
+
+Every rule also carries `summary`/`description` annotations (with
+`{{ $labels.* }}` templating where useful) — no bare alert with no
+human-readable context.
+
+**Grafana Alertmanager datasource:** Grafana OSS 13.0.2 genuinely
+supports this — added `type: alertmanager`,
+`jsonData.implementation: prometheus`, `url: http://alertmanager:9093`
+to `datasource.yml`, confirmed via Grafana's own `/api/datasources`
+that it provisioned correctly, and **empirically proved functional**
+(not just "configured"): a real request through Grafana's own
+datasource proxy (`GET /api/datasources/proxy/uid/<uid>/api/v2/status`)
+returned Alertmanager's real cluster status and version. Confirmed the
+three existing dashboards (and `scripts/verify-grafana-dashboards.py`)
+are unaffected by the fourth datasource. No Grafana-managed alert rules
+were added — Prometheus remains the only rule evaluator, per this
+phase's explicit scope.
+
+**Alert lifecycle acceptance test**
+(`scripts/verify-alert-lifecycle.sh`) — the most important part of this
+phase: proves a **real** Prometheus rule goes through its full
+lifecycle because of a genuine, controlled failure, not a rule-file
+edit or a direct POST to Alertmanager's API. Sequence, every step
+using real HTTP APIs (`scripts/verify-alerting.py`) with bounded
+retries: confirm both Collector scrape targets UP and
+`TelemetryPipelineUnavailable` initially `inactive` → `docker compose
+stop otel-collector` → poll until Prometheus reports the rule `firing`
+**and** Alertmanager's own `GET /api/v2/alerts` shows a matching,
+active (non-resolved) alert with the expected `severity`/`component`
+labels → `docker compose start otel-collector` → wait for Collector
+readiness → poll until Prometheus reports the rule `inactive` again
+**and** Alertmanager no longer reports an active (non-resolved) match
+→ fire one more real checkout and confirm
+`http_server_request_duration_seconds_count` for `/checkouts`
+genuinely increased. Run against the real stack, this rule was
+observed transitioning `inactive → pending → firing` in Prometheus
+(`pending` visible for several polling attempts before `firing`, as
+expected given `for: 1m`), confirmed active in Alertmanager with
+`severity=critical component=otel-collector`, then fully recovered —
+Prometheus `inactive`, Alertmanager showing zero active matches — and a
+fresh checkout confirmed telemetry resumed (request count incremented
+by exactly 1). The script restores `otel-collector` via its own `EXIT`
+trap if anything fails partway through, so a failure here never leaves
+the environment with the Collector stopped; both the local verifier and
+CI reuse this identical script.
 
 ### checkout-service instrumentation (Phase 2A.2)
 
@@ -1091,8 +1263,8 @@ make db-down
 ```
 
 **Bundled verification:** `make verify-observability` (or
-`scripts/verify-observability.sh`) runs the full Phase 2A.1-2B.3
-verification path in one deterministic script (sections A-P) — starts
+`scripts/verify-observability.sh`) runs the full Phase 2A.1-2B.4
+verification path in one deterministic script (sections A-R) — starts
 Compose, waits for every service's health (with the `otel-collector`
 exception above; `tempo` has a real healthcheck and is included in the
 normal wait loop; `loki`/`alloy` have neither and are checked
@@ -1127,21 +1299,32 @@ three auto-provisioned Grafana dashboards via
 no duplicated validation logic): correct panels, correct datasource
 references, valid template variables, and every panel's own PromQL/
 LogQL (variables substituted with real values) re-executed directly
-against Prometheus and Loki with real data. All of this uses bounded
-retries (metric/
-trace/log export, Tempo's/Loki's own ingest-to-query paths, and
-post-restart readiness are all asynchronous) and stays safe under
-`set -euo pipefail`. The script then always tears the environment down
-(without deleting volumes) and confirms every named volume, including
-`tempo_data`, `loki_data`, and `alloy_data`, still exists.
+against Prometheus and Loki with real data. As of Phase 2B.4, it then
+verifies Alertmanager health and that Prometheus loaded all four
+expected alert rules, each starting `inactive`
+(`scripts/verify-alerting.py`), and runs the full alert lifecycle
+acceptance test (`scripts/verify-alert-lifecycle.sh`, also reused by
+CI) — deliberately placed after every other telemetry/dashboard check,
+since stopping `otel-collector` for the controlled failure would
+otherwise invalidate them — then explicitly re-confirms both Collector
+scrape targets are back `UP` afterward. All of this uses bounded
+retries (metric/trace/log/alert propagation, Tempo's/Loki's own
+ingest-to-query paths, and post-restart readiness are all asynchronous)
+and stays safe under `set -euo pipefail`. The script then always tears
+the environment down (without deleting volumes) and confirms every
+named volume, including `tempo_data`, `loki_data`, `alloy_data`, and
+`alertmanager_data`, still exists.
 
-**Not implemented yet:** alerting rules (neither Grafana alert rules
-nor Prometheus Alertmanager); log/trace correlation (no service's
-current log output contains a trace or span ID — see
-[alloy configuration](#alloy-configuration-phase-2b2) above); dashboard
-panels beyond what Phase 2B.3 built (e.g. no Tempo/traces panel yet);
-and any consumption of telemetry by an agent. Those are deliberately
-deferred to later phases.
+**Not implemented yet:** outbound alert notification (email, Slack,
+PagerDuty, or any webhook — Alertmanager's only receiver is a no-op
+local sink); a control plane to consume these incident signals; log/
+trace correlation (no service's current log output contains a trace or
+span ID — see [alloy configuration](#alloy-configuration-phase-2b2)
+above); dashboard panels beyond what Phase 2B.3 built (e.g. no
+Tempo/traces panel yet); Grafana-managed alert rules (Prometheus
+remains the only rule evaluator); and any consumption of telemetry by
+an agent or automatic remediation. Those are deliberately deferred to
+later phases.
 
 ## Continuous Integration
 
@@ -1197,8 +1380,17 @@ independently proves all four services' logs are queryable, which is
 sufficient given the restart test's cost. As of Phase 2B.3, CI also
 runs `scripts/verify-grafana-dashboards.py` (the identical script the
 local verifier uses) after the checkout/metrics/log steps above, since
-several of its representative queries need that real traffic and log
-ingestion to already have happened.
+several of its panels need that real traffic and log ingestion to
+already have happened. As of Phase 2B.4, CI also waits for Alertmanager
+to become healthy, runs `scripts/verify-alerting.py` to confirm all
+four alert rules loaded and are initially `inactive`, then runs the
+identical `scripts/verify-alert-lifecycle.sh` the local verifier
+uses — no lifecycle logic duplicated in the workflow YAML — proving the
+same real `inactive → firing → Alertmanager → resolved → inactive`
+transition and telemetry recovery in CI, placed after every other
+telemetry/dashboard step since it deliberately stops `otel-collector`.
+Alertmanager logs were added to the existing "Show service logs"
+failure-diagnostics step.
 
 The repository has a GitHub remote
 (`abheesh-03/autonomous-reliability-platform`). The workflow version
@@ -1231,12 +1423,20 @@ real-logs-from-all-four-services step (see above), reusing
 `scripts/verify-loki-logs.py`; that version was committed (`20170ea`)
 and also ran successfully on GitHub Actions (run `36737863185`). Phase
 2B.3's version of the workflow (adding the Grafana dashboard
-verification step above) has been locally validated end-to-end by
-reproducing the workflow's steps against the real Compose network (via
-`make verify-observability`, which covers equivalent — and,
-additionally, dashboard-verification — ground), but has **not yet run
-on GitHub Actions** — that will only be true once it runs there after a
-push.
+verification step above) was committed (`1b22f55`) and initially
+**failed** on GitHub Actions (run #19, `36763788179`): the dashboard
+validator's original sparse-query logic only treated HTTP 5xx queries
+as legitimately empty, not 4xx, and a CI run generating only successful
+runtime requests genuinely has zero samples of either — the fix
+(widening the sparse-ok pattern to `"[45].."`, see above) was committed
+(`ce1ea6b`) and ran successfully on GitHub Actions (run #20,
+`36765869383`). Phase 2B.4's version of the workflow (adding the
+Alertmanager health/rules check and the alert lifecycle acceptance test
+above) has been locally validated end-to-end by reproducing the
+workflow's steps against the real Compose network (via `make
+verify-observability`, which covers equivalent — and, additionally,
+the full alert lifecycle — ground), but has **not yet run on GitHub
+Actions** — that will only be true once it runs there after a push.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -2507,12 +2707,22 @@ problem today.
   exact expressions directly against Prometheus's and Loki's own HTTP
   APIs**, bypassing Grafana's query proxy entirely — requiring real
   (nonempty) data for every target except ones its own expression text
-  identifies as legitimately allowed to be empty (a `"5.."` status-code
-  match or a `refused` metric name), and requiring each panel as a whole
-  to have at least one such real result unless every one of its targets
-  is of that legitimately-empty kind. Explicitly does not and cannot
-  verify visual rendering in a browser. The same script is used by both
-  the local verifier and CI — no duplicated validation logic.
+  identifies as legitimately allowed to be empty (a `"[45].."`
+  status-code match — 4xx **or** 5xx — or a `refused` metric name), and
+  requiring each panel as a whole to have at least one such real result
+  unless every one of its targets is of that legitimately-empty kind.
+  Explicitly does not and cannot verify visual rendering in a browser.
+  The same script is used by both the local verifier and CI — no
+  duplicated validation logic.
+- **Post-review correction #2 (GitHub Actions run #19):** CI failed
+  because the original version of this script only treated 5xx queries
+  as legitimately sparse, not 4xx — a CI run generating only successful
+  runtime requests genuinely has zero 4xx samples too (the 400s visible
+  elsewhere in CI logs come from `checkout-service`'s own unit tests,
+  which never touch the running application's Prometheus telemetry).
+  Fixed by widening the sparse-ok pattern to `"[45].."`, confirmed by
+  reproducing the exact CI precondition locally (a stack with only
+  successful checkout traffic) and re-running the validator.
 - **Post-review corrections (same phase, before commit):** the
   Centralized Logging panel's title/description claimed "log lines/sec"
   while its query used `count_over_time()` (a raw count per window, not
@@ -2543,9 +2753,11 @@ problem today.
   Grafana dashboards" step reuses `scripts/verify-grafana-dashboards.py`
   (the identical script used locally), placed after the existing
   checkout/metrics/trace/log steps so its queries have real data
-  available, and before "Show service logs". Locally reproduced
-  equivalent verification via `make verify-observability` — not yet
-  verified running on GitHub Actions in this updated form.
+  available, and before "Show service logs". Committed (`1b22f55`) and
+  **initially failed** on GitHub Actions (run #19) for the real reason
+  described in the Phase 2B.3 dashboard-verification correction above
+  (4xx queries weren't treated as legitimately sparse); fixed
+  (`ce1ea6b`) and confirmed passing (run #20).
 - **Limitations, honestly reported, not worked around:** no severity/
   level filter on the Centralized Logging dashboard — Loki's
   `detected_level` heuristic was checked against real log output and
@@ -2562,3 +2774,129 @@ problem today.
   and `inventory-service` still only log at container startup, so their
   log-line-rate panel behavior (a brief spike, then nothing) is expected
   and correct, not a collection gap.
+
+### Phase 2B.4 — Production-Style Alerting
+
+- **Alertmanager version — determined empirically, not assumed:**
+  pulled and ran `--version` against every `prom/alertmanager` tag from
+  `v0.28.1` through `v0.34.1` in sequence, confirming `v0.35.0` and
+  `v0.34.2` do not exist — `v0.34.1` (built 2026-09-17) is the genuine
+  latest stable release, not a guess. `amtool`/`promtool` confirmed
+  present and working in both pinned images before writing any config.
+- New `observability/alertmanager/alertmanager.yml`: a simple
+  `route`/`receiver` pair (`group_by: [alertname, severity]`,
+  `group_wait: 10s`, `group_interval: 30s`, `repeat_interval: 1h`)
+  routing to a single `local-null` receiver with **no integration
+  configured on it at all** — a normal, fully valid Alertmanager
+  receiver, not an invented notification service, confirmed
+  empirically to still receive/group/track the full firing/resolved
+  state of every alert through Alertmanager's own real API; it simply
+  never sends anything anywhere. Validated with the real pinned image's
+  own `amtool check-config` (not just YAML-parsed).
+- `observability/prometheus/prometheus.yml` extended (not replaced):
+  added `rule_files: [/etc/prometheus/rules/*.yml]` and
+  `alerting.alertmanagers` pointed at `alertmanager:9093`; confirmed
+  via Prometheus's own `GET /api/v1/alertmanagers` that it discovered
+  exactly that one target. All existing scrape jobs untouched.
+- New `observability/prometheus/rules/alerts.yml`: four alert rules
+  (`TelemetryPipelineUnavailable`, `CheckoutServerErrors`,
+  `CheckoutHighLatency`, `CollectorRefusingTelemetry` — full
+  expressions/thresholds/`for:`/labels in
+  [alert rules (Phase 2B.4)](#alert-rules-phase-2b4) above), every
+  metric/label confirmed against a real running stack before being
+  written in, not assumed. Validated with the real pinned Prometheus
+  image's own `promtool check rules` (4 rules found, zero errors) and
+  `promtool check config` (with the rules directory mounted the same
+  way Compose mounts it).
+- **Grafana Alertmanager datasource — genuinely functional, not just
+  configured:** Grafana OSS 13.0.2 does support `type: alertmanager`
+  with `jsonData.implementation: prometheus`; added to `datasource.yml`
+  and proved working end-to-end via a real request through Grafana's
+  own datasource proxy (`GET /api/datasources/proxy/uid/<uid>/api/v2/status`),
+  which returned Alertmanager's real cluster status and version — not
+  merely that the datasource entry exists. Confirmed the three existing
+  dashboards and `scripts/verify-grafana-dashboards.py` are unaffected.
+  No Grafana-managed alert rules were added; Prometheus remains the
+  only rule evaluator.
+- New `scripts/verify-alerting.py`: stdlib-only, five subcommands
+  (`rules`, `health`, `state`, `firing`, `recovered`) against
+  Prometheus's and Alertmanager's real HTTP APIs. `rules` confirms all
+  four expected rules loaded with the correct normalized query
+  fragments, `for:` duration, exact labels, and required annotations,
+  and that every one starts `inactive`. `firing`/`recovered` each
+  cross-check **both** systems — a rule `firing` in Prometheus with a
+  matching active (non-resolved) alert in Alertmanager's own
+  `GET /api/v2/alerts`, and the reverse for recovery — not just one
+  system in isolation. Fails closed throughout.
+- New `scripts/verify-alert-lifecycle.sh`: orchestrates the real
+  controlled-failure sequence (shell owns Docker lifecycle operations;
+  Python owns all HTTP API validation, no logic duplicated between
+  them). Restores `otel-collector` via its own `EXIT` trap if any step
+  fails partway through, so a failure never leaves the environment with
+  the Collector stopped. **Run against the real stack, the full
+  lifecycle was empirically observed, not merely asserted:**
+  `TelemetryPipelineUnavailable` confirmed `inactive` → `otel-collector`
+  stopped → the rule observed transitioning through `pending` (visible
+  across several polling attempts, as expected given `for: 1m`) to
+  `firing` in Prometheus, with Alertmanager independently confirming an
+  active alert bearing `severity=critical component=otel-collector` →
+  `otel-collector` restarted → Prometheus rule confirmed back to
+  `inactive` and Alertmanager confirmed zero active matches remaining →
+  a fresh real checkout confirmed `http_server_request_duration_seconds_count`
+  for `/checkouts` genuinely incremented, proving telemetry resumed, not
+  just that containers were running again.
+- `scripts/verify-observability.sh` extended (not replaced), sections
+  A–R: alerting config files added to the static-file check;
+  `alertmanager` added to the standard health-wait loop (real Docker
+  healthcheck); the Grafana section gained an Alertmanager datasource
+  check; new section O verifies Alertmanager health and all four rules
+  loaded/inactive; new section P runs the full lifecycle acceptance
+  test and then explicitly re-confirms both Collector scrape targets
+  are back `UP`, deliberately placed after every other telemetry/
+  dashboard check so the controlled failure can't invalidate them; the
+  container/log sanity section now also dumps Alertmanager's logs; the
+  final persistence section now also checks `alertmanager_data`, using
+  the same dynamic Compose-project-name resolution already in place
+  (no hard-coded project prefix). Every prior Phase 2A.1-2B.3 assertion
+  is unchanged. The full `make verify-observability` run passed
+  end-to-end from a fully torn-down state (sections A–R, zero
+  failures), including the complete alert lifecycle test.
+- `.github/workflows/ci.yml` extended, not duplicated: a new "Wait for
+  Alertmanager to become healthy" step mirrors the existing per-service
+  pattern; a new "Verify Alertmanager health and alert rules loaded"
+  step reuses `scripts/verify-alerting.py`; a new "Run alert lifecycle
+  acceptance test" step runs the identical
+  `scripts/verify-alert-lifecycle.sh` used locally — no lifecycle logic
+  duplicated in the workflow YAML; Alertmanager logs added to the
+  existing "Show service logs" failure-diagnostics step. Locally
+  reproduced equivalent verification via `make verify-observability` —
+  not yet verified running on GitHub Actions in this updated form.
+- **Volumes:** new `alertmanager_data` named volume, confirmed to
+  survive a normal `docker compose down` (without `-v`) via the same
+  label-based dynamic resolution (`com.docker.compose.project`/
+  `com.docker.compose.volume`) already used for every other volume —
+  no hard-coded `autonomous-reliability-platform_*` prefix, so this
+  continues to work under an alternate `COMPOSE_PROJECT_NAME`. No
+  silence was manufactured or persisted solely to claim Alertmanager
+  state durability; only the named volume's survival was verified, per
+  this phase's own instructions.
+- **Corrected stale Phase 2B.3 documentation** found while writing this
+  phase's docs: two spots still claimed only HTTP 5xx dashboard queries
+  may legitimately be empty, when both 4xx and 5xx can be (the real
+  CI-run-#19 fix, see above) — corrected in place rather than left
+  inconsistent with the actual validator behavior.
+- **Limitations, honestly reported, not worked around:** no outbound
+  notification integration of any kind (email, Slack, PagerDuty,
+  webhook) — Alertmanager's only receiver is a no-op local sink, by
+  this phase's explicit design, not an oversight. No control plane
+  exists yet to consume these incident signals; a future one can
+  without changing this routing structure. No automatic remediation.
+  `CheckoutServerErrors` and `CheckoutHighLatency` were not exercised
+  firing during this phase's verification — doing so would require
+  artificially degrading business logic or injecting latency, both
+  explicitly out of scope — so only `TelemetryPipelineUnavailable`'s
+  full lifecycle has been empirically proven; the other three rules are
+  confirmed loaded, correctly labeled, syntactically valid per
+  `promtool`, and initially `inactive`, but not proven to fire
+  end-to-end. No AI agent and no Kubernetes/Terraform/AWS/Kafka/Redis
+  were added, per this phase's explicit scope.

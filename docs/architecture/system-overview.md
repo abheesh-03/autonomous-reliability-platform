@@ -7,7 +7,7 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 2B.3, the repository contains foundational scaffolding, a
+As of Phase 2B.4, the repository contains foundational scaffolding, a
 running infrastructure dependency, four application services with the
 **first real service-to-service workflow**, and an
 **observability infrastructure stack instrumented for all four
@@ -15,9 +15,12 @@ services, with a complete, verified distributed trace across the whole
 checkout workflow — persisted in and independently re-verified from a
 real trace backend, Grafana Tempo (Phase 2B.1) — each service's
 existing stdout/stderr logs centrally collected and persisted via
-Grafana Alloy + Grafana Loki (Phase 2B.2), and, as of Phase 2B.3, three
-Grafana dashboards auto-provisioned from real, individually-verified
-queries against that telemetry**. Conceptually, the current demo
+Grafana Alloy + Grafana Loki (Phase 2B.2), three Grafana dashboards
+auto-provisioned from real, individually-verified queries against that
+telemetry (Phase 2B.3), and, as of Phase 2B.4, a real alerting layer —
+Prometheus evaluates four alert rules and routes firing alerts to
+Prometheus Alertmanager, with an empirically verified full
+inactive→firing→resolved lifecycle**. Conceptually, the current demo
 application shape is:
 
 ```
@@ -39,6 +42,12 @@ otel-collector --OTLP (traces)--> tempo --> grafana
 (all four services) --stdout/stderr (via dockerd)--> alloy --> loki --> grafana
   (a separate path: Alloy reads container logs directly from the Docker
    API, not via otel-collector or any OTEL_* setting above)
+
+prometheus --alert rules (rules/alerts.yml)--> alertmanager --> (future control plane / notification integration)
+  (Prometheus is the only rule evaluator; Alertmanager only receives,
+   groups, and tracks alert state — it never evaluates a PromQL
+   expression itself. Alertmanager's only receiver today is a no-op
+   local sink: no email/Slack/PagerDuty/webhook exists yet.)
 
 Complete distributed trace (one real POST /checkouts, now persisted in Tempo):
                     +-> checkout payment CLIENT      -> payment SERVER
@@ -305,16 +314,20 @@ Full inventory:
   - Agent functionality of any kind
 
 - **Observability infrastructure** (`observability/`) — an OpenTelemetry
-  Collector, Prometheus, Grafana, (Phase 2B.1) Grafana Tempo, and
-  (Phase 2B.2) Grafana Loki + Grafana Alloy, all running via Docker
-  Compose (`otel-collector`, `prometheus`, `grafana`, `tempo`, `loki`,
-  `alloy`). As of Phase 2A.5, this is fed by **all four** application
-  services; as of Phase 2B.1, traces are also persisted in and queryable
-  from Tempo, not just visible in Collector logs; as of Phase 2B.2, each
-  service's existing stdout/stderr logs are also centrally collected and
-  persisted in Loki, via a completely separate path from the Collector;
-  as of Phase 2B.3, Grafana also auto-provisions three dashboards built
-  from queries independently verified against this real telemetry.
+  Collector, Prometheus, Grafana, (Phase 2B.1) Grafana Tempo,
+  (Phase 2B.2) Grafana Loki + Grafana Alloy, and (Phase 2B.4)
+  Prometheus Alertmanager, all running via Docker Compose
+  (`otel-collector`, `prometheus`, `grafana`, `tempo`, `loki`, `alloy`,
+  `alertmanager`). As of Phase 2A.5, this is fed by **all four**
+  application services; as of Phase 2B.1, traces are also persisted in
+  and queryable from Tempo, not just visible in Collector logs; as of
+  Phase 2B.2, each service's existing stdout/stderr logs are also
+  centrally collected and persisted in Loki, via a completely separate
+  path from the Collector; as of Phase 2B.3, Grafana also
+  auto-provisions three dashboards built from queries independently
+  verified against this real telemetry; as of Phase 2B.4, Prometheus
+  evaluates real alert rules against this same telemetry and routes
+  firing alerts to Alertmanager.
 
   **Implemented:**
   - `otel-collector` (`otel/opentelemetry-collector-contrib:0.161.0`):
@@ -378,13 +391,30 @@ Full inventory:
     prevents replacing the socket file itself; this is documented, not
     glossed over, including that this same mount is also active under
     CI (see the README's Phase 2B.2 entry for the full reasoning).
+  - `alertmanager` (`prom/alertmanager:v0.34.1`, Phase 2B.4): receives
+    alerts Prometheus fires, groups them
+    (`group_by: [alertname, severity]`), and tracks their
+    firing/resolved state through its own real API
+    (`GET /api/v2/alerts`, `GET /api/v2/status`). Single-instance,
+    persistent local storage (`alertmanager_data`). Its single receiver
+    has no integration configured at all — a normal, valid "null"
+    receiver, not an invented notification service — so it still
+    receives/groups/tracks every alert but sends nothing anywhere. Has
+    both a shell and `wget` (confirmed via direct inspection, unlike
+    loki/alloy), so it has a real Docker-level healthcheck.
   - `grafana` (`grafana/grafana-oss:13.0.2`): Prometheus (default),
-    Tempo (Phase 2B.1), and Loki (Phase 2B.2) are all auto-provisioned
+    Tempo (Phase 2B.1), Loki (Phase 2B.2), and Alertmanager
+    (Phase 2B.4, `type: alertmanager`,
+    `jsonData.implementation: prometheus`) are all auto-provisioned
     as datasources via
     `observability/grafana/provisioning/datasources/datasource.yml`
     (resolving `http://prometheus:9090`/`http://tempo:3200`/
-    `http://loki:3100` by Compose service name, not `localhost`) — no
-    manual click-through setup needed after `docker compose up`. As of
+    `http://loki:3100`/`http://alertmanager:9093` by Compose service
+    name, not `localhost`) — no manual click-through setup needed after
+    `docker compose up`. The Alertmanager datasource was proven
+    genuinely functional (not just configured) via a real request
+    through Grafana's own datasource proxy, which returned
+    Alertmanager's real cluster status and version. As of
     Phase 2B.3, three dashboards are also auto-provisioned via a
     second, separate mount for
     `observability/grafana/provisioning/dashboards` (Application
@@ -427,17 +457,36 @@ Full inventory:
     Prometheus/Loki (not just checking the dashboard JSON exists, and
     not a separately maintained query list that could drift from what
     the dashboards actually ship).
+  - **Alert rules** (Phase 2B.4, `observability/prometheus/rules/alerts.yml`,
+    evaluated by Prometheus, not Grafana): `TelemetryPipelineUnavailable`
+    (`up{job=~"otel-collector|otel-collector-app-metrics"} == 0`,
+    `for: 1m` — the deterministic rule used for the lifecycle test
+    below); `CheckoutServerErrors` (real HTTP 5xx on checkout-service,
+    `for: 2m`); `CheckoutHighLatency` (`histogram_quantile(0.95, ...)
+    > 1` for `/checkouts`, threshold set from an observed real baseline
+    of ~10-25ms, `for: 2m`); `CollectorRefusingTelemetry` (real
+    `otelcol_receiver_refused_spans`/`_refused_metric_points` activity,
+    `for: 1m`). Every rule carries `severity`/`component` labels (plus
+    `service` or `category` where appropriate) and `summary`/
+    `description` annotations. Validated with the real pinned
+    Prometheus image's own `promtool check rules`.
 
   All host-published ports (`otel-collector`'s `4317`/`4318`/`13133`,
   `prometheus`'s `9090`, `tempo`'s `3200`, `loki`'s `3100`, `alloy`'s
-  `12345`, `grafana`'s `3000`) are bound to `127.0.0.1` only, since none
-  of them (aside from Grafana's own admin login) sit behind
-  authentication — unlike the four Phase 1 application services and
-  PostgreSQL, which remain published on all interfaces.
+  `12345`, `alertmanager`'s `9093`, `grafana`'s `3000`) are bound to
+  `127.0.0.1` only, since none of them (aside from Grafana's own admin
+  login) sit behind authentication — unlike the four Phase 1
+  application services and PostgreSQL, which remain published on all
+  interfaces.
 
   **Not implemented:**
-  - Alerting of any kind (no Grafana alert rules, no Prometheus
-    Alertmanager)
+  - Outbound alert notification of any kind (email, Slack, PagerDuty,
+    or any webhook) — Alertmanager's only receiver is a no-op local
+    sink
+  - A control plane to consume these incident signals
+  - Grafana-managed alert rules (Prometheus remains the only rule
+    evaluator)
+  - Automatic remediation of any kind
   - A dedicated Tempo/traces dashboard panel (not part of Phase 2B.3's
     explicit panel list)
   - Any consumption of telemetry by an agent
@@ -479,7 +528,13 @@ Full inventory:
   correlated yet. As of Phase 2B.3, three Grafana dashboards are
   auto-provisioned from queries independently verified against this
   same real telemetry (see the Dashboards entry above); Grafana is no
-  longer just three connected-but-unused datasources.
+  longer just three connected-but-unused datasources. As of Phase 2B.4,
+  Prometheus evaluates four real alert rules against this same
+  telemetry and routes firing alerts to Alertmanager — a genuine
+  controlled failure (stopping `otel-collector`) empirically proved the
+  full `inactive → pending → firing → (Alertmanager) → resolved →
+  inactive` lifecycle for `TelemetryPipelineUnavailable`, and that
+  telemetry resumes afterward.
 
 There are no other application services, no message brokers, no
 orchestration, no cloud infrastructure, and no AI provider integration.
@@ -538,8 +593,9 @@ or call back into checkout-service.
 ### Observability
 **CURRENT:** An OpenTelemetry Collector, Prometheus, Grafana (with
 three auto-provisioned dashboards as of Phase 2B.3), (as of Phase 2B.1)
-Grafana Tempo, and (as of Phase 2B.2) Grafana Loki + Grafana Alloy all
-run via Docker Compose (see Current Implementation above). All four
+Grafana Tempo, (as of Phase 2B.2) Grafana Loki + Grafana Alloy, and (as
+of Phase 2B.4) Prometheus Alertmanager all run via Docker Compose (see
+Current Implementation above). All four
 application services are instrumented,
 each its own idiomatic way: `checkout-service` with the OpenTelemetry
 Java auto-instrumentation agent (pinned `v2.31.1`); `payment-service`
@@ -585,19 +641,32 @@ ID. As of Phase 2B.3, Grafana auto-provisions three dashboards
 (Application Health, Centralized Logging, Observability Infrastructure)
 built entirely from metrics/logs/queries confirmed against real
 telemetry — Tempo and Loki are no longer just connected-but-unused
-datasources, though no dedicated traces panel exists yet. There is
-still no alerting, and none of this telemetry is yet consumed by an
-agent.
+datasources, though no dedicated traces panel exists yet. As of
+Phase 2B.4, Prometheus evaluates four real alert rules
+(`TelemetryPipelineUnavailable`, `CheckoutServerErrors`,
+`CheckoutHighLatency`, `CollectorRefusingTelemetry`) against this same
+telemetry and routes firing alerts to Prometheus Alertmanager, which
+receives, groups, and tracks their state through its own real API. A
+genuine controlled failure (stopping `otel-collector`) empirically
+proved `TelemetryPipelineUnavailable`'s full `inactive → pending →
+firing → (Alertmanager, active) → resolved → inactive` lifecycle, and
+that application telemetry resumes afterward — not merely that the
+rule and receiver are configured. Alertmanager's only receiver is a
+no-op local sink: there is no outbound notification integration of any
+kind yet, no control plane to consume these incident signals, and none
+of this telemetry is consumed by an agent.
 
 **FUTURE (not yet implemented):**
-- Alerting (Grafana alert rules and/or Prometheus Alertmanager)
+- Outbound alert notification (email, Slack, PagerDuty, or any
+  webhook) and a control plane to consume these incident signals
+- Automatic remediation of any kind
 - A dedicated Tempo/traces dashboard panel
 - Log/trace correlation (emitting trace and span IDs into application
   log output, and querying Loki/Tempo together by that shared ID)
 - Per-request access logging in `checkout-service` and
   `inventory-service` (both currently log only at container startup)
-- Consumption of this telemetry (metrics, traces, and now logs) by an
-  agent for incident detection
+- Consumption of this telemetry (metrics, traces, logs, and now
+  alerts) by an agent for incident detection
 
 ### Event streaming
 **Kafka or Redpanda** for propagating incident signals and telemetry

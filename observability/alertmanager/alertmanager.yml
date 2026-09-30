@@ -1,0 +1,28 @@
+# Alertmanager configuration for local development (Phase 2B.4).
+#
+# Receives, groups, and tracks the lifecycle of alerts fired by
+# Prometheus (see ../prometheus/rules/alerts.yml) — Alertmanager itself
+# never evaluates a PromQL expression; that happens in Prometheus.
+#
+# Deliberately no outbound notification integration (no email, Slack,
+# PagerDuty, or webhook to any external/local service) — this phase
+# builds the alert pipeline itself, not a notification channel. The
+# single receiver below has no integration configured at all ("null"
+# receiver), which is a normal, fully valid Alertmanager receiver: it
+# still receives every alert routed to it, groups them per `route`, and
+# is visible through Alertmanager's real API (GET /api/v2/alerts) with
+# real firing/resolved state — it just never sends anything anywhere.
+# A future control plane can later add a real receiver (e.g. a webhook
+# it owns) without changing this routing structure.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: local-null
+  group_by: ["alertname", "severity"]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+
+receivers:
+  - name: local-null

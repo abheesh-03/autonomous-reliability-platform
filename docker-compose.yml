@@ -42,6 +42,12 @@
 #     Centralized Logging (Loki), and Observability Infrastructure
 #     (Prometheus/Collector self-telemetry). No new services; only
 #     Grafana's own provisioning config changed.
+#   - alertmanager (Phase 2B.4): Prometheus evaluates the alert rules
+#     in observability/prometheus/rules/ and routes any firing alert to
+#     Alertmanager, which receives, groups, and tracks alert state
+#     through its own real API. No outbound notification integration
+#     yet (a single no-op "null" receiver) — this phase builds the
+#     alert pipeline itself, not a notification channel.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -333,12 +339,36 @@ services:
     restart: unless-stopped
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Phase 2B.4: alert rule files, evaluated by Prometheus itself
+      # (see prometheus.yml's rule_files) and routed to alertmanager on
+      # firing.
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus_data:/prometheus
     # Bound to loopback only — no authentication in front of Prometheus.
     ports:
       - "127.0.0.1:9090:9090"
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:9090/-/ready || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    restart: unless-stopped
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    # Bound to loopback only — this is Alertmanager's real, unauthenticated
+    # HTTP API (GET/POST /api/v2/*); never publish this beyond localhost.
+    ports:
+      - "127.0.0.1:9093:9093"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:9093/-/ready || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -387,3 +417,4 @@ volumes:
   tempo_data:
   loki_data:
   alloy_data:
+  alertmanager_data:

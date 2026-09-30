@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# verify-observability.sh — Bundled Phase 2A.1-2B.3 verification.
+# verify-observability.sh — Bundled Phase 2A.1-2B.4 verification.
 #
 # Starts the full Docker Compose environment, waits for every
 # application and observability service to become healthy (with a
@@ -30,12 +30,25 @@
 # three auto-provisioned Grafana dashboards (Application Health,
 # Centralized Logging, Observability Infrastructure) through Grafana's
 # real API — correct panels, datasource references, template
-# variables — and independently re-executes a curated set of the
-# dashboards' own PromQL/LogQL queries directly against Prometheus and
-# Loki (scripts/verify-grafana-dashboards.py, the same validator CI
-# uses) — then always tears the environment down (without deleting
-# volumes) and confirms every named volume, including
-# tempo_data/loki_data/alloy_data, still exists.
+# variables — and independently re-executes every panel's own
+# PromQL/LogQL query directly against Prometheus and Loki
+# (scripts/verify-grafana-dashboards.py, the same validator CI uses).
+# Phase 2B.4 then verifies the alerting layer built on top of that same
+# telemetry: Alertmanager readiness and that Prometheus actually loaded
+# all four expected alert rules, each starting "inactive"
+# (scripts/verify-alerting.py); then a full lifecycle acceptance test
+# (scripts/verify-alert-lifecycle.sh) proving a real rule
+# (TelemetryPipelineUnavailable) goes inactive -> pending -> firing
+# because of a genuine, controlled failure (stopping otel-collector,
+# never a rule-file edit or a direct POST to Alertmanager's API), that
+# the same firing alert is independently observable through
+# Alertmanager's own API, and that both recover cleanly once
+# otel-collector is restarted — deliberately run after every other
+# telemetry/dashboard check above, since stopping otel-collector would
+# otherwise invalidate them. The script then always tears the
+# environment down (without deleting volumes) and confirms every named
+# volume, including tempo_data/loki_data/alloy_data/alertmanager_data,
+# still exists.
 #
 # Exits non-zero immediately on the first failed check.
 
@@ -85,7 +98,11 @@ for f in \
   observability/grafana/provisioning/dashboards/json/application-health.json \
   observability/grafana/provisioning/dashboards/json/centralized-logging.json \
   observability/grafana/provisioning/dashboards/json/observability-infrastructure.json \
-  scripts/verify-grafana-dashboards.py
+  scripts/verify-grafana-dashboards.py \
+  observability/alertmanager/alertmanager.yml \
+  observability/prometheus/rules/alerts.yml \
+  scripts/verify-alerting.py \
+  scripts/verify-alert-lifecycle.sh
 do
   [ -f "$f" ] || fail "missing required config file: $f"
   echo "  found: $f"
@@ -127,7 +144,7 @@ wait_for_healthy() {
   fail "$service did not become healthy in time"
 }
 
-for svc in postgres checkout-service payment-service inventory-service notification-service prometheus grafana tempo; do
+for svc in postgres checkout-service payment-service inventory-service notification-service prometheus grafana tempo alertmanager; do
   wait_for_healthy "$svc"
 done
 
@@ -256,6 +273,11 @@ echo "$datasources_body" | jq -e '
     [.[] | select(.type == "loki" and .url == "http://loki:3100")] | length > 0
   ' >/dev/null || fail "Grafana provisioned Loki datasource not found or misconfigured"
 echo "  Grafana Loki datasource OK (type=loki, url=http://loki:3100)"
+
+echo "$datasources_body" | jq -e '
+    [.[] | select(.type == "alertmanager" and .url == "http://alertmanager:9093")] | length > 0
+  ' >/dev/null || fail "Grafana provisioned Alertmanager datasource not found or misconfigured"
+echo "  Grafana Alertmanager datasource OK (type=alertmanager, url=http://alertmanager:9093)"
 
 # --------------------------------------------------------------------
 # G. Regression: POST /checkouts
@@ -672,9 +694,81 @@ done
 [ "$dashboards_ok" = true ] || fail "scripts/verify-grafana-dashboards.py never confirmed all three provisioned dashboards (structure, datasources, variables, and live underlying queries)"
 
 # --------------------------------------------------------------------
-# O. Container/log sanity
+# O. Observability: Alertmanager readiness and alert rules loaded (Phase 2B.4)
 # --------------------------------------------------------------------
-section "O. Container/log sanity"
+section "O. Observability: Alertmanager readiness and alert rules loaded"
+
+echo "-- Alertmanager has a Docker-level healthcheck already (real shell +"
+echo "   wget in the pinned image), confirmed via the standard health-wait"
+echo "   loop above; this section confirms its own /-/healthy, /-/ready,"
+echo "   and /api/v2/status APIs directly, and that Prometheus actually"
+echo "   loaded all four expected alert rules (correct expressions,"
+echo "   for: durations, labels, annotations) and that every one starts"
+echo "   'inactive' — a real environment must start clean before the"
+echo "   lifecycle test below --"
+
+alerting_rules_ok=false
+for i in $(seq 1 20); do
+  if python3 scripts/verify-alerting.py health --alertmanager-url http://127.0.0.1:9093 \
+       && python3 scripts/verify-alerting.py rules --prometheus-url http://127.0.0.1:9090
+  then
+    alerting_rules_ok=true
+    break
+  fi
+  echo "  attempt $i/20: Alertmanager health / Prometheus rule-loading not yet fully verifiable"
+  sleep 3
+done
+[ "$alerting_rules_ok" = true ] || fail "scripts/verify-alerting.py never confirmed Alertmanager health and all four expected alert rules loaded/inactive"
+
+# --------------------------------------------------------------------
+# P. Observability: alert lifecycle acceptance test (Phase 2B.4)
+# --------------------------------------------------------------------
+section "P. Observability: alert lifecycle acceptance test"
+
+echo "-- proving a REAL Prometheus alert rule (TelemetryPipelineUnavailable)"
+echo "   transitions inactive -> pending -> firing because of a genuine,"
+echo "   controlled failure (stopping otel-collector, not editing a rule"
+echo "   file or POSTing directly to Alertmanager's API), that the same"
+echo "   firing alert is independently observable through Alertmanager's"
+echo "   own API, and that both recover cleanly after otel-collector is"
+echo "   restarted. This intentionally runs after every other telemetry/"
+echo "   dashboard check above, since stopping otel-collector would"
+echo "   otherwise invalidate them. scripts/verify-alert-lifecycle.sh"
+echo "   restores otel-collector via its own EXIT trap if anything in it"
+echo "   fails partway through, so this script's own 'set -e' propagating"
+echo "   a failure out of this section never leaves the environment with"
+echo "   the Collector stopped --"
+
+bash scripts/verify-alert-lifecycle.sh
+
+echo ""
+echo "-- explicitly re-confirming (beyond verify-alert-lifecycle.sh's own"
+echo "   final telemetry-resume check) that the Collector scrape targets"
+echo "   and application metrics path are fully back to normal after the"
+echo "   controlled failure, using the same checks already proven earlier"
+echo "   in this run --"
+
+collector_recovered_ok=false
+for i in $(seq 1 20); do
+  if body="$(curl -fsS http://127.0.0.1:9090/api/v1/targets 2>/dev/null)" && echo "$body" | jq -e '
+      ([.data.activeTargets[] | select(.labels.job=="otel-collector") | .health] | length > 0 and all(.[]; . == "up"))
+      and
+      ([.data.activeTargets[] | select(.labels.job=="otel-collector-app-metrics") | .health] | length > 0 and all(.[]; . == "up"))
+    ' >/dev/null 2>&1
+  then
+    collector_recovered_ok=true
+    break
+  fi
+  echo "  attempt $i/20: otel-collector/otel-collector-app-metrics scrape targets not both back UP yet"
+  sleep 3
+done
+[ "$collector_recovered_ok" = true ] || fail "otel-collector's Prometheus scrape targets did not return to UP after the alert lifecycle test's controlled failure"
+echo "  otel-collector scrape targets confirmed UP after recovery"
+
+# --------------------------------------------------------------------
+# Q. Container/log sanity
+# --------------------------------------------------------------------
+section "Q. Container/log sanity"
 
 docker compose ps
 
@@ -712,6 +806,9 @@ docker compose logs --tail=50 loki
 echo ""
 echo "-- alloy logs (last 50 lines) --"
 docker compose logs --tail=50 alloy
+echo ""
+echo "-- alertmanager logs (last 50 lines) --"
+docker compose logs --tail=50 alertmanager
 
 echo ""
 echo "-- checking for persistent (non-transient) Collector->Tempo export"
@@ -736,9 +833,9 @@ fi
 echo "  no persistent Alloy->Loki log-shipping errors in the most recent logs"
 
 # --------------------------------------------------------------------
-# P. Persistence after cleanup
+# R. Persistence after cleanup
 # --------------------------------------------------------------------
-section "P. Persistence after cleanup"
+section "R. Persistence after cleanup"
 
 echo "-- docker compose down (preserving volumes) --"
 docker compose down
@@ -758,7 +855,7 @@ compose_project_name="$(docker compose config --format json | python3 -c 'import
 [ -n "$compose_project_name" ] || fail "could not resolve the effective Compose project name from 'docker compose config'"
 echo "  resolved Compose project name: $compose_project_name"
 
-for logical_vol in postgres_data prometheus_data grafana_data tempo_data loki_data alloy_data; do
+for logical_vol in postgres_data prometheus_data grafana_data tempo_data loki_data alloy_data alertmanager_data; do
   match="$(docker volume ls \
     --filter "label=com.docker.compose.project=$compose_project_name" \
     --filter "label=com.docker.compose.volume=$logical_vol" \
@@ -768,4 +865,4 @@ for logical_vol in postgres_data prometheus_data grafana_data tempo_data loki_da
 done
 
 section "SUCCESS"
-echo "Phase 2A.1-2B.3 observability verification passed."
+echo "Phase 2A.1-2B.4 observability verification passed."
