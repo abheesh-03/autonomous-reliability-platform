@@ -9,13 +9,15 @@
 # branches: payment, inventory, notification — siblings, not a
 # sequential chain).
 #
-# Traces still go to the "debug" exporter only. There is intentionally
-# no trace backend (Tempo/Jaeger/etc.) yet — that belongs to a later
-# phase. Metrics are re-exposed in Prometheus format and scraped by
+# Phase 2B.1: the traces pipeline now exports to BOTH the "debug"
+# exporter (kept intentionally — scripts/verify-observability.sh and
+# scripts/parse-checkout-trace.py still read Collector logs) AND a new
+# OTLP exporter pointed at Tempo, a persistent, queryable trace backend.
+# Metrics are unchanged: re-exposed in Prometheus format and scraped by
 # Prometheus. The Collector's own internal ("self") telemetry on port
-# 8888 is unaffected by any of this. No new pipelines or exporters have
-# been added since Phase 2A.1 — every instrumented service's telemetry
-# flows through the same two pipelines below.
+# 8888 is unaffected by any of this. The metrics pipeline is completely
+# unchanged; only the traces pipeline gained a second exporter — no new
+# pipelines, receivers, or processors were added.
 
 receivers:
   otlp:
@@ -37,11 +39,24 @@ exporters:
     endpoint: 0.0.0.0:8889
     resource_to_telemetry_conversion:
       enabled: true
-  # Phase 2A.2 only: prints received traces to Collector logs so they
-  # can be inspected without a trace backend, which is intentionally not
-  # added yet. Not used for metrics.
+  # Prints received traces to Collector logs — kept alongside the Tempo
+  # exporter below (Phase 2B.1) because the existing local verifier and
+  # scripts/parse-checkout-trace.py still read trace evidence from these
+  # logs. Not used for metrics.
   debug:
     verbosity: detailed
+  # Phase 2B.1: exports traces to Tempo's OTLP gRPC receiver over the
+  # internal Compose network (not published to the host). `insecure:
+  # true` disables TLS, matching every other internal OTLP path in this
+  # stack (application services -> otel-collector is also plaintext).
+  # Uses the "otlp_grpc" type explicitly, not the "otlp" alias — the
+  # Collector logs a deprecation warning ("\"otlp\" alias is deprecated;
+  # use \"otlp_grpc\" instead") for the older name, confirmed empirically
+  # against this pinned 0.161.0 build.
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
 
 extensions:
   health_check:
@@ -66,4 +81,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [debug, otlp_grpc/tempo]

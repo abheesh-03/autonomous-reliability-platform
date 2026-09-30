@@ -1,0 +1,45 @@
+# Grafana Tempo 3.0.3 configuration for local development (Phase 2B.1).
+#
+# Monolithic mode: no `target` is set, so it defaults to "all" — every
+# Tempo component runs in this single process (confirmed via startup
+# logs: distributor, live-store, backend-scheduler/backend-worker,
+# querier, query-frontend all start together — v3.x replaced the
+# classic ingester/compactor top-level config keys with this internal
+# architecture; `ingester:`/`compactor:` top-level keys from older
+# Tempo versions are REJECTED by this version's config parser and will
+# fail startup, confirmed empirically). No `kafka`/`ingest.address`
+# config is present anywhere below, and startup logs show no attempt to
+# reach Kafka — this config uses Tempo's default in-process WAL/local
+# storage path, not the optional Kafka-backed ingest path. Single-tenant:
+# no multitenancy/auth is enabled (the default), so no X-Scope-OrgID
+# header is required. Storage is local filesystem only under
+# /var/tempo — no S3/GCS/MinIO, no distributed Tempo components.
+#
+# Retention is intentionally left at Tempo's built-in default
+# (336h / 14 days, confirmed via `/tempo --help`), which is already
+# appropriate for local development. An explicit override was attempted
+# empirically (backend_scheduler.provider.*) but v3.x's real schema for
+# this differs from what limited public documentation suggests and
+# could not be confirmed without further guessing against an internal,
+# largely undocumented config path — see README.md for this documented
+# limitation.
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal

@@ -25,6 +25,12 @@
 #     chain). Prometheus scrapes itself, the Collector's own telemetry,
 #     and the Collector's application-metrics relay; Grafana has
 #     Prometheus provisioned as its datasource.
+#   - tempo: a persistent, queryable distributed-tracing backend
+#     (Phase 2B.1). The Collector's traces pipeline now exports to both
+#     Tempo and its existing debug exporter. Real checkout traces are
+#     retrievable from Tempo's own HTTP query API, not just from
+#     Collector logs. Grafana has Tempo provisioned as a second
+#     datasource alongside Prometheus.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -203,6 +209,33 @@ services:
     # the host/other containers) and, more meaningfully, via Prometheus
     # reporting this service's scrape target as "up".
 
+  tempo:
+    image: grafana/tempo:3.0.3
+    restart: unless-stopped
+    volumes:
+      - ./observability/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    # Only the HTTP query API is published to the host; Tempo's OTLP
+    # receiver (gRPC :4317 / HTTP :4318, distinct container from
+    # otel-collector's own same-numbered ports) stays internal to the
+    # Compose network — only otel-collector talks to it, as
+    # tempo:4317/tempo:4318.
+    ports:
+      - "127.0.0.1:3200:3200"
+    # The image has no shell and no curl/wget (ENTRYPOINT is the /tempo
+    # binary directly, confirmed via `docker inspect`), so the
+    # healthcheck uses the binary's own built-in "-health" mode instead
+    # — confirmed empirically: `/tempo -health` performs a GET against
+    # its own http://localhost:3200/ready and exits 0/1 accordingly,
+    # printing "Tempo is healthy" on success.
+    healthcheck:
+      test: ["CMD", "/tempo", "-health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   prometheus:
     image: prom/prometheus:v3.15.0
     restart: unless-stopped
@@ -253,3 +286,4 @@ volumes:
   postgres_data:
   prometheus_data:
   grafana_data:
+  tempo_data:

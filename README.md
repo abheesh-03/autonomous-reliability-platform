@@ -17,31 +17,34 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 2A.5 — notification-service OpenTelemetry Instrumentation +
-Complete Distributed Checkout Trace**. An OpenTelemetry Collector,
-Prometheus, and Grafana run via Docker Compose (Phase 2A.1). All four
-application services are now instrumented, each its own idiomatic way:
-`checkout-service` with the OpenTelemetry Java auto-instrumentation
-agent (Phase 2A.2); `payment-service` with OpenTelemetry Python
-zero-code auto-instrumentation (Phase 2A.3); `inventory-service` with
-manual OpenTelemetry Go SDK initialization plus `otelhttp` (Phase 2A.4);
-and `notification-service` with manual OpenTelemetry Node SDK
-initialization plus `@opentelemetry/instrumentation-http` and
-`@fastify/otel` (Phase 2A.5). A real `POST /checkouts` request now
-proves a **complete distributed trace across the whole four-service
-checkout workflow**: checkout-service's own SERVER span is the common
-parent of three independent, correctly-parented downstream branches —
-CLIENT → payment SERVER, CLIENT → inventory SERVER, and CLIENT →
-notification SERVER — all siblings, **not** a sequential
-payment → inventory → notification chain. Same Trace ID and correct
-parent/child Span IDs on all three branches, verified against real
-Collector output, not assumed, and independently reconfirmed on a
-second, fully torn-down-and-restarted run. `checkout-service` still
+**Phase 2B.1 — Grafana Tempo as a Persistent Distributed-Tracing
+Backend**. An OpenTelemetry Collector, Prometheus, and Grafana run via
+Docker Compose (Phase 2A.1). All four application services are
+instrumented, each its own idiomatic way: `checkout-service` with the
+OpenTelemetry Java auto-instrumentation agent (Phase 2A.2);
+`payment-service` with OpenTelemetry Python zero-code
+auto-instrumentation (Phase 2A.3); `inventory-service` with manual
+OpenTelemetry Go SDK initialization plus `otelhttp` (Phase 2A.4); and
+`notification-service` with manual OpenTelemetry Node SDK initialization
+plus `@opentelemetry/instrumentation-http` and `@fastify/otel`
+(Phase 2A.5) — together producing a complete, verified distributed
+trace across checkout-service and its three sibling downstream branches
+(payment, inventory, notification — **not** a sequential chain) for
+every real `POST /checkouts` request. As of Phase 2B.1, traces are no
+longer visible only in Collector logs: **Grafana Tempo 3.0.3** now runs
+as a persistent, queryable trace backend, with the Collector's traces
+pipeline exporting to both Tempo and the existing `debug` exporter.
+A real checkout's seven-span trace has been retrieved directly from
+Tempo's own HTTP query API (`GET /api/v2/traces/{traceID}`) and
+independently re-verified — same Trace ID, same seven spans, same six
+parent/child relationships — and confirmed to survive a graceful Tempo
+restart using the same persistent volume. `checkout-service` still
 synchronously orchestrates all three downstream services via
-`POST /checkouts` (Phase 1B.4), with no change to any business logic;
-none of the four application services connect to PostgreSQL. There is
-still no real trace backend (Collector `debug` exporter logs only), no
-application log pipeline, no dashboards/alerts, and no AI functionality.
+`POST /checkouts` (Phase 1B.4), with no change to any business logic or
+application instrumentation; none of the four application services
+connect to PostgreSQL. There is still no application log pipeline, no
+dashboards or alerts (Tempo is provisioned as a Grafana datasource, but
+no dashboards use it yet), and no AI functionality.
 
 ## Problem this project will eventually solve
 
@@ -64,17 +67,18 @@ The following components are **planned** and do not exist yet:
 - A LangGraph-based agent runtime for investigation and hypothesis formation
 - A Go infrastructure tool gateway for safely executing remediation actions
 - Demo commerce microservices as a realistic monitored target
-- Application-level observability: a real trace backend, application
-  log pipeline, dashboards, and alerts (the OTel Collector / Prometheus /
-  Grafana infrastructure exists, all four application services now
-  export metrics and traces to it, and one real `POST /checkouts`
-  request produces a complete, verified distributed trace across
-  checkout-service and all three of its downstream branches — payment,
-  inventory, notification, as siblings, not a sequential chain — see
+- Application-level observability: an application log pipeline,
+  dashboards, and alerts (the OTel Collector / Prometheus / Grafana
+  infrastructure exists, all four application services export metrics
+  and traces to it, one real `POST /checkouts` request produces a
+  complete, verified distributed trace across checkout-service and all
+  three of its downstream branches — payment, inventory, notification,
+  as siblings, not a sequential chain — and, as of Phase 2B.1, that
+  trace is retrievable from a persistent trace backend, Grafana Tempo,
+  not just Collector logs — see
   [Observability Infrastructure](#observability-infrastructure) below —
-  but traces are only visible via the Collector's `debug` exporter logs,
-  there is no centralized trace backend or application log pipeline,
-  and no dashboards or alerts exist yet)
+  but there is still no application log pipeline, and no dashboards or
+  alerts exist yet)
 - Kafka or Redpanda for event streaming
 - Kubernetes as the deployment target, provisioned via Terraform on AWS
 
@@ -114,9 +118,9 @@ sequence — the first real service-to-service workflow in this
 repository — and returns a combined result. None of the four
 application services connect to PostgreSQL yet.
 
-An observability stack — an OpenTelemetry Collector, Prometheus, and
-Grafana — also runs via Docker Compose (see
-[Observability Infrastructure](#observability-infrastructure) below).
+An observability stack — an OpenTelemetry Collector, Prometheus,
+Grafana, and (Phase 2B.1) Grafana Tempo — also runs via Docker Compose
+(see [Observability Infrastructure](#observability-infrastructure) below).
 `checkout-service` is instrumented with the OpenTelemetry Java
 auto-instrumentation agent (pinned `v2.31.1`) and exports HTTP server
 metrics for `POST /checkouts`, HTTP client metrics for its three
@@ -137,9 +141,16 @@ siblings, not a sequential chain. Same Trace ID throughout, and each
 downstream SERVER span's Parent Span ID equals its own checkout CLIENT
 span's Span ID — verified against real Collector output, not assumed,
 and independently reconfirmed on a second, fully torn-down-and-restarted
-run. Traces currently have no backend (the Collector's `debug` exporter
-prints them to its own logs; a real trace backend is a future phase).
-No AI integration has been added yet.
+run. As of Phase 2B.1, that same trace has also been independently
+retrieved and re-verified directly from **Grafana Tempo** (pinned
+`3.0.3`, monolithic mode, local filesystem storage), which the
+Collector's traces pipeline now exports to alongside the existing
+`debug` exporter — traces are persisted and queryable via Tempo's own
+HTTP API, not just visible in Collector logs, and the same trace was
+confirmed retrievable after a graceful Tempo restart using its
+persistent volume. There is still no application log pipeline, and no
+dashboards or alerts (Tempo is a provisioned Grafana datasource, but no
+dashboards reference it yet). No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -626,9 +637,11 @@ has had a chance to complete.
 ## Observability Infrastructure
 
 `observability/` contains configuration for a local OpenTelemetry
-Collector, Prometheus, and Grafana, all running via Docker Compose
-(Phase 2A.1). As of Phase 2A.5, **all four application services** feed
-this stack real telemetry.
+Collector, Prometheus, Grafana, and (Phase 2B.1) Grafana Tempo, all
+running via Docker Compose (Phase 2A.1). As of Phase 2A.5, **all four
+application services** feed this stack real telemetry; as of
+Phase 2B.1, traces are also persisted and queryable in Tempo, not just
+visible in Collector logs.
 
 ```
 checkout-service      --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
@@ -636,8 +649,10 @@ payment-service       --OTLP--> otel-collector --Prometheus format--> prometheus
 inventory-service     --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
 notification-service  --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
 (all four)            --OTLP (traces)--> otel-collector --debug exporter--> collector logs
+(all four)            --OTLP (traces)--> otel-collector --OTLP--> tempo --> grafana
 
-One real checkout trace — a COMPLETE distributed trace across all four services:
+One real checkout trace — a COMPLETE distributed trace across all four services,
+now persisted in and independently re-verified from Tempo's own HTTP query API:
                     +-> checkout payment CLIENT      -> payment SERVER
   checkout SERVER --|-> checkout inventory CLIENT    -> inventory SERVER
                     +-> checkout notification CLIENT -> notification SERVER
@@ -649,9 +664,13 @@ One real checkout trace — a COMPLETE distributed trace across all four service
   receiver (gRPC `:4317`, HTTP `:4318`) → `batch` processor, fanning out
   to two pipelines: metrics → Prometheus exporter (`:8889`, with
   `resource_to_telemetry_conversion` enabled so OTel resource attributes
-  like `service.name` become Prometheus labels), and traces → `debug`
-  exporter (prints detailed span data to the Collector's own container
-  logs — there is intentionally no trace backend yet). Its own internal
+  like `service.name` become Prometheus labels), and traces → **two**
+  exporters — the existing `debug` exporter (prints detailed span data
+  to the Collector's own container logs; kept because
+  `scripts/verify-observability.sh` and `scripts/parse-checkout-trace.py`
+  still read it) and, as of Phase 2B.1, an OTLP exporter to Tempo (type
+  `otlp_grpc`, not the deprecated `otlp` alias — confirmed via a real
+  Collector deprecation warning during implementation). Its own internal
   metrics are exposed separately on `:8888`. A `health_check` extension
   is exposed on `:13133`, but it does **not** back a Docker Compose
   healthcheck: the official Contrib image is a single static binary with
@@ -665,20 +684,60 @@ One real checkout trace — a COMPLETE distributed trace across all four service
   (`:8888`), and the Collector's application-telemetry-relay endpoint
   (`:8889`), which now carries real metrics from all four application
   services, on a persistent named volume.
-- **`grafana`** — Prometheus is auto-provisioned as its default
-  datasource (`observability/grafana/provisioning/datasources/datasource.yml`,
-  resolving `http://prometheus:9090` by Compose service name) so no
-  manual click-through setup is needed after `docker compose up`. No
-  dashboards are provisioned yet beyond what's needed to prove Grafana
-  can query Prometheus. Anonymous auth is disabled; the admin password
-  is a local-only placeholder from `.env.example`, never a real credential.
+- **`tempo`** (`grafana/tempo:3.0.3`, Phase 2B.1) — a persistent,
+  queryable distributed-tracing backend, running in monolithic mode
+  (no `target` set, so it defaults to `all`) with local filesystem
+  storage under `/var/tempo` on a persistent named volume (`tempo_data`).
+  Single-tenant (no multitenancy/auth configured). Its internal OTLP
+  receiver (gRPC `:4317`, HTTP `:4318`) is **not** published to the
+  host — only otel-collector talks to it, over the Compose network, as
+  `tempo:4317`. Only its HTTP query API (`:3200`) is published, bound to
+  `127.0.0.1` like every other observability port. No Docker-level shell
+  or curl/wget exists in this image either (`ENTRYPOINT` is the `/tempo`
+  binary directly), so the healthcheck instead uses the binary's own
+  built-in `-health` mode (confirmed empirically: it performs a GET
+  against its own `/ready` and exits 0/1 accordingly).
+- **`grafana`** — Prometheus (default) and, as of Phase 2B.1, Tempo are
+  both auto-provisioned as datasources
+  (`observability/grafana/provisioning/datasources/datasource.yml`,
+  resolving `http://prometheus:9090`/`http://tempo:3200` by Compose
+  service name) so no manual click-through setup is needed after
+  `docker compose up`. No dashboards are provisioned yet beyond what's
+  needed to prove Grafana can query both. Anonymous auth is disabled;
+  the admin password is a local-only placeholder from `.env.example`,
+  never a real credential.
 
-All three host ports above (`4317`/`4318`/`13133`, `9090`, `3000`) are
-published bound to `127.0.0.1` only — none of them sit behind
-authentication (Grafana is the exception, via its own admin login), so
-they are not reachable from other machines on the network even in local
-development. This differs from the four Phase 1 application services and
-PostgreSQL, whose ports remain published on all interfaces.
+All host ports above (`4317`/`4318`/`13133` for otel-collector, `9090`
+for prometheus, `3200` for tempo, `3000` for grafana) are published
+bound to `127.0.0.1` only — none of them sit behind authentication
+(Grafana is the exception, via its own admin login), so they are not
+reachable from other machines on the network even in local development.
+This differs from the four Phase 1 application services and PostgreSQL,
+whose ports remain published on all interfaces.
+
+### tempo configuration (Phase 2B.1)
+
+`observability/tempo/tempo.yaml` was built and verified empirically
+against the actual pinned `grafana/tempo:3.0.3` image, not assumed from
+older Tempo documentation — its config schema changed significantly in
+v3.x. Two real, concrete failures were hit and fixed during
+implementation: top-level `ingester:` and `compactor:` keys (valid in
+older Tempo versions) are **rejected** by this version's config parser
+(`field ingester not found in type app.Config`) — v3.x replaced that
+architecture internally with `live-store` / `backend-scheduler` /
+`backend-worker` components, confirmed via real startup logs, none of
+which require any YAML config from us. The final working config sets
+only `server.http_listen_port` (`3200`), `distributor.receivers.otlp`
+(gRPC `:4317` + HTTP `:4318`), and `storage.trace` (`backend: local`,
+with separate `local.path` and `wal.path` under `/var/tempo`).
+Retention is intentionally left at Tempo's documented built-in default
+(336h / 14 days) — an explicit override was attempted
+(`backend_scheduler.provider...`) but v3.x's real schema for this
+differs from what limited public documentation suggests, and guessing
+further against a largely undocumented internal path was not worth the
+risk; 14 days is already appropriate for local development. No Kafka,
+MinIO, S3, or distributed Tempo components are configured anywhere, and
+real startup logs confirm no attempt to reach Kafka.
 
 ### checkout-service instrumentation (Phase 2A.2)
 
@@ -723,37 +782,38 @@ make db-down
 ```
 
 **Bundled verification:** `make verify-observability` (or
-`scripts/verify-observability.sh`) runs the full Phase 2A.1-2A.5
+`scripts/verify-observability.sh`) runs the full Phase 2A.1-2B.1
 verification path in one deterministic script — starts Compose, waits
-for every service's health (with the `otel-collector` exception above),
-checks Prometheus targets and the Grafana datasource, re-runs the
+for every service's health (with the `otel-collector` exception above;
+`tempo` has a real healthcheck and is included in the normal wait loop),
+checks Prometheus targets and both Grafana datasources, re-runs the
 `POST /checkouts` regression check, then verifies all four application
 services' HTTP server metrics (plus checkout's HTTP client metrics)
-actually reached Prometheus (bounded retry, since export intervals and
-Prometheus's scrape cycle are both async), that trace evidence for the
-checkout SERVER span and all three downstream CLIENT spans appears in
-the Collector's own logs, and that ONE checkout trace is a **complete**
+actually reached Prometheus, that trace evidence for the checkout
+SERVER span and all three downstream CLIENT spans appears in the
+Collector's own logs, and that ONE checkout trace is a **complete**
 distributed trace across **all three** downstream branches — payment,
 inventory, and notification, siblings, not parent/child of each other
 — using a small deterministic parser
 (`scripts/parse-checkout-trace.py`, generalized across Phases 2A.3-2A.5
-from an initial payment-only parser) that proves each downstream CLIENT
-span and its corresponding SERVER span share a Trace ID with the
-correct parent/child Span IDs on every branch, rather than just
-grepping for service names appearing somewhere in the logs — then
-always tears the environment down (without deleting volumes) and
-confirms the three named volumes still exist. Run twice from a fully
-clean state in this phase specifically (not just once), since Node/ESM
-module-evaluation ordering is more delicate than the other three
-services' instrumentation mechanisms — both runs produced a
-correctly-correlated trace, each with an independent, different real
-Trace ID.
+from an initial payment-only parser). As of Phase 2B.1, it then
+independently re-verifies that exact same trace directly against
+Tempo's own HTTP query API using a second small deterministic validator,
+`scripts/verify-tempo-trace.py` (same script used in CI — no duplicated
+validation logic), and confirms the trace remains retrievable — with
+all seven spans and all six parent/child relationships still correct —
+after a graceful `docker compose restart tempo` using the same
+persistent volume. All of this uses bounded retries (metric/trace
+export, Tempo's own ingest-to-query path, and post-restart readiness
+are all asynchronous) and stays safe under `set -euo pipefail`. The
+script then always tears the environment down (without deleting
+volumes) and confirms every named volume, including the new
+`tempo_data`, still exists.
 
-**Not implemented yet:** a real trace backend (traces are only visible
-via the Collector's `debug` exporter logs); an application log
-pipeline; dashboards beyond the minimal datasource-connectivity check;
-alerting rules; and any consumption of telemetry by an agent. Those are
-deliberately deferred to later phases.
+**Not implemented yet:** an application log pipeline; dashboards beyond
+the minimal datasource-connectivity check; alerting rules; and any
+consumption of telemetry by an agent. Those are deliberately deferred
+to later phases.
 
 ## Continuous Integration
 
@@ -777,19 +837,22 @@ reach a healthy state, that Prometheus reports all three scrape targets
 — `prometheus` (self), `otel-collector` (self-telemetry), and
 `otel-collector-app-metrics` (the application-telemetry relay) — as
 `up` (bounded retry loop, since Prometheus needs a scrape cycle after
-startup), that Grafana's health
-API and provisioned Prometheus datasource are reachable, that all four
-application services' relevant HTTP metrics (checkout's server+client,
-payment's, inventory's, and — new in this phase — notification's server
-metrics) actually reach Prometheus, and that trace evidence (checkout
+startup), that Grafana's health API and provisioned Prometheus + Tempo
+datasources are reachable, that Tempo itself reaches a healthy state,
+that all four application services' relevant HTTP metrics (checkout's
+server+client, payment's, inventory's, and notification's server
+metrics) actually reach Prometheus, that trace evidence (checkout
 SERVER span, all three downstream CLIENT spans) plus a deterministic
 proof that ONE checkout trace is a **complete** distributed trace across
-**all three** downstream branches — payment, inventory, and — new in
-this phase — notification (via the same generalized
-`scripts/parse-checkout-trace.py` the local verifier uses) appear in
-the Collector's logs, all via bounded retry loops (the OTel Java
-agent's, Python SDK's, Go SDK's, and Node SDK's export intervals,
-Prometheus's scrape cycle, and the Collector's batch export are all
+**all three** downstream branches — payment, inventory, and
+notification (via `scripts/parse-checkout-trace.py`) — appear in the
+Collector's logs, and — new in this phase — that that exact same trace
+is independently retrievable and re-verifiable directly from Tempo's
+own HTTP query API (via `scripts/verify-tempo-trace.py`, the identical
+script the local verifier uses — no duplicated validation logic), all
+via bounded retry loops (the OTel Java agent's, Python SDK's, Go SDK's,
+and Node SDK's export intervals, Prometheus's scrape cycle, the
+Collector's batch export, and Tempo's own ingest-to-query path are all
 asynchronous) — then always tears the environment down (without
 deleting volumes).
 
@@ -812,13 +875,16 @@ run successfully on GitHub Actions. Phase 2A.4 further extended the
 existing metrics and trace steps with `inventory-service`'s checks and
 was committed (`d6c3292`); that version also ran successfully on
 GitHub Actions (run #15), with the working tree left clean afterward.
-Phase 2A.5 extends the same two steps once more with
-`notification-service`'s checks (see above); this has been locally
-validated end-to-end by reproducing the workflow's steps against the
-real Compose network (via `make verify-observability`, run twice from a
-clean state, which covers equivalent ground), but the Phase 2A.5
-version of the workflow has **not yet run on GitHub Actions** — that
-will only be true once it runs there after a push.
+Phase 2A.5 extended the same two steps once more with
+`notification-service`'s checks and was committed (`7e348a2`); that
+version also ran successfully on GitHub Actions (run #16), working tree
+clean afterward. Phase 2B.1 adds Tempo readiness, the Tempo datasource
+check, and a new trace-retrieval-from-Tempo step (see above); this has
+been locally validated end-to-end by reproducing the workflow's steps
+against the real Compose network (via `make verify-observability`,
+which covers equivalent ground), but the Phase 2B.1 version of the
+workflow has **not yet run on GitHub Actions** — that will only be true
+once it runs there after a push.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -1681,3 +1747,146 @@ problem today.
   configuration, trace retention, or automated/continuous trace
   collection beyond what the Collector's `debug` exporter already
   prints to its own logs.
+
+### Phase 2B.1 — Grafana Tempo as a persistent, queryable distributed-tracing backend
+
+- Pulled and inspected the actual pinned `grafana/tempo:3.0.3` image
+  before writing any config: `docker inspect` showed `ENTRYPOINT
+  ["/tempo"]`, `USER 10001:10001`, no shell; `/tempo --help` confirmed
+  `-config.file`, a built-in `-health` mode (GETs its own `/ready` and
+  exits 0/1 — used for the Docker healthcheck, no curl/shell needed),
+  and that `-target` defaults to `all` (monolithic mode, satisfying the
+  requirement without needing to set it explicitly).
+- New `observability/tempo/tempo.yaml`, built and corrected through
+  real, concrete failures against the actual image rather than assumed
+  from older Tempo documentation: a first attempt with top-level
+  `ingester:`/`compactor:` keys (valid in older Tempo versions) was
+  **rejected** by v3.0.3's parser (`field ingester not found in type
+  app.Config` / `field compactor not found in type app.Config`) —
+  real startup logs then showed v3.x replaced that architecture
+  internally with `live-store`/`backend-scheduler`/`backend-worker`
+  components, none of which need YAML config from us. The working
+  config sets only `server.http_listen_port: 3200`,
+  `distributor.receivers.otlp` (gRPC `:4317` + HTTP `:4318`), and
+  `storage.trace` (`backend: local`, `local.path`/`wal.path` under
+  `/var/tempo`). An explicit retention override
+  (`backend_scheduler.provider...`) was attempted and failed twice
+  against schema paths that don't match public documentation for this
+  version; rather than keep guessing against an undocumented internal
+  config surface, retention was left at Tempo's documented built-in
+  default (336h/14 days — already appropriate for local dev), and this
+  is reported here rather than silently worked around. No
+  Kafka/MinIO/S3/distributed-Tempo config anywhere; confirmed via real
+  startup logs that no Kafka connection is ever attempted.
+- `docker-compose.yml`: new `tempo` service (`grafana/tempo:3.0.3`,
+  `tempo_data` named volume at `/var/tempo`, config mounted read-only,
+  only `127.0.0.1:3200:3200` published — Tempo's own OTLP receiver
+  stays internal to the Compose network, reachable only as
+  `tempo:4317`/`tempo:4318`), with a Docker healthcheck using the
+  binary's own `-health` mode (`["CMD", "/tempo", "-health"]`) —
+  confirmed working in the real stack (reports `healthy` immediately).
+  Every existing service, volume, and port was left untouched.
+- `observability/otel-collector/config.yaml`: the traces pipeline's
+  exporter list changed from `[debug]` to `[debug, otlp_grpc/tempo]` —
+  metrics pipeline completely unchanged, no new receivers/processors/
+  pipelines. Hit and fixed a real deprecation warning during
+  implementation: the Collector logged `"otlp" alias is deprecated;
+  use "otlp_grpc" instead` for an exporter configured with type `otlp`;
+  fixed by using the `otlp_grpc` type explicitly (`otlp_grpc/tempo`),
+  confirmed via a clean restart that the warning is gone.
+- `observability/grafana/provisioning/datasources/datasource.yml`:
+  added a `Tempo` datasource (`type: tempo`, `url: http://tempo:3200`,
+  `access: proxy`), Prometheus remains `isDefault: true`. Verified both
+  via Grafana's authenticated `/api/datasources` endpoint.
+- **Real trace retrieval — the primary goal of this phase — proven
+  against Tempo's actual query API for a live `POST /checkouts`
+  request, not assumed:** used the existing `scripts/parse-checkout-trace.py`
+  to obtain a real Trace ID and all seven Span IDs from Collector logs,
+  then queried `GET /api/v2/traces/{traceID}` directly. **Empirically
+  discovered, not assumed:** the response wraps the standard OTLP-JSON
+  `resourceSpans`/`scopeSpans`/`spans` structure under a top-level
+  `"trace"` key, and — critically — `traceId`/`spanId`/`parentSpanId`
+  are **base64-encoded**, not hex (confirmed by decoding
+  `2N+0FGWNO919S+pRFh/wBA==` and getting back the exact known hex Trace
+  ID). All seven spans (checkout SERVER, three CLIENT spans, and the
+  three corresponding downstream SERVER spans) were found in the
+  response with span/parent IDs exactly matching what
+  `parse-checkout-trace.py` had already established from Collector
+  logs, alongside 5 additional internal spans (ASGI/Fastify framework
+  spans) that were correctly ignored. Independently repeated for a
+  second, separate real checkout request after fixing the collector's
+  `otlp_grpc` deprecation warning — same result, different real Trace
+  ID and Span IDs, confirming this isn't a one-off.
+- New `scripts/verify-tempo-trace.py`: a small, dependency-free
+  (stdlib only — `argparse`/`base64`/`json`/`re`/`urllib`) deterministic
+  validator. Takes `scripts/parse-checkout-trace.py`'s exact success
+  line as input (no duplicated ID-extraction logic), fetches the trace
+  from Tempo, decodes every base64 ID to hex, and independently
+  re-verifies — not just presence, but Trace ID, span Kind
+  (SERVER/CLIENT), resource `service.name`, and all six parent/child
+  relationships — for all seven spans, ignoring any other spans in the
+  response. Fails closed (nonzero exit, clear message) on an
+  unreachable Tempo, a missing trace, a missing span, a wrong Kind, a
+  wrong `service.name`, or a wrong parent/child relationship. Verified
+  it also fails closed correctly against a deliberately-bogus all-zero
+  trace ID (no false positive). The same script is used by both the
+  local verifier and CI — no duplicated validation logic.
+- **Persistence:** confirmed the `tempo_data` named volume exists and
+  survives normal `docker compose down` (without `-v`), alongside the
+  three pre-existing volumes. **Also went further and tested actual
+  trace durability, not just volume existence, per the task's explicit
+  distinction:** inspected the volume directly and found Tempo's
+  live-store writes ingested spans to disk incrementally (parquet
+  segment files under `/var/tempo/live-store/traces/...`), not purely
+  in-memory; then gracefully restarted the `tempo` container (`docker
+  compose restart tempo`, same volume) and confirmed the exact
+  already-ingested trace — re-validated with `verify-tempo-trace.py`,
+  all seven spans and six relationships intact — remained retrievable
+  afterward, reproduced twice (once manually, once inside the automated
+  verifier). **Honestly-reported limitation:** every trace tested here
+  was already at least tens of seconds old (and, per the live-store
+  behavior observed, already partially flushed to disk) by the time of
+  its restart; the narrower race of a trace restarted within
+  milliseconds of ingestion was not specifically stress-tested, so
+  immediate-ingestion durability is not claimed — only durability for a
+  trace that has had normal processing time, which is the realistic
+  case this platform cares about.
+- `scripts/verify-observability.sh` extended (not replaced): `tempo`
+  added to the standard health-wait loop (it has a real Docker
+  healthcheck, unlike otel-collector); the Grafana section gained a
+  Tempo datasource check; two new sections retrieve/validate the real
+  checkout trace from Tempo and prove restart persistence (both bounded
+  retries, both safe under `set -euo pipefail`); the container/log
+  sanity section now also dumps Tempo's logs and checks for
+  **persistent** (not transient/expected-during-restart)
+  Collector-to-Tempo export errors in the most recent log lines; the
+  final persistence section now also checks `tempo_data`. Every prior
+  Phase 2A.1-2A.5 assertion is unchanged. The full `make verify-observability`
+  run passed end-to-end from a fully torn-down state, including every
+  new Tempo check and the restart-persistence check, with a fresh,
+  independent real Trace ID.
+- `.github/workflows/ci.yml` extended, not duplicated: the existing
+  Grafana datasource step also checks Tempo; a new "Wait for Tempo to
+  become healthy" step mirrors the existing per-service pattern; the
+  existing checkout-trace step now has an `id:` and writes its match
+  line to `$GITHUB_OUTPUT` so the new "Verify checkout trace retrieval
+  and validation from Tempo" step can reuse it directly (via
+  `scripts/verify-tempo-trace.py`, the identical script used locally)
+  without re-deriving it; log collection and teardown now include
+  `tempo`. Kept the same safe `if cmd1 && cmd2; then` control-flow
+  pattern throughout so an expected-to-fail early retry attempt cannot
+  abort a step under GitHub Actions' default `bash -e`. Locally
+  reproduced equivalent verification via `make verify-observability` —
+  **not yet verified running on GitHub Actions in this updated form**
+  (Phase 2A.5's version of the workflow did run successfully there, per
+  commit `7e348a2`, CI run #16).
+- **Limitation, honestly reported, not worked around:** Tempo's
+  retention configuration could not be confirmed/overridden beyond its
+  built-in default within this phase's scope (see above) — this is a
+  config-schema-verification limitation, not a functional one; ingest,
+  storage, and query all work correctly with the default. No
+  dashboards were built against the new Tempo datasource (explicitly
+  out of scope for this phase). No application log pipeline exists yet.
+  Restart-persistence was proven for traces with normal (tens-of-
+  seconds-plus) processing time before the restart, not for traces
+  restarted within milliseconds of ingestion.

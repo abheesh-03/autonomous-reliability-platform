@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
 #
-# verify-observability.sh — Bundled Phase 2A.1-2A.5 verification.
+# verify-observability.sh — Bundled Phase 2A.1-2B.1 verification.
 #
 # Starts the full Docker Compose environment, waits for every
 # application and observability service to become healthy (with a
 # documented exception for otel-collector, whose official image has no
 # shell/wget/curl and therefore no Docker-level healthcheck), verifies
-# Prometheus's scrape targets and Grafana's provisioned datasource,
-# re-runs the POST /checkouts regression check, then checks that all
-# four application services' (checkout Phase 2A.2, payment Phase 2A.3,
-# inventory Phase 2A.4, notification Phase 2A.5) telemetry actually
-# reached Prometheus (application metrics) and the Collector (trace
-# spans) — including a deterministic parse (scripts/parse-checkout-trace.py)
-# proving that one real checkout trace is a complete distributed trace
-# across all three downstream branches (checkout->payment,
-# checkout->inventory, checkout->notification — siblings, not a
-# sequential chain; shared Trace ID, correct parent/child Span IDs on
-# every branch) — then always tears the environment down (without
-# deleting volumes) and confirms the named volumes still exist.
+# Prometheus's scrape targets and Grafana's Prometheus + Tempo
+# datasources, re-runs the POST /checkouts regression check, then checks
+# that all four application services' (checkout Phase 2A.2, payment
+# Phase 2A.3, inventory Phase 2A.4, notification Phase 2A.5) telemetry
+# actually reached Prometheus (application metrics) and the Collector
+# (trace spans) — including a deterministic parse
+# (scripts/parse-checkout-trace.py) proving that one real checkout trace
+# is a complete distributed trace across all three downstream branches
+# (checkout->payment, checkout->inventory, checkout->notification —
+# siblings, not a sequential chain; shared Trace ID, correct
+# parent/child Span IDs on every branch). Phase 2B.1 then independently
+# re-verifies that exact same trace directly against Tempo's own HTTP
+# query API (scripts/verify-tempo-trace.py), and that it survives a
+# graceful Tempo restart using the same tempo_data volume — then always
+# tears the environment down (without deleting volumes) and confirms
+# every named volume, including tempo_data, still exists.
 #
 # Exits non-zero immediately on the first failed check.
 
@@ -92,7 +96,7 @@ wait_for_healthy() {
   fail "$service did not become healthy in time"
 }
 
-for svc in postgres checkout-service payment-service inventory-service notification-service prometheus grafana; do
+for svc in postgres checkout-service payment-service inventory-service notification-service prometheus grafana tempo; do
   wait_for_healthy "$svc"
 done
 
@@ -168,6 +172,11 @@ echo "$datasources_body" | jq -e '
     [.[] | select(.type == "prometheus" and .url == "http://prometheus:9090" and .isDefault == true)] | length > 0
   ' >/dev/null || fail "Grafana provisioned Prometheus datasource not found or misconfigured"
 echo "  Grafana Prometheus datasource OK (type=prometheus, url=http://prometheus:9090, isDefault=true)"
+
+echo "$datasources_body" | jq -e '
+    [.[] | select(.type == "tempo" and .url == "http://tempo:3200")] | length > 0
+  ' >/dev/null || fail "Grafana provisioned Tempo datasource not found or misconfigured"
+echo "  Grafana Tempo datasource OK (type=tempo, url=http://tempo:3200)"
 
 # --------------------------------------------------------------------
 # F. Regression: POST /checkouts
@@ -331,9 +340,74 @@ done
 echo "  complete checkout distributed trace confirmed (payment + inventory + notification branches): $checkout_trace_match"
 
 # --------------------------------------------------------------------
-# I. Container/log sanity
+# I. Observability: retrieve and validate the real checkout trace
+#    directly from Tempo (Phase 2B.1)
 # --------------------------------------------------------------------
-section "I. Container/log sanity"
+section "I. Observability: retrieve and validate the real checkout trace from Tempo"
+
+echo "-- Collector -> Tempo export and Tempo's own ingest-to-query path are"
+echo "   both asynchronous, so this is retried. Reuses the exact Trace ID"
+echo "   and seven Span IDs already confirmed via the Collector logs above,"
+echo "   independently re-verifying them against Tempo's own stored data"
+echo "   (GET /api/v2/traces/{traceID}), not just trusting the same IDs"
+echo "   exist somewhere --"
+
+tempo_trace_match=""
+for i in $(seq 1 20); do
+  if tempo_trace_match="$(python3 scripts/verify-tempo-trace.py --tempo-url http://127.0.0.1:3200 "$checkout_trace_match" 2>/dev/null)"; then
+    break
+  fi
+  tempo_trace_match=""
+  echo "  attempt $i/20: checkout trace not yet retrievable/valid from Tempo"
+  sleep 3
+done
+[ -n "$tempo_trace_match" ] || fail "Tempo never served the real checkout trace with all seven spans and correct parent/child relationships (GET /api/v2/traces/${checkout_trace_match%% *} at http://127.0.0.1:3200)"
+echo "  $tempo_trace_match"
+
+# --------------------------------------------------------------------
+# J. Observability: Tempo trace persistence across a graceful restart
+# --------------------------------------------------------------------
+section "J. Observability: Tempo trace persistence across a graceful restart"
+
+echo "-- restarting the tempo container (same tempo_data volume) to prove"
+echo "   the already-ingested checkout trace survives, not just that the"
+echo "   named volume exists — Tempo's live-store writes ingested spans to"
+echo "   disk incrementally (confirmed by inspecting the volume directly),"
+echo "   so a trace ingested and already queryable before this restart is"
+echo "   expected to remain retrievable afterward; a trace ingested only"
+echo "   milliseconds before a restart is a narrower race this check does"
+echo "   not specifically stress-test --"
+
+docker compose restart tempo >/dev/null
+tempo_restart_ok=false
+for i in $(seq 1 20); do
+  cid="$(docker compose ps -q tempo)"
+  health="$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || true)"
+  echo "  [tempo] attempt $i/20: health=$health"
+  if [ "$health" = "healthy" ]; then
+    tempo_restart_ok=true
+    break
+  fi
+  sleep 3
+done
+[ "$tempo_restart_ok" = true ] || fail "tempo did not become healthy again after restart"
+
+tempo_trace_after_restart=""
+for i in $(seq 1 20); do
+  if tempo_trace_after_restart="$(python3 scripts/verify-tempo-trace.py --tempo-url http://127.0.0.1:3200 "$checkout_trace_match" 2>/dev/null)"; then
+    break
+  fi
+  tempo_trace_after_restart=""
+  echo "  attempt $i/20: checkout trace not yet retrievable/valid from Tempo after restart"
+  sleep 3
+done
+[ -n "$tempo_trace_after_restart" ] || fail "the checkout trace already confirmed in Tempo before the restart was not retrievable (with all seven spans and correct relationships) after a graceful Tempo restart using the same tempo_data volume"
+echo "  trace persistence across restart confirmed: $tempo_trace_after_restart"
+
+# --------------------------------------------------------------------
+# K. Container/log sanity
+# --------------------------------------------------------------------
+section "K. Container/log sanity"
 
 docker compose ps
 
@@ -362,11 +436,26 @@ docker compose logs --tail=50 prometheus
 echo ""
 echo "-- grafana logs (last 50 lines) --"
 docker compose logs --tail=50 grafana
+echo ""
+echo "-- tempo logs (last 50 lines) --"
+docker compose logs --tail=50 tempo
+
+echo ""
+echo "-- checking for persistent (non-transient) Collector->Tempo export"
+echo "   errors — brief connection-refused/retry warnings during the"
+echo "   restart above are expected and already tolerated; only flag an"
+echo "   export failure still recurring in the most recent log lines --"
+if docker compose logs --tail=20 otel-collector 2>&1 | grep -q 'otlp_grpc/tempo'; then
+  if docker compose logs --tail=20 otel-collector 2>&1 | grep 'otlp_grpc/tempo' | grep -qi 'error\|fail\|refused'; then
+    fail "otel-collector is still reporting Collector->Tempo export errors in its most recent logs"
+  fi
+fi
+echo "  no persistent Collector->Tempo export errors in the most recent logs"
 
 # --------------------------------------------------------------------
-# J. Persistence after cleanup
+# L. Persistence after cleanup
 # --------------------------------------------------------------------
-section "J. Persistence after cleanup"
+section "L. Persistence after cleanup"
 
 echo "-- docker compose down (preserving volumes) --"
 docker compose down
@@ -377,11 +466,12 @@ trap - EXIT
 for vol in \
   autonomous-reliability-platform_postgres_data \
   autonomous-reliability-platform_prometheus_data \
-  autonomous-reliability-platform_grafana_data
+  autonomous-reliability-platform_grafana_data \
+  autonomous-reliability-platform_tempo_data
 do
   docker volume inspect "$vol" >/dev/null 2>&1 || fail "expected named volume missing after teardown: $vol"
   echo "  volume present: $vol"
 done
 
 section "SUCCESS"
-echo "Phase 2A.1-2A.5 observability verification passed."
+echo "Phase 2A.1-2B.1 observability verification passed."

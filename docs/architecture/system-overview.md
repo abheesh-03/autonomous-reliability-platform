@@ -7,13 +7,14 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 2A.5, the repository contains foundational scaffolding, a
+As of Phase 2B.1, the repository contains foundational scaffolding, a
 running infrastructure dependency, four application services with the
 **first real service-to-service workflow**, and an
-**observability infrastructure stack now instrumented for all four
+**observability infrastructure stack instrumented for all four
 services, with a complete, verified distributed trace across the whole
-checkout workflow**. Conceptually, the current demo application shape
-is:
+checkout workflow — now persisted in and independently re-verified from
+a real trace backend, Grafana Tempo**. Conceptually, the current demo
+application shape is:
 
 ```
 Client
@@ -28,9 +29,10 @@ checkout-service :8080  --OTLP (metrics+traces)--> otel-collector
   +--> notification-service :8083  (POST /notifications — instrumented) --OTLP--------------+
 
 otel-collector --Prometheus format (metrics)--> prometheus --> grafana
-otel-collector --debug exporter (traces)--> collector logs (no trace backend yet)
+otel-collector --debug exporter (traces)--> collector logs
+otel-collector --OTLP (traces)--> tempo --> grafana
 
-Complete distributed trace (one real POST /checkouts):
+Complete distributed trace (one real POST /checkouts, now persisted in Tempo):
                     +-> checkout payment CLIENT      -> payment SERVER
   checkout SERVER --|-> checkout inventory CLIENT    -> inventory SERVER
                     +-> checkout notification CLIENT -> notification SERVER
@@ -53,7 +55,12 @@ export real metrics and traces to the Collector, and a real
 trace contains checkout's own SERVER span as the common parent of three
 independently-verified downstream branches (verified against real
 Collector output, not assumed, and reconfirmed on a second, fully
-torn-down-and-restarted run).
+torn-down-and-restarted run). As of Phase 2B.1, the Collector's traces
+pipeline also exports to **Grafana Tempo 3.0.3**, a persistent,
+queryable trace backend; that exact same trace has been independently
+retrieved and re-verified directly from Tempo's own HTTP query API, and
+confirmed to survive a graceful Tempo restart using its persistent
+volume.
 
 `checkout-service`'s `POST /checkouts` synchronously calls the other
 three services, in that exact order (payment, then inventory, then
@@ -290,9 +297,11 @@ Full inventory:
   - Agent functionality of any kind
 
 - **Observability infrastructure** (`observability/`) — an OpenTelemetry
-  Collector, Prometheus, and Grafana, all running via Docker Compose
-  (`otel-collector`, `prometheus`, `grafana`). As of Phase 2A.5, this is
-  fed by **all four** application services.
+  Collector, Prometheus, Grafana, and (Phase 2B.1) Grafana Tempo, all
+  running via Docker Compose (`otel-collector`, `prometheus`, `grafana`,
+  `tempo`). As of Phase 2A.5, this is fed by **all four** application
+  services; as of Phase 2B.1, traces are also persisted in and queryable
+  from Tempo, not just visible in Collector logs.
 
   **Implemented:**
   - `otel-collector` (`otel/opentelemetry-collector-contrib:0.161.0`):
@@ -300,10 +309,15 @@ Full inventory:
     fanning out to two pipelines — metrics → Prometheus exporter
     (`:8889`, with `resource_to_telemetry_conversion` enabled so OTel
     resource attributes like `service.name` become Prometheus labels),
-    and traces → `debug` exporter (detailed span output to the
-    Collector's own container logs; no trace backend yet); a
-    `health_check` extension (`:13133`); and separate internal
-    ("self") telemetry on `:8888`. The official Contrib image has no
+    and traces → **two** exporters — `debug` (detailed span output to
+    the Collector's own container logs; kept because the local verifier
+    and `scripts/parse-checkout-trace.py` still read it) and, as of
+    Phase 2B.1, `otlp_grpc/tempo` (exports to Tempo's internal OTLP
+    receiver over the Compose network — the `otlp_grpc` type is used
+    explicitly, not the deprecated `otlp` alias, confirmed via a real
+    Collector deprecation warning hit during implementation); a
+    `health_check` extension (`:13133`); and separate internal ("self")
+    telemetry on `:8888`. The official Contrib image has no
     shell/wget/curl, so it has no Docker-level healthcheck; its
     liveness is proven instead by Prometheus successfully scraping it.
   - `prometheus` (`prom/prometheus:v3.15.0`): scrapes itself, the
@@ -312,38 +326,60 @@ Full inventory:
     checkout-service, HTTP client + JVM metrics) from all four
     application services — on a persistent named volume
     (`prometheus_data`), with a `wget`-based healthcheck.
-  - `grafana` (`grafana/grafana-oss:13.0.2`): Prometheus auto-provisioned
-    as its default datasource via
+  - `tempo` (`grafana/tempo:3.0.3`, Phase 2B.1): a persistent, queryable
+    distributed-tracing backend running in monolithic mode (`target`
+    defaults to `all`), local filesystem storage under `/var/tempo` on
+    a persistent named volume (`tempo_data`), single-tenant (no
+    multitenancy/auth configured). Its internal OTLP receiver (gRPC
+    `:4317`, HTTP `:4318`) is not published to the host — only
+    otel-collector reaches it, as `tempo:4317`. Only its HTTP query API
+    (`:3200`) is published, to `127.0.0.1` like every other
+    observability port. No shell/curl/wget in this image either
+    (`ENTRYPOINT` is the `/tempo` binary directly); its Docker
+    healthcheck uses the binary's own built-in `-health` mode instead.
+  - `grafana` (`grafana/grafana-oss:13.0.2`): Prometheus (default) and,
+    as of Phase 2B.1, Tempo are both auto-provisioned as datasources via
     `observability/grafana/provisioning/datasources/datasource.yml`
-    (resolving `http://prometheus:9090` by Compose service name, not
-    `localhost`) — no manual click-through setup needed after
-    `docker compose up`. Persistent named volume (`grafana_data`).
-    Anonymous auth disabled; admin credentials come from `.env`
-    (`GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`), local-only
-    placeholders, never a real credential.
+    (resolving `http://prometheus:9090`/`http://tempo:3200` by Compose
+    service name, not `localhost`) — no manual click-through setup
+    needed after `docker compose up`. Persistent named volume
+    (`grafana_data`). Anonymous auth disabled; admin credentials come
+    from `.env` (`GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`),
+    local-only placeholders, never a real credential.
 
-  All three services' host-published ports (`otel-collector`'s
-  `4317`/`4318`/`13133`, `prometheus`'s `9090`, `grafana`'s `3000`) are
-  bound to `127.0.0.1` only, since none of them (aside from Grafana's
-  own admin login) sit behind authentication — unlike the four Phase 1
+  All host-published ports (`otel-collector`'s `4317`/`4318`/`13133`,
+  `prometheus`'s `9090`, `tempo`'s `3200`, `grafana`'s `3000`) are bound
+  to `127.0.0.1` only, since none of them (aside from Grafana's own
+  admin login) sit behind authentication — unlike the four Phase 1
   application services and PostgreSQL, which remain published on all
   interfaces.
 
   **Not implemented:**
-  - A real trace backend (Tempo, Jaeger, etc.) — traces are only
-    visible via the Collector's `debug` exporter logs this phase
   - Application log export (`OTEL_LOGS_EXPORTER=none`/equivalent on all
     four instrumented services; no service emits logs via OTel)
   - Dashboards beyond the minimal datasource-connectivity path, or any
     alerting rules
   - Any consumption of telemetry by an agent
+  - An explicit, confirmed Tempo retention override — Tempo's v3.x
+    retention config schema could not be confirmed without further
+    guessing against a largely undocumented internal path
+    (`backend_scheduler.provider...`); the built-in default (336h/14
+    days) is used instead, which is already appropriate for local
+    development
 
   As of Phase 2A.5, a real `POST /checkouts` request produces a
   **complete** distributed trace: checkout-service's SERVER span is the
   common parent of all three downstream CLIENT spans, each of which is
   in turn the parent of its own branch's SERVER span (payment, inventory,
   notification — siblings, not a sequential chain), all sharing one
-  Trace ID with correct parent/child Span IDs throughout.
+  Trace ID with correct parent/child Span IDs throughout. As of
+  Phase 2B.1, that exact trace has also been independently retrieved
+  from Tempo's `GET /api/v2/traces/{traceID}` API and re-verified — same
+  Trace ID, same seven spans, same six parent/child relationships — and
+  confirmed to remain retrievable after a graceful Tempo restart using
+  the same persistent volume (proven for a trace with normal, tens-of-
+  seconds-plus processing time before the restart; a trace restarted
+  within milliseconds of ingestion was not specifically stress-tested).
 
 There are no other application services, no message brokers, no
 orchestration, no cloud infrastructure, and no AI provider integration.
@@ -400,41 +436,47 @@ repository. Payment, inventory, and notification never call each other
 or call back into checkout-service.
 
 ### Observability
-**CURRENT:** An OpenTelemetry Collector, Prometheus, and Grafana all run
-via Docker Compose (see Current Implementation above). All four
-application services are instrumented, each its own idiomatic way:
-`checkout-service` with the OpenTelemetry Java auto-instrumentation
-agent (pinned `v2.31.1`); `payment-service` with OpenTelemetry Python
-zero-code auto-instrumentation (pinned `opentelemetry-distro` `0.65b0` /
-`opentelemetry-exporter-otlp-proto-http` `1.44.0` family);
-`inventory-service` with explicit, minimal OpenTelemetry Go SDK
-initialization plus `otelhttp` (pinned `go.opentelemetry.io/otel`/`sdk`
-`v1.46.0`, `otelhttp` `v0.71.0` family); and `notification-service` with
-explicit OpenTelemetry Node SDK initialization plus
-`@opentelemetry/instrumentation-http` and `@fastify/otel` (pinned
-`0.222.0` / `0.21.0` family) — Go and Node have no auto-instrumentation
-equivalent to the Java agent or Python's zero-code distro. All four
-export HTTP metrics and trace spans via OTLP — verified against real
-Prometheus queries and real Collector `debug`-exporter output, not
-assumed.
+**CURRENT:** An OpenTelemetry Collector, Prometheus, Grafana, and (as of
+Phase 2B.1) Grafana Tempo all run via Docker Compose (see Current
+Implementation above). All four application services are instrumented,
+each its own idiomatic way: `checkout-service` with the OpenTelemetry
+Java auto-instrumentation agent (pinned `v2.31.1`); `payment-service`
+with OpenTelemetry Python zero-code auto-instrumentation (pinned
+`opentelemetry-distro` `0.65b0` / `opentelemetry-exporter-otlp-proto-http`
+`1.44.0` family); `inventory-service` with explicit, minimal
+OpenTelemetry Go SDK initialization plus `otelhttp` (pinned
+`go.opentelemetry.io/otel`/`sdk` `v1.46.0`, `otelhttp` `v0.71.0`
+family); and `notification-service` with explicit OpenTelemetry Node
+SDK initialization plus `@opentelemetry/instrumentation-http` and
+`@fastify/otel` (pinned `0.222.0` / `0.21.0` family) — Go and Node have
+no auto-instrumentation equivalent to the Java agent or Python's
+zero-code distro. All four export HTTP metrics and trace spans via
+OTLP — verified against real Prometheus queries and real Collector
+`debug`-exporter output, not assumed.
 
-It is now fair to say there is a **complete distributed trace across
-the four-service checkout workflow**: a real `POST /checkouts` request
+It is fair to say there is a **complete distributed trace across the
+four-service checkout workflow**: a real `POST /checkouts` request
 proves ONE trace where checkout-service's SERVER span is the common
 parent of three independent, sibling branches — CLIENT → payment
 SERVER, CLIENT → inventory SERVER, and CLIENT → notification SERVER
 (explicitly **not** a sequential payment → inventory → notification
 chain) — each verified via a shared Trace ID and correct parent/child
-Span IDs, reconfirmed on a second, independent run. Traces have no
-backend yet (Collector `debug` exporter logs only); there is no
-application log pipeline, and no dashboards or alerting rules exist;
-and none of this telemetry is yet consumed by an agent.
+Span IDs, reconfirmed on a second, independent run. As of Phase 2B.1,
+that trace is also **persisted and queryable**: the Collector exports
+traces to Tempo 3.0.3 (monolithic mode, local filesystem storage)
+alongside its existing `debug` exporter, and the exact same trace has
+been independently retrieved from Tempo's `GET /api/v2/traces/{traceID}`
+API and re-verified (same Trace ID, same seven spans, same six
+parent/child relationships), including after a graceful Tempo restart
+using its persistent volume. There is still no application log
+pipeline, and no dashboards or alerting rules exist (Tempo is a
+provisioned Grafana datasource, but nothing visualizes it yet); none of
+this telemetry is yet consumed by an agent.
 
 **FUTURE (not yet implemented):**
-- A real trace backend (e.g. Tempo/Jaeger) to replace the temporary
-  `debug` exporter
 - An application log export pipeline
-- Meaningful Grafana dashboards and Prometheus alerting rules
+- Meaningful Grafana dashboards (including trace-based ones, now that
+  Tempo is available) and Prometheus alerting rules
 - Consumption of this telemetry by an agent for incident detection
 
 ### Event streaming
