@@ -37,12 +37,16 @@ Checks, in order:
      $__interval) substituted for a concrete duration — that exact
      expression is re-executed directly against Prometheus's or Loki's
      own HTTP API (bypassing Grafana's query proxy entirely). Queries
-     whose text identifies them as an HTTP-error-rate or
-     refused-telemetry query (5xx status codes, "refused" metrics) are
-     allowed to legitimately return empty; every other target is
-     required to return real, nonempty data, and each panel as a whole
-     must have at least one nonempty target result unless literally all
-     of its targets are of the legitimately-empty kind.
+     whose text identifies them as an HTTP error-rate query (4xx OR 5xx
+     status codes) or a refused-telemetry query ("refused" metrics) are
+     allowed to legitimately return empty — a run that only produces
+     successful requests against the running Compose application has no
+     reason to have either 4xx or 5xx samples in Prometheus (client-side
+     400s seen in CI logs elsewhere come from service unit/build tests,
+     not from the running application's own telemetry); every other
+     target is required to return real, nonempty data, and each panel as
+     a whole must have at least one nonempty target result unless
+     literally all of its targets are of the legitimately-empty kind.
 
 This script does NOT and cannot verify that a panel renders correctly
 in a browser — only that Grafana served the expected provisioned
@@ -127,15 +131,19 @@ GRAFANA_BUILTIN_SUBSTITUTIONS = {
     "${__range}": "30m",
 }
 
-# A query is allowed to legitimately return no data: an HTTP 5xx error
-# rate (every service's simulated business logic currently always
-# succeeds, so 5xx is expected to be near-zero/absent) or a
-# refused-telemetry counter (expected to stay at 0 absent a real
-# ingestion problem). Detected from the expression text itself, not a
-# separately maintained list, so it can never drift from what a panel
-# actually queries.
+# A query is allowed to legitimately return no data: an HTTP 4xx OR 5xx
+# error-rate query, or a refused-telemetry counter. Neither error class
+# requires a nonempty result — a verification run that only issues
+# successful requests against the running Compose application produces
+# no 4xx or 5xx samples in Prometheus at all (a 400 appearing in CI logs
+# can come from a service's own unit/build tests, which never touch the
+# running application's Prometheus telemetry, so it must not be treated
+# as evidence this query will have data). Refused-telemetry counters are
+# expected to stay at 0 absent a real ingestion problem. Detected from
+# the expression text itself, not a separately maintained list, so it
+# can never drift from what a panel actually queries.
 SPARSE_OK_PATTERNS = (
-    re.compile(r'"5\.\."'),
+    re.compile(r'"[45]\.\."'),
     re.compile(r"refused", re.IGNORECASE),
 )
 
@@ -296,8 +304,8 @@ def verify_panel(uid, panel, expected_ds_name, dashboard_vars, prometheus_url, l
     if not any_nonempty and not all_sparse_ok:
         fail(
             f"{uid}: panel {title!r} has no target that returned real data, and not all of its "
-            f"targets are legitimately allowed to be empty (HTTP 5xx / refused-telemetry) — "
-            f"real data was expected here"
+            f"targets are legitimately allowed to be empty (HTTP 4xx/5xx error rate, "
+            f"refused-telemetry) — real data was expected here"
         )
 
 
