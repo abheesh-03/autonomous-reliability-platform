@@ -17,11 +17,11 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 2B.1 — Grafana Tempo as a Persistent Distributed-Tracing
-Backend**. An OpenTelemetry Collector, Prometheus, and Grafana run via
-Docker Compose (Phase 2A.1). All four application services are
-instrumented, each its own idiomatic way: `checkout-service` with the
-OpenTelemetry Java auto-instrumentation agent (Phase 2A.2);
+**Phase 2B.2 — Centralized Application Log Collection with Grafana
+Loki + Grafana Alloy**. An OpenTelemetry Collector, Prometheus, and
+Grafana run via Docker Compose (Phase 2A.1). All four application
+services are instrumented, each its own idiomatic way: `checkout-service`
+with the OpenTelemetry Java auto-instrumentation agent (Phase 2A.2);
 `payment-service` with OpenTelemetry Python zero-code
 auto-instrumentation (Phase 2A.3); `inventory-service` with manual
 OpenTelemetry Go SDK initialization plus `otelhttp` (Phase 2A.4); and
@@ -38,13 +38,27 @@ A real checkout's seven-span trace has been retrieved directly from
 Tempo's own HTTP query API (`GET /api/v2/traces/{traceID}`) and
 independently re-verified — same Trace ID, same seven spans, same six
 parent/child relationships — and confirmed to survive a graceful Tempo
-restart using the same persistent volume. `checkout-service` still
+restart using the same persistent volume. As of Phase 2B.2, the four
+application services' existing stdout/stderr output — not new,
+synthetic, or specially-formatted logs — is also centrally collected:
+**Grafana Alloy 1.20.1** discovers each service's container via the
+Docker API, ships its logs to **Grafana Loki 3.7.8**, and Loki
+persists them to a named volume with a 7-day retention policy. Real,
+non-synthetic log entries from all four services have been retrieved
+directly from Loki's own query API, and a specific already-ingested
+entry has been confirmed to survive a graceful Loki restart using the
+same volume. `checkout-service` and `inventory-service` currently only
+log at container startup — neither has per-request access logging
+today — while `payment-service` and `notification-service` log per
+request; none of the four services' current log output contains trace
+or span IDs, so logs and traces are **not** correlated yet (see
+Observability Infrastructure below). `checkout-service` still
 synchronously orchestrates all three downstream services via
 `POST /checkouts` (Phase 1B.4), with no change to any business logic or
 application instrumentation; none of the four application services
-connect to PostgreSQL. There is still no application log pipeline, no
-dashboards or alerts (Tempo is provisioned as a Grafana datasource, but
-no dashboards use it yet), and no AI functionality.
+connect to PostgreSQL. There are still no dashboards or alerts
+(Tempo and Loki are both provisioned as Grafana datasources, but no
+dashboards use them yet), and no AI functionality.
 
 ## Problem this project will eventually solve
 
@@ -67,18 +81,19 @@ The following components are **planned** and do not exist yet:
 - A LangGraph-based agent runtime for investigation and hypothesis formation
 - A Go infrastructure tool gateway for safely executing remediation actions
 - Demo commerce microservices as a realistic monitored target
-- Application-level observability: an application log pipeline,
-  dashboards, and alerts (the OTel Collector / Prometheus / Grafana
-  infrastructure exists, all four application services export metrics
-  and traces to it, one real `POST /checkouts` request produces a
-  complete, verified distributed trace across checkout-service and all
-  three of its downstream branches — payment, inventory, notification,
-  as siblings, not a sequential chain — and, as of Phase 2B.1, that
-  trace is retrievable from a persistent trace backend, Grafana Tempo,
-  not just Collector logs — see
+- Application-level observability: dashboards and alerts (the OTel
+  Collector / Prometheus / Grafana infrastructure exists, all four
+  application services export metrics and traces to it, one real
+  `POST /checkouts` request produces a complete, verified distributed
+  trace across checkout-service and all three of its downstream
+  branches — payment, inventory, notification, as siblings, not a
+  sequential chain — that trace is retrievable from a persistent trace
+  backend, Grafana Tempo (Phase 2B.1), and, as of Phase 2B.2, the four
+  services' existing stdout/stderr logs are centrally collected and
+  persisted via Grafana Alloy + Grafana Loki — see
   [Observability Infrastructure](#observability-infrastructure) below —
-  but there is still no application log pipeline, and no dashboards or
-  alerts exist yet)
+  but there are still no dashboards or alerts, and logs are not yet
+  correlated with traces)
 - Kafka or Redpanda for event streaming
 - Kubernetes as the deployment target, provisioned via Terraform on AWS
 
@@ -119,8 +134,9 @@ repository — and returns a combined result. None of the four
 application services connect to PostgreSQL yet.
 
 An observability stack — an OpenTelemetry Collector, Prometheus,
-Grafana, and (Phase 2B.1) Grafana Tempo — also runs via Docker Compose
-(see [Observability Infrastructure](#observability-infrastructure) below).
+Grafana, (Phase 2B.1) Grafana Tempo, and (Phase 2B.2) Grafana Loki +
+Grafana Alloy — also runs via Docker Compose (see
+[Observability Infrastructure](#observability-infrastructure) below).
 `checkout-service` is instrumented with the OpenTelemetry Java
 auto-instrumentation agent (pinned `v2.31.1`) and exports HTTP server
 metrics for `POST /checkouts`, HTTP client metrics for its three
@@ -148,9 +164,25 @@ Collector's traces pipeline now exports to alongside the existing
 `debug` exporter — traces are persisted and queryable via Tempo's own
 HTTP API, not just visible in Collector logs, and the same trace was
 confirmed retrievable after a graceful Tempo restart using its
-persistent volume. There is still no application log pipeline, and no
-dashboards or alerts (Tempo is a provisioned Grafana datasource, but no
-dashboards reference it yet). No AI integration has been added yet.
+persistent volume. As of Phase 2B.2, the four application services'
+existing stdout/stderr output is also centrally collected: **Grafana
+Alloy** (pinned `v1.20.1`) discovers each service's container via the
+Docker API and ships its logs to **Grafana Loki** (pinned `3.7.8`,
+single-binary mode, local filesystem storage), which persists them to
+a named volume with a 7-day retention policy. Real log entries — not
+synthetic lines injected to pass a check — have been retrieved
+directly from Loki's own query API for all four services, and a
+specific already-ingested entry was confirmed to survive a graceful
+Loki restart using the same volume. `checkout-service` and
+`inventory-service` currently only log at container startup (no
+per-request access logging exists in either today); `payment-service`
+and `notification-service` log per request. None of the four
+services' current log output contains a trace or span ID, so logs and
+traces are not yet correlated — see
+[Observability Infrastructure](#observability-infrastructure) below
+for details. There are still no dashboards or alerts (Tempo and Loki
+are both provisioned Grafana datasources, but no dashboards reference
+them yet). No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -637,11 +669,14 @@ has had a chance to complete.
 ## Observability Infrastructure
 
 `observability/` contains configuration for a local OpenTelemetry
-Collector, Prometheus, Grafana, and (Phase 2B.1) Grafana Tempo, all
-running via Docker Compose (Phase 2A.1). As of Phase 2A.5, **all four
-application services** feed this stack real telemetry; as of
-Phase 2B.1, traces are also persisted and queryable in Tempo, not just
-visible in Collector logs.
+Collector, Prometheus, Grafana, (Phase 2B.1) Grafana Tempo, and
+(Phase 2B.2) Grafana Loki + Grafana Alloy, all running via Docker
+Compose (Phase 2A.1). As of Phase 2A.5, **all four application
+services** feed this stack real telemetry; as of Phase 2B.1, traces
+are also persisted and queryable in Tempo, not just visible in
+Collector logs; as of Phase 2B.2, each service's existing stdout/stderr
+logs are also centrally collected and persisted in Loki, via a
+completely separate path that does **not** go through the Collector.
 
 ```
 checkout-service      --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
@@ -650,6 +685,10 @@ inventory-service     --OTLP--> otel-collector --Prometheus format--> prometheus
 notification-service  --OTLP--> otel-collector --Prometheus format--> prometheus --> grafana
 (all four)            --OTLP (traces)--> otel-collector --debug exporter--> collector logs
 (all four)            --OTLP (traces)--> otel-collector --OTLP--> tempo --> grafana
+
+(all four)   --stdout/stderr (via dockerd)--> alloy --loki.write--> loki --> grafana
+  (a separate path: Alloy reads each container's logs directly from the
+   Docker API, not via the OTel Collector or any OTEL_* setting above)
 
 One real checkout trace — a COMPLETE distributed trace across all four services,
 now persisted in and independently re-verified from Tempo's own HTTP query API:
@@ -697,23 +736,46 @@ now persisted in and independently re-verified from Tempo's own HTTP query API:
   binary directly), so the healthcheck instead uses the binary's own
   built-in `-health` mode (confirmed empirically: it performs a GET
   against its own `/ready` and exits 0/1 accordingly).
-- **`grafana`** — Prometheus (default) and, as of Phase 2B.1, Tempo are
-  both auto-provisioned as datasources
+- **`loki`** (`grafana/loki:3.7.8`, Phase 2B.2) — a persistent,
+  queryable log-storage backend, running in single-binary mode with
+  local filesystem storage on a persistent named volume (`loki_data`).
+  Single-tenant (`auth_enabled: false`). TSDB index + schema `v13` (the
+  image's own current default, confirmed empirically, not assumed) and
+  a `compactor`-driven 7-day retention (`limits_config.retention_period:
+  168h`). Only its HTTP API (`:3100`) is published, bound to
+  `127.0.0.1`. Like otel-collector and tempo, the official image has no
+  shell/curl/wget — but unlike tempo, its `/usr/bin/loki` binary also
+  has no built-in `-health`-style flag, so readiness is checked purely
+  externally, via `GET /ready` from the host.
+- **`alloy`** (`grafana/alloy:v1.20.1`, Phase 2B.2) — reads
+  `/var/run/docker.sock` to discover containers, filters them down to
+  this Compose project's four application services (never
+  otel-collector/prometheus/tempo/grafana/loki/alloy's own logs, and
+  never an unrelated Compose project — see
+  [alloy configuration](#alloy-configuration-phase-2b2) below), and
+  ships their stdout/stderr to Loki via `loki.write`. Its debug/health
+  HTTP interface (`:12345`) is published to `127.0.0.1` only. Has a
+  shell but no curl/wget, so — like loki — readiness is checked
+  externally, via its own `GET /api/v0/web/components` API (all 4
+  pipeline components must report `health.state: healthy`).
+- **`grafana`** — Prometheus (default), Tempo (Phase 2B.1), and Loki
+  (Phase 2B.2) are all auto-provisioned as datasources
   (`observability/grafana/provisioning/datasources/datasource.yml`,
-  resolving `http://prometheus:9090`/`http://tempo:3200` by Compose
-  service name) so no manual click-through setup is needed after
-  `docker compose up`. No dashboards are provisioned yet beyond what's
-  needed to prove Grafana can query both. Anonymous auth is disabled;
-  the admin password is a local-only placeholder from `.env.example`,
-  never a real credential.
+  resolving `http://prometheus:9090`/`http://tempo:3200`/
+  `http://loki:3100` by Compose service name) so no manual click-through
+  setup is needed after `docker compose up`. No dashboards are
+  provisioned yet beyond what's needed to prove Grafana can query all
+  three. Anonymous auth is disabled; the admin password is a
+  local-only placeholder from `.env.example`, never a real credential.
 
 All host ports above (`4317`/`4318`/`13133` for otel-collector, `9090`
-for prometheus, `3200` for tempo, `3000` for grafana) are published
-bound to `127.0.0.1` only — none of them sit behind authentication
-(Grafana is the exception, via its own admin login), so they are not
-reachable from other machines on the network even in local development.
-This differs from the four Phase 1 application services and PostgreSQL,
-whose ports remain published on all interfaces.
+for prometheus, `3200` for tempo, `3100` for loki, `12345` for alloy,
+`3000` for grafana) are published bound to `127.0.0.1` only — none of
+them sit behind authentication (Grafana is the exception, via its own
+admin login), so they are not reachable from other machines on the
+network even in local development. This differs from the four Phase 1
+application services and PostgreSQL, whose ports remain published on
+all interfaces.
 
 ### tempo configuration (Phase 2B.1)
 
@@ -738,6 +800,115 @@ further against a largely undocumented internal path was not worth the
 risk; 14 days is already appropriate for local development. No Kafka,
 MinIO, S3, or distributed Tempo components are configured anywhere, and
 real startup logs confirm no attempt to reach Kafka.
+
+### loki configuration (Phase 2B.2)
+
+`observability/loki/loki.yaml` was built from the actual pinned
+`grafana/loki:3.7.8` image's own bundled default config (extracted via
+`docker create` + `docker cp`, since the image has no shell/`cat` to
+view it in-container) and then extended, not written from scratch —
+confirming empirically that this version's own current default already
+uses the TSDB index with schema `v13`, rather than assuming it. Runs in
+single-binary mode (`auth_enabled: false`, single tenant, in-memory
+ring, replication factor 1) with all persistent paths — chunks, rules,
+compactor working directory — under `common.path_prefix: /loki` on the
+`loki_data` named volume. Retention is `limits_config.retention_period:
+168h` (7 days) via the `compactor` (`retention_enabled: true,
+delete_request_store: filesystem`); this is the documented mechanism
+this image version actually supports for filesystem-backed retention,
+not an assumed or unverified setting — the config was accepted by the
+real binary on the first attempt, with no schema rejections. No S3,
+MinIO, or distributed Loki components (ring/gateway/multi-tenant) are
+configured anywhere.
+
+### alloy configuration (Phase 2B.2)
+
+`observability/alloy/config.alloy` implements the pipeline
+`discovery.docker → discovery.relabel → loki.source.docker →
+loki.write`, validated against the actual pinned `grafana/alloy:v1.20.1`
+binary via `alloy validate` (not just by inspection). `discovery.relabel`
+applies two sequential `keep` rules — first the container's
+`com.docker.compose.project` label, then its `com.docker.compose.service`
+label against `checkout-service|payment-service|inventory-service|notification-service`
+— so a container must match **both** to be collected; nothing else in
+this Compose project (postgres, otel-collector, prometheus, tempo,
+grafana, loki, or Alloy's own logs) is ever collected, confirmed via
+Loki's own `/loki/api/v1/label/service/values` API returning exactly
+the four expected service names and nothing else.
+
+**Compose project filter (hard-coded name avoided):** the project-name
+match is `regex = sys.env("COMPOSE_PROJECT_NAME")`, not a literal
+string. `docker-compose.yml` passes `COMPOSE_PROJECT_NAME` into the
+`alloy` container from Compose's own `${COMPOSE_PROJECT_NAME}`
+interpolation variable, which resolves to Compose's actual effective
+project name for that run — confirmed empirically to correctly track
+all three ways Compose can determine it (the checkout directory's
+basename by default, an explicit `-p <name>` flag, or an explicit
+`COMPOSE_PROJECT_NAME` environment variable) — so this still works
+correctly if the repository is checked out under a differently-named
+directory, without ever risking a match against an unrelated Compose
+project on the same Docker host: `discovery.relabel`'s `regex` is fully
+anchored (`^...$`, the same convention as Prometheus relabeling), so
+it is always an exact match, never a substring/prefix match, and if
+`COMPOSE_PROJECT_NAME` were ever unset, `sys.env(...)` returns `""`,
+which matches no real project label — i.e. this fails closed (collects
+nothing) rather than collecting another project's containers.
+
+**Labels:** `service` and `compose_project` are set from the same two
+Compose container labels used for filtering; `environment` is a fixed
+`local` value. None of these are high-cardinality — no `trace_id`,
+`span_id`, `request_id`, or `container_id` is ever set as a Loki
+stream label (those may appear in log line *content*, never as an
+indexed label). One side effect observed but not configured by us:
+`loki.source.docker` automatically adds its own `service_name` label
+with the same four values as our `service` label.
+
+**Startup-order reliability (no observed race condition):** Alloy's
+`loki.source.docker` component reads each discovered container's log
+history from Docker's own log driver, not just a live tail of new
+writes from the moment it attaches — confirmed directly: with `alloy`
+stopped, `checkout-service` and `inventory-service` were restarted
+(each emitting its one-time startup log line while Alloy was down),
+then `alloy` was started **after** those lines were already written,
+and both were still retrieved from Loki afterward, matching the exact
+Docker-side timestamps. This means `checkout-service`/`inventory-service`
+starting before `alloy` in CI or locally — a normal, expected sequence
+under `docker compose up -d`, which starts all services concurrently
+— does not risk losing their startup logs; no corrective reordering
+was needed for this reason. (`scripts/verify-observability.sh` and CI
+still wait for Loki/Alloy readiness before the checkout regression
+request, but that ordering is for a stable/known-good state to assert
+against, not because logs would otherwise be lost.)
+
+**Docker socket access:** see [Docker access and security
+(Phase 2B.2)](#docker-access-and-security-phase-2b2) below.
+
+### Docker access and security (Phase 2B.2)
+
+`alloy` mounts `/var/run/docker.sock:/var/run/docker.sock:ro` to
+discover containers and read their logs. This grants Alloy **full**
+Docker daemon API access — equivalent to root on whatever host runs
+that daemon — not a "logs-only" scope; the Docker API has no such
+scope to begin with. The trailing `:ro` only prevents Alloy from
+replacing or deleting the socket special file itself; it does **not**
+restrict which Docker API calls Alloy can make through it, and this
+repository does not claim otherwise. The Docker API itself is never
+published on any host port.
+
+This same `docker-compose.yml` is also used by CI
+(`.github/workflows/ci.yml`, via `make db-up` → `docker compose up -d`),
+including on `pull_request` from forks — so this mount is active there
+too, not only in local development. That is judged acceptable, not
+because the mount is somehow restricted, but because it adds no
+meaningful privilege beyond what that CI job's own steps already have:
+`./mvnw test`, `npm ci`, `go test ./...`, and `pip install -e` already
+execute arbitrary PR-authored code directly on the runner, with the
+runner's own ambient Docker access (the `docker compose` commands in
+that same workflow run unsandboxed from it too), on a single-use VM
+with no persistent state and no secrets exposed to fork PRs. If this
+workflow ever moves to a shared, persistent, or self-hosted runner, or
+switches to `pull_request_target`, this reasoning no longer holds and
+would need to be revisited.
 
 ### checkout-service instrumentation (Phase 2A.2)
 
@@ -782,36 +953,47 @@ make db-down
 ```
 
 **Bundled verification:** `make verify-observability` (or
-`scripts/verify-observability.sh`) runs the full Phase 2A.1-2B.1
-verification path in one deterministic script — starts Compose, waits
-for every service's health (with the `otel-collector` exception above;
-`tempo` has a real healthcheck and is included in the normal wait loop),
-checks Prometheus targets and both Grafana datasources, re-runs the
-`POST /checkouts` regression check, then verifies all four application
-services' HTTP server metrics (plus checkout's HTTP client metrics)
-actually reached Prometheus, that trace evidence for the checkout
-SERVER span and all three downstream CLIENT spans appears in the
-Collector's own logs, and that ONE checkout trace is a **complete**
-distributed trace across **all three** downstream branches — payment,
-inventory, and notification, siblings, not parent/child of each other
-— using a small deterministic parser
+`scripts/verify-observability.sh`) runs the full Phase 2A.1-2B.2
+verification path in one deterministic script (sections A-O) — starts
+Compose, waits for every service's health (with the `otel-collector`
+exception above; `tempo` has a real healthcheck and is included in the
+normal wait loop; `loki`/`alloy` have neither and are checked
+functionally — see below), checks Prometheus targets and all three
+Grafana datasources, re-runs the `POST /checkouts` regression check,
+then verifies all four application services' HTTP server metrics (plus
+checkout's HTTP client metrics) actually reached Prometheus, that trace
+evidence for the checkout SERVER span and all three downstream CLIENT
+spans appears in the Collector's own logs, and that ONE checkout trace
+is a **complete** distributed trace across **all three** downstream
+branches — payment, inventory, and notification, siblings, not
+parent/child of each other — using a small deterministic parser
 (`scripts/parse-checkout-trace.py`, generalized across Phases 2A.3-2A.5
-from an initial payment-only parser). As of Phase 2B.1, it then
-independently re-verifies that exact same trace directly against
-Tempo's own HTTP query API using a second small deterministic validator,
-`scripts/verify-tempo-trace.py` (same script used in CI — no duplicated
-validation logic), and confirms the trace remains retrievable — with
-all seven spans and all six parent/child relationships still correct —
-after a graceful `docker compose restart tempo` using the same
-persistent volume. All of this uses bounded retries (metric/trace
-export, Tempo's own ingest-to-query path, and post-restart readiness
-are all asynchronous) and stays safe under `set -euo pipefail`. The
-script then always tears the environment down (without deleting
-volumes) and confirms every named volume, including the new
-`tempo_data`, still exists.
+from an initial payment-only parser). It then independently re-verifies
+that exact same trace directly against Tempo's own HTTP query API using
+a second small deterministic validator, `scripts/verify-tempo-trace.py`
+(same script used in CI — no duplicated validation logic), and confirms
+the trace remains retrievable — with all seven spans and all six
+parent/child relationships still correct — after a graceful
+`docker compose restart tempo` using the same persistent volume. As of
+Phase 2B.2, it also: waits for Loki `/ready` and for all 4 Alloy
+pipeline components to report healthy; verifies Grafana's Loki
+datasource; verifies real, non-synthetic logs from all four application
+services via `scripts/verify-loki-logs.py` (the same validator CI uses
+— no duplicated validation logic there either); and proves an
+already-ingested log line survives a graceful `docker compose restart
+loki` using the same persistent volume, with `alloy` stopped throughout
+so it cannot resend it, then confirms `alloy` and normal log collection
+both resume once restarted. All of this uses bounded retries (metric/
+trace/log export, Tempo's/Loki's own ingest-to-query paths, and
+post-restart readiness are all asynchronous) and stays safe under
+`set -euo pipefail`. The script then always tears the environment down
+(without deleting volumes) and confirms every named volume, including
+`tempo_data`, `loki_data`, and `alloy_data`, still exists.
 
-**Not implemented yet:** an application log pipeline; dashboards beyond
-the minimal datasource-connectivity check; alerting rules; and any
+**Not implemented yet:** dashboards beyond the minimal
+datasource-connectivity check; alerting rules; log/trace correlation
+(no service's current log output contains a trace or span ID — see
+[alloy configuration](#alloy-configuration-phase-2b2) above); and any
 consumption of telemetry by an agent. Those are deliberately deferred
 to later phases.
 
@@ -837,24 +1019,36 @@ reach a healthy state, that Prometheus reports all three scrape targets
 — `prometheus` (self), `otel-collector` (self-telemetry), and
 `otel-collector-app-metrics` (the application-telemetry relay) — as
 `up` (bounded retry loop, since Prometheus needs a scrape cycle after
-startup), that Grafana's health API and provisioned Prometheus + Tempo
-datasources are reachable, that Tempo itself reaches a healthy state,
-that all four application services' relevant HTTP metrics (checkout's
-server+client, payment's, inventory's, and notification's server
-metrics) actually reach Prometheus, that trace evidence (checkout
-SERVER span, all three downstream CLIENT spans) plus a deterministic
-proof that ONE checkout trace is a **complete** distributed trace across
-**all three** downstream branches — payment, inventory, and
-notification (via `scripts/parse-checkout-trace.py`) — appear in the
-Collector's logs, and — new in this phase — that that exact same trace
-is independently retrievable and re-verifiable directly from Tempo's
-own HTTP query API (via `scripts/verify-tempo-trace.py`, the identical
-script the local verifier uses — no duplicated validation logic), all
-via bounded retry loops (the OTel Java agent's, Python SDK's, Go SDK's,
-and Node SDK's export intervals, Prometheus's scrape cycle, the
-Collector's batch export, and Tempo's own ingest-to-query path are all
-asynchronous) — then always tears the environment down (without
-deleting volumes).
+startup), that Grafana's health API and provisioned Prometheus + Tempo +
+Loki datasources are reachable, that Tempo itself reaches a healthy
+state, that Loki reaches `/ready` and all 4 Alloy pipeline components
+report healthy (both checked before the checkout smoke test, so a known
+functioning pipeline is in place before it — see
+[alloy configuration](#alloy-configuration-phase-2b2) above for why this
+ordering is about asserting a known-good state rather than avoiding any
+actual log-loss race), that all four application services' relevant
+HTTP metrics (checkout's server+client, payment's, inventory's, and
+notification's server metrics) actually reach Prometheus, that trace
+evidence (checkout SERVER span, all three downstream CLIENT spans) plus
+a deterministic proof that ONE checkout trace is a **complete**
+distributed trace across **all three** downstream branches — payment,
+inventory, and notification (via `scripts/parse-checkout-trace.py`) —
+appear in the Collector's logs, that that exact same trace is
+independently retrievable and re-verifiable directly from Tempo's own
+HTTP query API (via `scripts/verify-tempo-trace.py`, the identical
+script the local verifier uses — no duplicated validation logic), and —
+new in this phase — that real, non-synthetic logs from all four
+application services are retrievable directly from Loki's own query
+API (via `scripts/verify-loki-logs.py`, again the identical script the
+local verifier uses), all via bounded retry loops (the OTel Java
+agent's, Python SDK's, Go SDK's, and Node SDK's export intervals,
+Prometheus's scrape cycle, the Collector's batch export, Tempo's own
+ingest-to-query path, and Docker log discovery/shipping/Loki indexing
+are all asynchronous) — then always tears the environment down
+(without deleting volumes). The more expensive Loki restart-persistence
+test (see the bundled local verifier above) remains local-only; CI
+independently proves all four services' logs are queryable, which is
+sufficient given the restart test's cost.
 
 The repository has a GitHub remote
 (`abheesh-03/autonomous-reliability-platform`). The workflow version
@@ -879,12 +1073,16 @@ Phase 2A.5 extended the same two steps once more with
 `notification-service`'s checks and was committed (`7e348a2`); that
 version also ran successfully on GitHub Actions (run #16), working tree
 clean afterward. Phase 2B.1 adds Tempo readiness, the Tempo datasource
-check, and a new trace-retrieval-from-Tempo step (see above); this has
-been locally validated end-to-end by reproducing the workflow's steps
+check, and a new trace-retrieval-from-Tempo step (see above). Phase
+2B.2 further adds Loki/Alloy readiness, the Loki datasource check, and
+the real-logs-from-all-four-services step (see above), reusing
+`scripts/verify-loki-logs.py`. Both phases' workflow versions have been
+locally validated end-to-end by reproducing the workflow's steps
 against the real Compose network (via `make verify-observability`,
-which covers equivalent ground), but the Phase 2B.1 version of the
-workflow has **not yet run on GitHub Actions** — that will only be true
-once it runs there after a push.
+which covers equivalent — and, for Phase 2B.2, additional — ground),
+but neither the Phase 2B.1 nor the Phase 2B.2 version of the workflow
+has **run on GitHub Actions yet** — that will only be true once each
+runs there after a push.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -1890,3 +2088,201 @@ problem today.
   Restart-persistence was proven for traces with normal (tens-of-
   seconds-plus) processing time before the restart, not for traces
   restarted within milliseconds of ingestion.
+
+### Phase 2B.2 — Centralized application log collection with Grafana Loki + Grafana Alloy
+
+- Pulled and inspected the actual pinned `grafana/loki:3.7.8` and
+  `grafana/alloy:v1.20.1` images before writing any config. Loki has no
+  shell, `cat`, `curl`, or `wget`, and no `-health`-style CLI flag
+  (unlike Tempo) — its own bundled `local-config.yaml` was extracted via
+  `docker create` + `docker cp` (not `cat`, which does not exist in the
+  image) and confirmed to already default to the TSDB index with schema
+  `v13`, rather than assuming it. Alloy has a shell but no `curl`/`wget`,
+  and its own `alloy validate <path>` CLI subcommand was used to check
+  the config syntactically against the real binary, separate from
+  functional testing in the real stack.
+- New `observability/loki/loki.yaml`: single-binary mode, single tenant,
+  filesystem storage under `/loki` (`loki_data` named volume), TSDB
+  index/schema v13 (image default, confirmed), `compactor`-driven 7-day
+  retention (`limits_config.retention_period: 168h`). Accepted by the
+  real binary on the first attempt, unlike Tempo's config in the prior
+  phase (which needed two corrective iterations).
+- New `observability/alloy/config.alloy`: pipeline `discovery.docker →
+  discovery.relabel → loki.source.docker → loki.write`, collecting only
+  `checkout-service`/`payment-service`/`inventory-service`/
+  `notification-service` — confirmed via Loki's own
+  `/loki/api/v1/label/service/values` API returning exactly those four
+  names, never postgres/otel-collector/prometheus/tempo/grafana/loki/
+  alloy's own logs. Labels: `service`, `compose_project`,
+  `environment=local` — no `trace_id`/`span_id`/`request_id`/
+  `container_id` is ever set as an indexed label (those may appear in
+  log line content only). Observed but not configured by us:
+  `loki.source.docker` auto-adds its own `service_name` label mirroring
+  `service`.
+- **Compose-project filter, corrected after initial review:** the
+  first version hard-coded `regex = "autonomous-reliability-platform"`
+  for the `com.docker.compose.project` match — functionally correct but
+  would silently collect nothing (not leak into another project; the
+  service-name filter still requires an exact match too, so this always
+  failed closed) under a differently-named checkout directory. Replaced
+  with `regex = sys.env("COMPOSE_PROJECT_NAME")`, with
+  `docker-compose.yml` passing `COMPOSE_PROJECT_NAME` into the `alloy`
+  container from Compose's own `${COMPOSE_PROJECT_NAME}` interpolation
+  variable. Verified empirically (`docker compose config`, unrelated to
+  Alloy) that this variable correctly resolves to Compose's actual
+  effective project name under all three ways Compose can determine it
+  — default directory-basename derivation, an explicit `-p <name>`
+  flag, and an explicit `COMPOSE_PROJECT_NAME` environment variable —
+  and re-validated the corrected config with `alloy validate` and a
+  real running stack (Alloy's 4 pipeline components healthy, Loki's
+  service-label list still exactly the 4 expected names). Since
+  `discovery.relabel`'s `regex` is fully anchored (`^...$`, the same
+  convention as Prometheus relabeling), this is always an exact label
+  match, so it still cannot accidentally collect an unrelated Compose
+  project's containers, even one that happens to use identical service
+  names — and if `COMPOSE_PROJECT_NAME` were ever unset, `sys.env(...)`
+  returns `""`, which matches no real label, so it still fails closed.
+- **Startup-order race, investigated directly, none found:** with
+  `alloy` stopped, `checkout-service` and `inventory-service` were
+  restarted (each emitting its one-time startup log line while Alloy
+  was down), then `alloy` was started **after** those lines were
+  already written. Both lines — including `checkout-service`'s
+  Spring Boot `Completed initialization` line and `inventory-service`'s
+  `listening on 0.0.0.0:8082` line — were still retrieved from Loki
+  afterward, with the exact Docker-side timestamps matching. This
+  confirms Alloy's `loki.source.docker` reads each container's log
+  history from Docker's own log driver, not just a live tail from the
+  moment it attaches, so `checkout-service`/`inventory-service`
+  starting before `alloy` (the normal case under `docker compose up
+  -d`, which starts all services concurrently, in CI as well as
+  locally) does not risk losing their startup logs. No code change was
+  needed for this item; `scripts/verify-observability.sh` and CI
+  already wait for Loki/Alloy readiness before the checkout regression
+  request, but that ordering asserts a known-good state to check
+  against, not because logs would otherwise be lost.
+- `docker-compose.yml`: new `loki` service (`grafana/loki:3.7.8`,
+  `loki_data` volume, config mounted read-only, only
+  `127.0.0.1:3100:3100` published) and `alloy` service (`grafana/alloy:
+  v1.20.1`, `alloy_data` volume, config mounted read-only, only
+  `127.0.0.1:12345:12345` published — its debug HTTP listen address is
+  overridden to `0.0.0.0:12345` inside the container, since the default
+  `127.0.0.1:12345` is loopback *inside* the container's own network
+  namespace and unreachable via Docker's host-port publishing).
+  `alloy` also mounts `/var/run/docker.sock:ro` — see security note
+  below — and receives `COMPOSE_PROJECT_NAME` per the filter fix above.
+  Every existing service, volume, and port was left untouched.
+- **Docker socket access — documented honestly, not glossed over:**
+  the `:ro` on the socket mount only prevents Alloy from
+  replacing/deleting the socket file itself; it does **not** restrict
+  which Docker API calls Alloy can make through it — full daemon
+  access, equivalent to root on the host running that daemon. The
+  Docker API is never published on a host port. This same
+  `docker-compose.yml` is also used by CI (`make db-up` → `docker
+  compose up -d`), including on `pull_request` from forks, so this
+  mount is active there too — not local-dev-only in practice, which an
+  earlier version of this comment incorrectly implied and was
+  corrected. Judged acceptable there specifically because it adds no
+  privilege beyond what that CI job's own build/test steps already have
+  (arbitrary PR-authored code already runs directly on the runner via
+  `mvnw test`/`npm ci`/`go test`/`pip install -e`, with the runner's own
+  unsandboxed Docker access) on a single-use, secret-free VM — not
+  because the mount itself is restricted.
+- `observability/grafana/provisioning/datasources/datasource.yml`:
+  added a `Loki` datasource (`type: loki`, `url: http://loki:3100`,
+  `access: proxy`); Prometheus remains `isDefault: true`, Tempo
+  unchanged. Verified via Grafana's authenticated `/api/datasources`
+  endpoint that all three datasources are present and correctly
+  configured.
+- **Real log retrieval — the primary goal of this phase — proven
+  against Loki's actual query API for all four services, not assumed:**
+  queried `GET /loki/api/v1/query_range` per service and confirmed
+  genuine, distinct log content, not synthetic lines injected to pass
+  the check: `checkout-service` (Spring Boot startup lines, e.g.
+  `Completed initialization in 1 ms`), `payment-service` (Uvicorn
+  access logs, e.g. `INFO: 127.0.0.1:xxxxx - "GET /health HTTP/1.1" 200
+  OK`), `inventory-service` (a single Go stdlib startup line,
+  `inventory-service listening on 0.0.0.0:8082` — confirmed, via a wide
+  query, that this service logs nothing else, ever, including nothing
+  per request), and `notification-service` (structured pino JSON
+  per-request logs with `reqId`/`statusCode`/`responseTime`).
+  **Investigated and confirmed, not assumed: `checkout-service` and
+  `inventory-service` currently have no per-request access logging at
+  all** — re-triggering `POST /checkouts` produces no new log lines for
+  either service, only for `payment-service`/`notification-service`.
+- **Trace/log correlation — explicitly investigated, not claimed:**
+  searched all four services' actual log content for `trace_id`/
+  `traceId`/`span_id`/`spanId` fields. **None of the four services'
+  current log output contains any of them.** Logs and traces are
+  **not** correlated today; this is reported as a real gap and a
+  candidate future enhancement, not worked around or silently assumed
+  away, and no application logging code was modified to add it (out of
+  this phase's scope).
+- New `scripts/verify-loki-logs.py`: a small, dependency-free (stdlib
+  only) validator with two modes — a default mode requiring, per
+  service, a successful Loki response, at least one stream with the
+  correct `service` label, at least one nonempty log entry, and an
+  in-window timestamp; and a `--service SVC --expect-line TEXT`
+  persistence-check mode for one specific previously-observed line.
+  Fails closed on an unreachable Loki, malformed response, empty
+  result, wrong label, or out-of-window timestamp. The same script is
+  used by both the local verifier and CI — no duplicated validation
+  logic.
+- **Persistence — went beyond volume existence, per the same
+  distinction established in Phase 2B.1:** captured a real,
+  already-ingested log line (`inventory-service`'s one-time startup
+  line, chosen because it is a stable, known-good fixture), stopped
+  `alloy` so it could not resend anything, gracefully restarted `loki`
+  (`docker compose restart loki`, same `loki_data` volume), waited for
+  `/ready`, and — with `alloy` still stopped — confirmed the *exact
+  same* entry (same nanosecond timestamp, same content) was still
+  retrievable, ruling out "Alloy just resent it." Then restarted
+  `alloy`, confirmed all 4 pipeline components became healthy again,
+  triggered a fresh checkout, and confirmed `payment-service`/
+  `notification-service` logs resumed flowing into Loki. Reproduced
+  twice (once manually, once inside the automated verifier).
+- `scripts/verify-observability.sh` extended (not replaced), sections
+  A-O: `loki`/`alloy` config files added to the static-file check;
+  new section D waits for Loki `/ready` and all 4 Alloy components
+  healthy (no Docker-level healthcheck is possible for either image);
+  the Grafana section gained a Loki datasource check; new section L
+  verifies real logs from all four services via
+  `scripts/verify-loki-logs.py`; new section M runs the full
+  stop-Alloy/restart-Loki/verify-same-entry/restart-Alloy/verify-resumed
+  sequence above; the container/log sanity section now also dumps
+  `loki`/`alloy` logs and checks for persistent (non-transient)
+  Alloy→Loki shipping errors; the final persistence section now also
+  checks `loki_data` and `alloy_data`. Every prior Phase 2A.1-2B.1
+  assertion is unchanged. The full `make verify-observability` run
+  passed end-to-end from a fully torn-down state (sections A-O, zero
+  failures), including every new Loki/Alloy check and the restart-
+  persistence test, with a fresh, independent real Trace ID (Tempo) and
+  fresh real log entries (Loki) both confirmed in the same run.
+- `.github/workflows/ci.yml` extended, not duplicated: new "Wait for
+  Loki to become ready" and "Wait for Alloy to become healthy" steps
+  (mirroring the existing per-service health-wait pattern) placed
+  before the checkout smoke test; the existing Grafana datasource step
+  also checks Loki; a new "Verify real application logs reach Loki"
+  step reuses `scripts/verify-loki-logs.py` (the identical script used
+  locally); log collection and teardown now include `loki`/`alloy`. The
+  more expensive Loki restart-persistence test remains local-only, per
+  the same reasoning Phase 2B.1 applied to Tempo. Locally reproduced
+  equivalent verification via `make verify-observability` —
+  **not yet verified running on GitHub Actions in this updated form**
+  (Phase 2A.5's version of the workflow did run successfully there, per
+  commit `7e348a2`, CI run #16; Phase 2B.1's has not yet run there
+  either).
+- **Limitations, honestly reported, not worked around:** `checkout-service`
+  and `inventory-service` currently produce log output only at container
+  startup — no per-request access logging exists in either today, so
+  "real logs from all four services" means one thing for
+  `payment-service`/`notification-service` (fresh per-request evidence
+  on every run) and a different thing for `checkout-service`/
+  `inventory-service` (evidence from container start, not from the
+  specific request that triggered verification). No service's current
+  log output contains a trace or span ID — logs and traces are not
+  correlated, and this repository makes no claim otherwise. No
+  dashboards were built against the new Loki datasource (explicitly out
+  of scope for this phase). Docker-socket access for Alloy is real,
+  full daemon access, active in both local dev and CI (including fork
+  PRs) — acceptable under the current CI trust model (see above), but
+  worth re-evaluating if that model ever changes.

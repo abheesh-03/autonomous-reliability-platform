@@ -7,14 +7,16 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 2B.1, the repository contains foundational scaffolding, a
+As of Phase 2B.2, the repository contains foundational scaffolding, a
 running infrastructure dependency, four application services with the
 **first real service-to-service workflow**, and an
 **observability infrastructure stack instrumented for all four
 services, with a complete, verified distributed trace across the whole
-checkout workflow — now persisted in and independently re-verified from
-a real trace backend, Grafana Tempo**. Conceptually, the current demo
-application shape is:
+checkout workflow — persisted in and independently re-verified from a
+real trace backend, Grafana Tempo (Phase 2B.1) — and, as of Phase 2B.2,
+each service's existing stdout/stderr logs centrally collected and
+persisted via Grafana Alloy + Grafana Loki**. Conceptually, the current
+demo application shape is:
 
 ```
 Client
@@ -31,6 +33,10 @@ checkout-service :8080  --OTLP (metrics+traces)--> otel-collector
 otel-collector --Prometheus format (metrics)--> prometheus --> grafana
 otel-collector --debug exporter (traces)--> collector logs
 otel-collector --OTLP (traces)--> tempo --> grafana
+
+(all four services) --stdout/stderr (via dockerd)--> alloy --> loki --> grafana
+  (a separate path: Alloy reads container logs directly from the Docker
+   API, not via otel-collector or any OTEL_* setting above)
 
 Complete distributed trace (one real POST /checkouts, now persisted in Tempo):
                     +-> checkout payment CLIENT      -> payment SERVER
@@ -297,11 +303,14 @@ Full inventory:
   - Agent functionality of any kind
 
 - **Observability infrastructure** (`observability/`) — an OpenTelemetry
-  Collector, Prometheus, Grafana, and (Phase 2B.1) Grafana Tempo, all
-  running via Docker Compose (`otel-collector`, `prometheus`, `grafana`,
-  `tempo`). As of Phase 2A.5, this is fed by **all four** application
+  Collector, Prometheus, Grafana, (Phase 2B.1) Grafana Tempo, and
+  (Phase 2B.2) Grafana Loki + Grafana Alloy, all running via Docker
+  Compose (`otel-collector`, `prometheus`, `grafana`, `tempo`, `loki`,
+  `alloy`). As of Phase 2A.5, this is fed by **all four** application
   services; as of Phase 2B.1, traces are also persisted in and queryable
-  from Tempo, not just visible in Collector logs.
+  from Tempo, not just visible in Collector logs; as of Phase 2B.2, each
+  service's existing stdout/stderr logs are also centrally collected and
+  persisted in Loki, via a completely separate path from the Collector.
 
   **Implemented:**
   - `otel-collector` (`otel/opentelemetry-collector-contrib:0.161.0`):
@@ -337,35 +346,70 @@ Full inventory:
     observability port. No shell/curl/wget in this image either
     (`ENTRYPOINT` is the `/tempo` binary directly); its Docker
     healthcheck uses the binary's own built-in `-health` mode instead.
-  - `grafana` (`grafana/grafana-oss:13.0.2`): Prometheus (default) and,
-    as of Phase 2B.1, Tempo are both auto-provisioned as datasources via
+  - `loki` (`grafana/loki:3.7.8`, Phase 2B.2): a persistent, queryable
+    log-storage backend running in single-binary mode, single-tenant,
+    local filesystem storage under `/loki` on a persistent named volume
+    (`loki_data`), TSDB index + schema `v13` (this image version's own
+    current default, confirmed empirically), 7-day retention via the
+    `compactor`. Only its HTTP API (`:3100`) is published, to
+    `127.0.0.1`. No shell/curl/wget and no `-health`-style CLI flag in
+    this image (unlike Tempo), so readiness is checked purely
+    externally via `GET /ready`.
+  - `alloy` (`grafana/alloy:v1.20.1`, Phase 2B.2): reads
+    `/var/run/docker.sock` to discover containers via the Docker API,
+    filters them to this Compose project's four application services
+    only (via `discovery.relabel`, matched against
+    `com.docker.compose.project`/`com.docker.compose.service` container
+    labels — the project match uses `sys.env("COMPOSE_PROJECT_NAME")`,
+    sourced from Compose's own `${COMPOSE_PROJECT_NAME}` interpolation
+    variable, not a hard-coded name, so it still works under a
+    differently-named checkout directory without risking a match
+    against an unrelated Compose project), and ships their logs to Loki
+    via `loki.write`. Has a shell but no curl/wget, so readiness is
+    likewise checked externally, via its own `GET
+    /api/v0/web/components` API. Its debug HTTP interface (`:12345`) is
+    published to `127.0.0.1` only. Mounts the Docker socket read-only,
+    which grants full Docker daemon API access — the `:ro` does not
+    restrict which Docker API calls can be made through it, only
+    prevents replacing the socket file itself; this is documented, not
+    glossed over, including that this same mount is also active under
+    CI (see the README's Phase 2B.2 entry for the full reasoning).
+  - `grafana` (`grafana/grafana-oss:13.0.2`): Prometheus (default),
+    Tempo (Phase 2B.1), and Loki (Phase 2B.2) are all auto-provisioned
+    as datasources via
     `observability/grafana/provisioning/datasources/datasource.yml`
-    (resolving `http://prometheus:9090`/`http://tempo:3200` by Compose
-    service name, not `localhost`) — no manual click-through setup
-    needed after `docker compose up`. Persistent named volume
-    (`grafana_data`). Anonymous auth disabled; admin credentials come
-    from `.env` (`GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`),
-    local-only placeholders, never a real credential.
+    (resolving `http://prometheus:9090`/`http://tempo:3200`/
+    `http://loki:3100` by Compose service name, not `localhost`) — no
+    manual click-through setup needed after `docker compose up`.
+    Persistent named volume (`grafana_data`). Anonymous auth disabled;
+    admin credentials come from `.env`
+    (`GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`), local-only
+    placeholders, never a real credential.
 
   All host-published ports (`otel-collector`'s `4317`/`4318`/`13133`,
-  `prometheus`'s `9090`, `tempo`'s `3200`, `grafana`'s `3000`) are bound
-  to `127.0.0.1` only, since none of them (aside from Grafana's own
-  admin login) sit behind authentication — unlike the four Phase 1
-  application services and PostgreSQL, which remain published on all
-  interfaces.
+  `prometheus`'s `9090`, `tempo`'s `3200`, `loki`'s `3100`, `alloy`'s
+  `12345`, `grafana`'s `3000`) are bound to `127.0.0.1` only, since none
+  of them (aside from Grafana's own admin login) sit behind
+  authentication — unlike the four Phase 1 application services and
+  PostgreSQL, which remain published on all interfaces.
 
   **Not implemented:**
-  - Application log export (`OTEL_LOGS_EXPORTER=none`/equivalent on all
-    four instrumented services; no service emits logs via OTel)
   - Dashboards beyond the minimal datasource-connectivity path, or any
     alerting rules
   - Any consumption of telemetry by an agent
+  - Log/trace correlation: none of the four application services'
+    current log output contains a trace or span ID (investigated
+    directly, not assumed), so logs and traces are not correlated yet
   - An explicit, confirmed Tempo retention override — Tempo's v3.x
     retention config schema could not be confirmed without further
     guessing against a largely undocumented internal path
     (`backend_scheduler.provider...`); the built-in default (336h/14
     days) is used instead, which is already appropriate for local
     development
+  - Per-request access logging in `checkout-service` and
+    `inventory-service` — both currently log only at container startup;
+    `payment-service` and `notification-service` already log per
+    request
 
   As of Phase 2A.5, a real `POST /checkouts` request produces a
   **complete** distributed trace: checkout-service's SERVER span is the
@@ -380,6 +424,15 @@ Full inventory:
   the same persistent volume (proven for a trace with normal, tens-of-
   seconds-plus processing time before the restart; a trace restarted
   within milliseconds of ingestion was not specifically stress-tested).
+  As of Phase 2B.2, real (non-synthetic) log entries from all four
+  application services have also been retrieved directly from Loki's
+  own query API, and a specific already-ingested entry has been
+  confirmed to survive a graceful Loki restart using the same
+  persistent volume, with Alloy stopped throughout so it could not have
+  resent it. `checkout-service` and `inventory-service` currently only
+  log at container startup; none of the four services' current log
+  output contains a trace or span ID, so logs and traces are not
+  correlated yet.
 
 There are no other application services, no message brokers, no
 orchestration, no cloud infrastructure, and no AI provider integration.
@@ -436,9 +489,10 @@ repository. Payment, inventory, and notification never call each other
 or call back into checkout-service.
 
 ### Observability
-**CURRENT:** An OpenTelemetry Collector, Prometheus, Grafana, and (as of
-Phase 2B.1) Grafana Tempo all run via Docker Compose (see Current
-Implementation above). All four application services are instrumented,
+**CURRENT:** An OpenTelemetry Collector, Prometheus, Grafana, (as of
+Phase 2B.1) Grafana Tempo, and (as of Phase 2B.2) Grafana Loki +
+Grafana Alloy all run via Docker Compose (see Current Implementation
+above). All four application services are instrumented,
 each its own idiomatic way: `checkout-service` with the OpenTelemetry
 Java auto-instrumentation agent (pinned `v2.31.1`); `payment-service`
 with OpenTelemetry Python zero-code auto-instrumentation (pinned
@@ -468,16 +522,31 @@ alongside its existing `debug` exporter, and the exact same trace has
 been independently retrieved from Tempo's `GET /api/v2/traces/{traceID}`
 API and re-verified (same Trace ID, same seven spans, same six
 parent/child relationships), including after a graceful Tempo restart
-using its persistent volume. There is still no application log
-pipeline, and no dashboards or alerting rules exist (Tempo is a
-provisioned Grafana datasource, but nothing visualizes it yet); none of
-this telemetry is yet consumed by an agent.
+using its persistent volume. As of Phase 2B.2, each application
+service's existing stdout/stderr output is also centrally collected:
+Grafana Alloy discovers each service's container via the Docker API
+and ships its logs to Grafana Loki, which persists them with a 7-day
+retention policy; real log entries from all four services have been
+retrieved directly from Loki's own query API, and a specific
+already-ingested entry has been confirmed to survive a graceful Loki
+restart using the same persistent volume. `checkout-service` and
+`inventory-service` currently only log at container startup — neither
+has per-request access logging yet. Logs and traces are **not**
+correlated: no service's current log output contains a trace or span
+ID. There are still no dashboards or alerting rules (Tempo and Loki are
+both provisioned Grafana datasources, but nothing visualizes them yet);
+none of this telemetry is yet consumed by an agent.
 
 **FUTURE (not yet implemented):**
-- An application log export pipeline
-- Meaningful Grafana dashboards (including trace-based ones, now that
-  Tempo is available) and Prometheus alerting rules
-- Consumption of this telemetry by an agent for incident detection
+- Meaningful Grafana dashboards (including trace- and log-based ones,
+  now that Tempo and Loki are both available) and Prometheus alerting
+  rules
+- Log/trace correlation (emitting trace and span IDs into application
+  log output, and querying Loki/Tempo together by that shared ID)
+- Per-request access logging in `checkout-service` and
+  `inventory-service` (both currently log only at container startup)
+- Consumption of this telemetry (metrics, traces, and now logs) by an
+  agent for incident detection
 
 ### Event streaming
 **Kafka or Redpanda** for propagating incident signals and telemetry

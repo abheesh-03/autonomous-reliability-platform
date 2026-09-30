@@ -1,9 +1,10 @@
-# Auto-provisions Prometheus and (Phase 2B.1) Tempo as Grafana
-# datasources, so no manual click-through setup is needed after
-# `docker compose up`. Both resolve via their Compose service names
-# (not localhost), since this runs inside the Grafana container.
-# Prometheus remains the default; Tempo is not (no dashboards are
-# provisioned yet, so there is no dependency on which one is default).
+# Auto-provisions Prometheus, Tempo (Phase 2B.1), and Loki (Phase 2B.2)
+# as Grafana datasources, so no manual click-through setup is needed
+# after `docker compose up`. All three resolve via their Compose
+# service names (not localhost), since this runs inside the Grafana
+# container. Prometheus remains the default; Tempo and Loki are not (no
+# dashboards are provisioned yet, so there is no dependency on which
+# one is default).
 apiVersion: 1
 
 datasources:
@@ -17,4 +18,9 @@ datasources:
     type: tempo
     access: proxy
     url: http://tempo:3200
+    editable: false
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
     editable: false

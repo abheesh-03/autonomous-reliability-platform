@@ -103,6 +103,19 @@ jobs:
       - name: Validate Docker Compose configuration
         run: docker compose config
 
+      # Captured before anything starts, so it pre-dates every
+      # container's own first log line. Passed to the Loki log-evidence
+      # step below (--after-ns) so that check requires genuinely fresh
+      # ingestion during this run, not just any entry in a lookback
+      # window (matching the same pattern used in
+      # scripts/verify-observability.sh). Portable across macOS/Linux
+      # runners: unlike `date +%s%N` (whose `%N` is GNU-only and
+      # silently broken on macOS/BSD date), Python's time.time_ns()
+      # behaves identically everywhere.
+      - name: Capture run-start timestamp
+        id: run-start
+        run: echo "ns=$(python3 -c 'import time; print(time.time_ns())')" >> "$GITHUB_OUTPUT"
+
       - name: Start Compose environment
         run: make db-up
 
@@ -239,6 +252,44 @@ jobs:
           echo "Tempo did not become healthy in time" >&2
           exit 1
 
+      # Loki's official image has no shell/curl/wget and no -health-style
+      # CLI flag, so (like otel-collector) it has no Docker-level
+      # healthcheck. Checked here, before the checkout smoke test below,
+      # so Alloy has a ready Loki to ship the test app's logs to.
+      - name: Wait for Loki to become ready
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            if curl -fsS http://localhost:3100/ready >/dev/null 2>&1; then
+              exit 0
+            fi
+            echo "Attempt $i/$attempts: Loki /ready not ready yet"
+            sleep 3
+          done
+          echo "Loki /ready (localhost:3100) never responded" >&2
+          exit 1
+
+      # Alloy has a shell but no curl/wget, so likewise no Docker-level
+      # healthcheck; verified via its own debug API instead, requiring
+      # all 4 pipeline components (discovery.docker, discovery.relabel,
+      # loki.source.docker, loki.write) to report healthy.
+      - name: Wait for Alloy to become healthy
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            if body="$(curl -fsS http://localhost:12345/api/v0/web/components)" && echo "$body" | jq -e '
+                (length >= 4) and (all(.[]; .health.state == "healthy"))
+              ' >/dev/null 2>&1
+            then
+              echo "$body"
+              exit 0
+            fi
+            echo "Attempt $i/$attempts: Alloy components not all healthy yet"
+            sleep 3
+          done
+          echo "Alloy components (localhost:12345/api/v0/web/components) never all reported healthy" >&2
+          exit 1
+
       - name: End-to-end checkout orchestration smoke test
         run: |
           body="$(curl -fsS -X POST http://localhost:8080/checkouts \
@@ -313,7 +364,7 @@ jobs:
           curl -fsS http://localhost:9090/api/v1/targets || true
           exit 1
 
-      - name: Verify Grafana health and provisioned Prometheus + Tempo datasources
+      - name: Verify Grafana health and provisioned Prometheus + Tempo + Loki datasources
         run: |
           set -a
           . ./.env
@@ -327,6 +378,7 @@ jobs:
           echo "$datasources"
           echo "$datasources" | jq -e '[.[] | select(.type == "prometheus" and .url == "http://prometheus:9090")] | length > 0'
           echo "$datasources" | jq -e '[.[] | select(.type == "tempo" and .url == "http://tempo:3200")] | length > 0'
+          echo "$datasources" | jq -e '[.[] | select(.type == "loki" and .url == "http://loki:3100")] | length > 0'
 
       # The OTel Java agent's/Python SDK's/Go SDK's/Node SDK's metric
       # export interval and Prometheus's own scrape cycle are both
@@ -424,6 +476,32 @@ jobs:
           echo "Tempo never served the real checkout trace with all seven spans and correct parent/child relationships" >&2
           exit 1
 
+      # Phase 2B.2: proves genuine, non-synthetic log output from all
+      # four application services was actually collected through the
+      # Alloy -> Loki pipeline (Docker log discovery/shipping and Loki
+      # indexing are both asynchronous, so this is retried). Reuses the
+      # same validator (scripts/verify-loki-logs.py) as the local
+      # verifier, so there is no duplicated validation logic between
+      # local and CI. --after-ns requires evidence newer than the
+      # run-start timestamp captured above (CI runners are ephemeral, so
+      # this is mostly a consistency/defense-in-depth match with the
+      # local verifier rather than addressing an observed CI failure).
+      # The more expensive Loki restart-persistence test remains
+      # local-only (scripts/verify-observability.sh); this step
+      # independently proves all four services' logs are queryable.
+      - name: Verify real application logs reach Loki
+        run: |
+          attempts=20
+          for i in $(seq 1 "$attempts"); do
+            if python3 scripts/verify-loki-logs.py --loki-url http://localhost:3100 --since-seconds 1800 --after-ns "${{ steps.run-start.outputs.ns }}"; then
+              exit 0
+            fi
+            echo "Attempt $i/$attempts: real logs for all four services not yet queryable from Loki"
+            sleep 3
+          done
+          echo "scripts/verify-loki-logs.py never confirmed real, nonempty logs from all four application services in Loki" >&2
+          exit 1
+
       - name: Show service logs
         if: always()
         run: |
@@ -436,6 +514,8 @@ jobs:
           docker compose logs --tail=100 prometheus
           docker compose logs --tail=100 grafana
           docker compose logs --tail=100 tempo
+          docker compose logs --tail=100 loki
+          docker compose logs --tail=100 alloy
 
       - name: Stop Compose environment (preserve volumes)
         if: always()

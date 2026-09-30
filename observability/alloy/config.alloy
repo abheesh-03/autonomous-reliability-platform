@@ -1,0 +1,82 @@
+// Grafana Alloy configuration for local development (Phase 2B.2).
+//
+// Pipeline: discovery.docker -> discovery.relabel -> loki.source.docker
+// -> loki.write -> Loki. Collects container logs only for this Compose
+// project's four application services (checkout-service,
+// payment-service, inventory-service, notification-service) — not
+// postgres, otel-collector, prometheus, tempo, grafana, loki, or
+// Alloy's own logs.
+
+discovery.docker "containers" {
+	host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "app_containers" {
+	targets = discovery.docker.containers.targets
+
+	// Only containers belonging to this Compose project — matched
+	// against the container's own "com.docker.compose.project" label.
+	// The expected value comes from the COMPOSE_PROJECT_NAME env var
+	// (set below in docker-compose.yml from Compose's own
+	// ${COMPOSE_PROJECT_NAME} interpolation variable, which always
+	// resolves to Compose's actual effective project name for this run
+	// — whether derived from the checkout directory name, an explicit
+	// COMPOSE_PROJECT_NAME, or "-p") rather than a literal hard-coded
+	// name, so this still works correctly under a differently-named
+	// checkout directory or an explicit "-p"/COMPOSE_PROJECT_NAME
+	// override. discovery.relabel's regex is fully anchored (^...$),
+	// same as Prometheus relabeling, so this is an exact match, not a
+	// substring/prefix match — it will never accidentally keep an
+	// unrelated Compose project's containers. If COMPOSE_PROJECT_NAME
+	// were ever unset in Alloy's own environment, sys.env(...) returns
+	// "", which matches no real project label — i.e. this fails closed
+	// (collects nothing) rather than collecting everything.
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		regex         = sys.env("COMPOSE_PROJECT_NAME")
+		action        = "keep"
+	}
+
+	// Only the four instrumented application services — everything else
+	// in this Compose project (postgres, otel-collector, prometheus,
+	// tempo, grafana, loki, alloy itself) is dropped here.
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		regex         = "checkout-service|payment-service|inventory-service|notification-service"
+		action        = "keep"
+	}
+
+	// Stable Loki labels. "service" and "compose_project" come from
+	// existing Compose container labels; "environment" is a fixed
+	// local-development value, matching the OTEL_RESOURCE_ATTRIBUTES
+	// deployment.environment.name already used by every application's
+	// telemetry. None of these are high-cardinality (unlike a
+	// trace/span/request/container ID, which are never set as labels
+	// here).
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		target_label  = "compose_project"
+	}
+
+	rule {
+		target_label = "environment"
+		replacement  = "local"
+	}
+}
+
+loki.source.docker "containers" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.app_containers.output
+	forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

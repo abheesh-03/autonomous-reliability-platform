@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# verify-observability.sh — Bundled Phase 2A.1-2B.1 verification.
+# verify-observability.sh — Bundled Phase 2A.1-2B.2 verification.
 #
 # Starts the full Docker Compose environment, waits for every
 # application and observability service to become healthy (with a
@@ -19,9 +19,16 @@
 # parent/child Span IDs on every branch). Phase 2B.1 then independently
 # re-verifies that exact same trace directly against Tempo's own HTTP
 # query API (scripts/verify-tempo-trace.py), and that it survives a
-# graceful Tempo restart using the same tempo_data volume — then always
-# tears the environment down (without deleting volumes) and confirms
-# every named volume, including tempo_data, still exists.
+# graceful Tempo restart using the same tempo_data volume. Phase 2B.2
+# then verifies centralized application log collection: Loki and Alloy
+# readiness/health, Loki provisioned as a third Grafana datasource, real
+# (non-synthetic) logs from all four application services retrieved via
+# Loki's own query API (scripts/verify-loki-logs.py, the same validator
+# CI uses), and that an already-ingested log entry survives a graceful
+# Loki restart using the same loki_data volume while Alloy is stopped
+# (ruling out "Alloy just resent it") — then always tears the
+# environment down (without deleting volumes) and confirms every named
+# volume, including tempo_data/loki_data/alloy_data, still exists.
 #
 # Exits non-zero immediately on the first failed check.
 
@@ -63,7 +70,10 @@ echo "-- required observability config files --"
 for f in \
   observability/otel-collector/config.yaml \
   observability/prometheus/prometheus.yml \
-  observability/grafana/provisioning/datasources/datasource.yml
+  observability/grafana/provisioning/datasources/datasource.yml \
+  observability/loki/loki.yaml \
+  observability/alloy/config.alloy \
+  scripts/verify-loki-logs.py
 do
   [ -f "$f" ] || fail "missing required config file: $f"
   echo "  found: $f"
@@ -73,6 +83,15 @@ done
 # B. Start environment
 # --------------------------------------------------------------------
 section "B. Start environment"
+# Captured before anything starts, so it pre-dates every container's own
+# first log line (including checkout-service's/inventory-service's
+# startup-only logs) — used later (section L) as a lower bound so that
+# stale log entries left over in the persistent loki_data volume from a
+# previous run cannot satisfy this run's "real logs were ingested"
+# check. Portable across macOS/Linux: unlike `date +%s%N` (whose `%N`
+# is GNU-only and silently prints a literal "N" on macOS/BSD date),
+# Python's time.time_ns() behaves identically on both.
+run_start_ns="$(python3 -c 'import time; print(time.time_ns())')"
 docker compose up -d
 
 # --------------------------------------------------------------------
@@ -122,9 +141,52 @@ done
 echo "  otel-collector health_check endpoint (127.0.0.1:13133) responded"
 
 # --------------------------------------------------------------------
-# D. Prometheus
+# D. Loki and Alloy readiness/health (Phase 2B.2)
 # --------------------------------------------------------------------
-section "D. Prometheus"
+section "D. Loki and Alloy readiness/health"
+
+echo "-- Loki (grafana/loki:3.7.8): no Docker health status is possible"
+echo "   (official image has no shell/curl/wget and no -health-style CLI"
+echo "   flag); verifying readiness functionally via GET /ready instead --"
+
+loki_ready=false
+for i in $(seq 1 20); do
+  if curl -fsS http://127.0.0.1:3100/ready >/dev/null 2>&1; then
+    loki_ready=true
+    break
+  fi
+  echo "  [loki] attempt $i/20: /ready not ready yet"
+  sleep 3
+done
+[ "$loki_ready" = true ] || fail "Loki /ready (127.0.0.1:3100) never responded"
+echo "  Loki /ready OK"
+
+echo ""
+echo "-- Alloy (grafana/alloy:v1.20.1): has a shell but no curl/wget, so no"
+echo "   Docker-level healthcheck either; verifying all 4 pipeline"
+echo "   components (discovery.docker, discovery.relabel, loki.source.docker,"
+echo "   loki.write) report health.state == healthy via its own debug API --"
+
+alloy_healthy=false
+for i in $(seq 1 20); do
+  if components_body="$(curl -fsS http://127.0.0.1:12345/api/v0/web/components 2>/dev/null)" \
+      && echo "$components_body" | jq -e '
+          (length >= 4) and (all(.[]; .health.state == "healthy"))
+        ' >/dev/null 2>&1
+  then
+    alloy_healthy=true
+    break
+  fi
+  echo "  [alloy] attempt $i/20: components not all healthy yet"
+  sleep 3
+done
+[ "$alloy_healthy" = true ] || fail "Alloy components (127.0.0.1:12345/api/v0/web/components) never all reported healthy"
+echo "  Alloy components all healthy: $(echo "$components_body" | jq -c '[.[].localID]')"
+
+# --------------------------------------------------------------------
+# E. Prometheus
+# --------------------------------------------------------------------
+section "E. Prometheus"
 
 curl -fsS http://127.0.0.1:9090/-/ready >/dev/null || fail "Prometheus /-/ready did not respond"
 echo "  Prometheus /-/ready OK"
@@ -149,9 +211,9 @@ done
 echo "  Prometheus targets UP: prometheus, otel-collector, otel-collector-app-metrics"
 
 # --------------------------------------------------------------------
-# E. Grafana
+# F. Grafana
 # --------------------------------------------------------------------
-section "E. Grafana"
+section "F. Grafana"
 
 if [ -f .env ]; then
   set -a
@@ -178,10 +240,15 @@ echo "$datasources_body" | jq -e '
   ' >/dev/null || fail "Grafana provisioned Tempo datasource not found or misconfigured"
 echo "  Grafana Tempo datasource OK (type=tempo, url=http://tempo:3200)"
 
+echo "$datasources_body" | jq -e '
+    [.[] | select(.type == "loki" and .url == "http://loki:3100")] | length > 0
+  ' >/dev/null || fail "Grafana provisioned Loki datasource not found or misconfigured"
+echo "  Grafana Loki datasource OK (type=loki, url=http://loki:3100)"
+
 # --------------------------------------------------------------------
-# F. Regression: POST /checkouts
+# G. Regression: POST /checkouts
 # --------------------------------------------------------------------
-section "F. Regression: POST /checkouts"
+section "G. Regression: POST /checkouts"
 
 checkout_body="$(curl -fsS -X POST http://127.0.0.1:8080/checkouts \
   -H 'Content-Type: application/json' \
@@ -201,9 +268,9 @@ echo "$checkout_body" | jq -e '
 echo "  POST /checkouts OK"
 
 # --------------------------------------------------------------------
-# G. Observability: checkout-service application metrics in Prometheus
+# H. Observability: checkout-service application metrics in Prometheus
 # --------------------------------------------------------------------
-section "G. Observability: checkout-service application metrics in Prometheus"
+section "H. Observability: checkout-service application metrics in Prometheus"
 
 echo "-- waiting for checkout-service metrics to reach Prometheus (the OTel"
 echo "   Java agent's metric export interval and Prometheus's own scrape"
@@ -289,10 +356,10 @@ done
 echo "  notification-service HTTP server metrics present (http_server_request_duration_seconds_count, service_name=notification-service, http_route=/notifications)"
 
 # --------------------------------------------------------------------
-# H. Observability: trace evidence + complete checkout distributed
+# I. Observability: trace evidence + complete checkout distributed
 #    trace (all three downstream branches) in Collector logs
 # --------------------------------------------------------------------
-section "H. Observability: trace evidence + complete checkout distributed trace"
+section "I. Observability: trace evidence + complete checkout distributed trace"
 
 echo "-- Phase 2A.2 has no trace backend yet; traces are verified via the"
 echo "   Collector's debug exporter output in its own container logs --"
@@ -340,10 +407,10 @@ done
 echo "  complete checkout distributed trace confirmed (payment + inventory + notification branches): $checkout_trace_match"
 
 # --------------------------------------------------------------------
-# I. Observability: retrieve and validate the real checkout trace
+# J. Observability: retrieve and validate the real checkout trace
 #    directly from Tempo (Phase 2B.1)
 # --------------------------------------------------------------------
-section "I. Observability: retrieve and validate the real checkout trace from Tempo"
+section "J. Observability: retrieve and validate the real checkout trace from Tempo"
 
 echo "-- Collector -> Tempo export and Tempo's own ingest-to-query path are"
 echo "   both asynchronous, so this is retried. Reuses the exact Trace ID"
@@ -365,9 +432,9 @@ done
 echo "  $tempo_trace_match"
 
 # --------------------------------------------------------------------
-# J. Observability: Tempo trace persistence across a graceful restart
+# K. Observability: Tempo trace persistence across a graceful restart
 # --------------------------------------------------------------------
-section "J. Observability: Tempo trace persistence across a graceful restart"
+section "K. Observability: Tempo trace persistence across a graceful restart"
 
 echo "-- restarting the tempo container (same tempo_data volume) to prove"
 echo "   the already-ingested checkout trace survives, not just that the"
@@ -405,9 +472,159 @@ done
 echo "  trace persistence across restart confirmed: $tempo_trace_after_restart"
 
 # --------------------------------------------------------------------
-# K. Container/log sanity
+# L. Observability: real application logs in Loki (Phase 2B.2)
 # --------------------------------------------------------------------
-section "K. Container/log sanity"
+section "L. Observability: real application logs in Loki"
+
+echo "-- verifying genuine, non-synthetic log output from all four"
+echo "   application services was actually collected through the Alloy ->"
+echo "   Loki pipeline (Docker log discovery/shipping and Loki indexing"
+echo "   are both asynchronous, so this is retried); uses the same"
+echo "   validator (scripts/verify-loki-logs.py) that CI uses. --after-ns"
+echo "   \$run_start_ns (captured in section B, before anything started)"
+echo "   requires each service's evidence to be newer than that, so a"
+echo "   stale entry left over in the persistent loki_data volume from an"
+echo "   earlier run cannot satisfy this check on its own --"
+
+loki_logs_ok=false
+for i in $(seq 1 20); do
+  if python3 scripts/verify-loki-logs.py --loki-url http://127.0.0.1:3100 --since-seconds 1800 --after-ns "$run_start_ns"; then
+    loki_logs_ok=true
+    break
+  fi
+  echo "  attempt $i/20: real, fresh logs for all four services not yet queryable from Loki"
+  sleep 3
+done
+[ "$loki_logs_ok" = true ] || fail "scripts/verify-loki-logs.py never confirmed real, fresh logs from all four application services in Loki"
+
+# --------------------------------------------------------------------
+# M. Observability: Loki log persistence across a graceful restart
+# --------------------------------------------------------------------
+section "M. Observability: Loki log persistence across a graceful restart"
+
+echo "-- proving one exact, already-ingested log entry survives a graceful"
+echo "   Loki restart using the same loki_data volume — not just that the"
+echo "   named volume exists, and not just that SOME entry matching a"
+echo "   substring exists (inventory-service's startup line is identical"
+echo "   text on every restart, so a substring match alone could be"
+echo "   satisfied by a different occurrence of the same message — this"
+echo "   captures and later re-checks one specific (service, full message,"
+echo "   original nanosecond timestamp) triple). Alloy is stopped first so"
+echo "   it cannot resend the entry after Loki comes back; inventory-service"
+echo "   is used as the source because it logs exactly once per container"
+echo "   lifetime, at startup, making its most recent line a stable,"
+echo "   known-good fixture for this check --"
+
+inventory_startup_line="inventory-service listening on"
+persist_capture_ok=false
+inventory_capture=""
+for i in $(seq 1 20); do
+  if inventory_capture="$(python3 scripts/verify-loki-logs.py --loki-url http://127.0.0.1:3100 \
+       --capture-exact --service inventory-service --line-contains "$inventory_startup_line" --since-seconds 1800)"
+  then
+    persist_capture_ok=true
+    break
+  fi
+  inventory_capture=""
+  echo "  attempt $i/20: inventory-service startup log not yet found in Loki"
+  sleep 3
+done
+[ "$persist_capture_ok" = true ] || fail "inventory-service startup log line was never found in Loki before the restart test"
+echo "  captured exact entry: $inventory_capture"
+
+echo ""
+echo "-- stopping alloy (so it cannot resend/reship anything), then"
+echo "   gracefully restarting loki (same loki_data volume, not removed) --"
+docker compose stop alloy >/dev/null
+docker compose restart loki >/dev/null
+
+loki_restart_ready=false
+for i in $(seq 1 20); do
+  if curl -fsS http://127.0.0.1:3100/ready >/dev/null 2>&1; then
+    loki_restart_ready=true
+    break
+  fi
+  echo "  [loki] attempt $i/20: /ready not ready yet after restart"
+  sleep 3
+done
+[ "$loki_restart_ready" = true ] || fail "Loki /ready never responded after restart"
+echo "  Loki /ready OK after restart"
+
+echo ""
+echo "-- re-querying Loki (Alloy still stopped) for that exact same"
+echo "   captured (service, full message, timestamp) triple, to confirm it"
+echo "   survived the restart via loki_data — not because Alloy resent it,"
+echo "   and not a false match against some other occurrence of the same"
+echo "   recurring message text --"
+persist_after_restart_ok=false
+for i in $(seq 1 20); do
+  if python3 scripts/verify-loki-logs.py --loki-url http://127.0.0.1:3100 \
+       --verify-exact "$inventory_capture" --since-seconds 1800
+  then
+    persist_after_restart_ok=true
+    break
+  fi
+  echo "  attempt $i/20: exact inventory-service startup log entry not yet retrievable after restart"
+  sleep 3
+done
+[ "$persist_after_restart_ok" = true ] || fail "the exact captured inventory-service startup log entry (same timestamp, same full message) did not survive the graceful Loki restart (loki_data volume), or Alloy (still stopped) was somehow required for it to reappear"
+echo "  Loki log persistence across restart confirmed (exact captured inventory-service entry survived; Alloy was stopped throughout)"
+
+echo ""
+echo "-- restarting alloy and confirming its pipeline becomes healthy again --"
+docker compose start alloy >/dev/null
+
+alloy_restart_healthy=false
+for i in $(seq 1 20); do
+  if components_body="$(curl -fsS http://127.0.0.1:12345/api/v0/web/components 2>/dev/null)" \
+      && echo "$components_body" | jq -e '
+          (length >= 4) and (all(.[]; .health.state == "healthy"))
+        ' >/dev/null 2>&1
+  then
+    alloy_restart_healthy=true
+    break
+  fi
+  echo "  [alloy] attempt $i/20: components not all healthy yet after restart"
+  sleep 3
+done
+[ "$alloy_restart_healthy" = true ] || fail "Alloy components never all reported healthy again after restart"
+echo "  Alloy components all healthy again after restart"
+
+echo ""
+echo "-- capturing a nanosecond timestamp immediately BEFORE triggering one"
+echo "   more real checkout (portable: Python's time.time_ns(), not"
+echo "   \`date +%s%N\`, whose %N is GNU-only and silently broken on macOS/"
+echo "   BSD date), then requiring payment-service's and"
+echo "   notification-service's (which log per-request) evidence to be"
+echo "   strictly newer than that instant — not merely present somewhere"
+echo "   in a several-minute lookback window, which a stale pre-restart"
+echo "   entry could also satisfy — to prove log collection actually"
+echo "   resumed after the Alloy restart, not just that the alloy"
+echo "   container is running --"
+resume_check_ns="$(python3 -c 'import time; print(time.time_ns())')"
+curl -fsS -X POST http://127.0.0.1:8080/checkouts \
+  -H 'Content-Type: application/json' \
+  -d '{"sku":"sku_keyboard_001","quantity":1,"amount_cents":2599,"currency":"USD","recipient":"customer@example.com"}' \
+  >/dev/null || fail "POST /checkouts (post-Alloy-restart regression trigger) failed"
+
+resumed_collection_ok=false
+for i in $(seq 1 20); do
+  if python3 scripts/verify-loki-logs.py --loki-url http://127.0.0.1:3100 \
+       --services payment-service,notification-service --after-ns "$resume_check_ns" --since-seconds 600
+  then
+    resumed_collection_ok=true
+    break
+  fi
+  echo "  attempt $i/20: fresh post-restart logs from payment-service/notification-service not yet in Loki"
+  sleep 3
+done
+[ "$resumed_collection_ok" = true ] || fail "log collection did not resume after the Alloy restart (no payment-service/notification-service log entry newer than the pre-request timestamp reached Loki)"
+echo "  log collection resumed after Alloy restart (fresh payment-service and notification-service logs, newer than the pre-request timestamp, confirmed in Loki)"
+
+# --------------------------------------------------------------------
+# N. Container/log sanity
+# --------------------------------------------------------------------
+section "N. Container/log sanity"
 
 docker compose ps
 
@@ -439,6 +656,12 @@ docker compose logs --tail=50 grafana
 echo ""
 echo "-- tempo logs (last 50 lines) --"
 docker compose logs --tail=50 tempo
+echo ""
+echo "-- loki logs (last 50 lines) --"
+docker compose logs --tail=50 loki
+echo ""
+echo "-- alloy logs (last 50 lines) --"
+docker compose logs --tail=50 alloy
 
 echo ""
 echo "-- checking for persistent (non-transient) Collector->Tempo export"
@@ -452,10 +675,20 @@ if docker compose logs --tail=20 otel-collector 2>&1 | grep -q 'otlp_grpc/tempo'
 fi
 echo "  no persistent Collector->Tempo export errors in the most recent logs"
 
+echo ""
+echo "-- checking for persistent (non-transient) Alloy->Loki log-shipping"
+echo "   errors — brief connection-refused/retry warnings around the Loki"
+echo "   restart above are expected and already tolerated; only flag an"
+echo "   error still recurring in the most recent log lines --"
+if docker compose logs --tail=20 alloy 2>&1 | grep -qi 'error\|fail\|refused'; then
+  fail "alloy is still reporting log-shipping errors in its most recent logs"
+fi
+echo "  no persistent Alloy->Loki log-shipping errors in the most recent logs"
+
 # --------------------------------------------------------------------
-# L. Persistence after cleanup
+# O. Persistence after cleanup
 # --------------------------------------------------------------------
-section "L. Persistence after cleanup"
+section "O. Persistence after cleanup"
 
 echo "-- docker compose down (preserving volumes) --"
 docker compose down
@@ -463,15 +696,26 @@ docker compose down
 # (and log a confusing duplicate teardown) on normal exit.
 trap - EXIT
 
-for vol in \
-  autonomous-reliability-platform_postgres_data \
-  autonomous-reliability-platform_prometheus_data \
-  autonomous-reliability-platform_grafana_data \
-  autonomous-reliability-platform_tempo_data
-do
-  docker volume inspect "$vol" >/dev/null 2>&1 || fail "expected named volume missing after teardown: $vol"
-  echo "  volume present: $vol"
+echo ""
+echo "-- resolving the actual named volumes to check from Docker Compose's"
+echo "   own resolved configuration, rather than a hard-coded"
+echo "   'autonomous-reliability-platform_*' prefix — alloy now runs with"
+echo "   whatever COMPOSE_PROJECT_NAME this invocation actually resolves"
+echo "   to (see observability/alloy/config.alloy), so the volume names"
+echo "   this check looks for must track the same effective project,"
+echo "   not an assumed literal one --"
+compose_project_name="$(docker compose config --format json | python3 -c 'import json, sys; print(json.load(sys.stdin)["name"])')"
+[ -n "$compose_project_name" ] || fail "could not resolve the effective Compose project name from 'docker compose config'"
+echo "  resolved Compose project name: $compose_project_name"
+
+for logical_vol in postgres_data prometheus_data grafana_data tempo_data loki_data alloy_data; do
+  match="$(docker volume ls \
+    --filter "label=com.docker.compose.project=$compose_project_name" \
+    --filter "label=com.docker.compose.volume=$logical_vol" \
+    --format '{{.Name}}')"
+  [ -n "$match" ] || fail "expected named volume missing after teardown: project=$compose_project_name logical_name=$logical_vol"
+  echo "  volume present: $match (project=$compose_project_name, logical name=$logical_vol)"
 done
 
 section "SUCCESS"
-echo "Phase 2A.1-2B.1 observability verification passed."
+echo "Phase 2A.1-2B.2 observability verification passed."

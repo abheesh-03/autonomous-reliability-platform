@@ -31,6 +31,11 @@
 #     retrievable from Tempo's own HTTP query API, not just from
 #     Collector logs. Grafana has Tempo provisioned as a second
 #     datasource alongside Prometheus.
+#   - loki / alloy: centralized application log collection and
+#     persistent storage (Phase 2B.2). Alloy reads the real stdout/
+#     stderr of the four application containers directly from Docker
+#     (not via the OTel Collector — this is a separate path) and ships
+#     them to Loki. Grafana has Loki provisioned as a third datasource.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -236,6 +241,87 @@ services:
       retries: 5
       start_period: 15s
 
+  loki:
+    image: grafana/loki:3.7.8
+    restart: unless-stopped
+    volumes:
+      - ./observability/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki_data:/loki
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    # Only the HTTP API is published to the host.
+    ports:
+      - "127.0.0.1:3100:3100"
+    # Like tempo and otel-collector, this image has no shell and no
+    # curl/wget (ENTRYPOINT is /usr/bin/loki directly, confirmed via
+    # `docker inspect`), and — unlike Tempo — the /usr/bin/loki binary
+    # has no built-in "-health"-style flag either (confirmed via
+    # `-help`). No Docker-level HEALTHCHECK is possible here; readiness
+    # is instead verified functionally from the host via
+    # `curl http://127.0.0.1:3100/ready` in scripts/verify-observability.sh
+    # and CI, the same pattern already used for otel-collector.
+
+  alloy:
+    image: grafana/alloy:v1.20.1
+    restart: unless-stopped
+    environment:
+      # ${COMPOSE_PROJECT_NAME} is Compose's own interpolation variable
+      # for its actual effective project name for this run (derived
+      # from the checkout directory name by default, or from an
+      # explicit "-p"/COMPOSE_PROJECT_NAME override) — not a value we
+      # set ourselves. Passed through so observability/alloy/config.alloy
+      # can match discovered containers' "com.docker.compose.project"
+      # label against this exact value via sys.env(...), instead of a
+      # literal hard-coded project name that would silently collect
+      # nothing under a differently-named checkout directory.
+      - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME}
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy/data
+      # Grants Alloy full Docker daemon API access (equivalent to root
+      # on the host running this daemon), not just read access to
+      # container logs — the Docker API has no separate "logs-only"
+      # permission scope, and `:ro` on this mount only stops Alloy from
+      # replacing/deleting the socket special file itself; it does NOT
+      # restrict which Docker API calls Alloy can make through it. The
+      # Docker API itself is never published on any host port.
+      #
+      # This same docker-compose.yml is also used by CI
+      # (.github/workflows/ci.yml, via `make db-up` / `docker compose up
+      # -d`), including on `pull_request` from forks, so Alloy's socket
+      # mount IS active there too — it is not local-dev-only in
+      # practice. That is judged acceptable, not because the mount is
+      # somehow restricted, but because it adds no meaningful privilege
+      # beyond what that CI job already has: the job's own steps
+      # (./mvnw test, npm ci, go test ./..., pip install -e) already
+      # execute arbitrary PR-authored code directly on the runner with
+      # the runner's own ambient Docker access (the `docker compose`
+      # commands in this workflow are not sandboxed away from it
+      # either), on a single-use VM with no persistent state and no
+      # secrets exposed to fork PRs. If this workflow is ever changed to
+      # run on shared/persistent/self-hosted runners, or to use
+      # `pull_request_target`, this reasoning no longer holds and this
+      # mount (and the rest of this CI job) would need to be
+      # reconsidered.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+      # Default listen address is 127.0.0.1:12345 (loopback *inside* the
+      # container), which Docker's own port publishing below could not
+      # reach; binding to all interfaces inside the container is safe
+      # here because the host-side publish is loopback-only.
+      - --server.http.listen-addr=0.0.0.0:12345
+    # Alloy's own debugging/readiness HTTP interface — bound to
+    # loopback only on the host, like every other observability port in
+    # this stack.
+    ports:
+      - "127.0.0.1:12345:12345"
+    # Has a shell but no curl/wget (confirmed via `docker run --entrypoint
+    # sh ... -c "which curl wget"`), so no Docker-level HEALTHCHECK is
+    # defined; readiness is instead verified functionally from the host
+    # via its debug HTTP interface, the same pattern as loki/otel-collector.
+
   prometheus:
     image: prom/prometheus:v3.15.0
     restart: unless-stopped
@@ -287,3 +373,5 @@ volumes:
   prometheus_data:
   grafana_data:
   tempo_data:
+  loki_data:
+  alloy_data:
