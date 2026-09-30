@@ -17,8 +17,7 @@ production-style system.
 ## Status
 
 **Actively under early development.** The project is currently in
-**Phase 2B.2 — Centralized Application Log Collection with Grafana
-Loki + Grafana Alloy**. An OpenTelemetry Collector, Prometheus, and
+**Phase 2B.3 — Grafana Dashboards**. An OpenTelemetry Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
 services are instrumented, each its own idiomatic way: `checkout-service`
 with the OpenTelemetry Java auto-instrumentation agent (Phase 2A.2);
@@ -56,9 +55,22 @@ Observability Infrastructure below). `checkout-service` still
 synchronously orchestrates all three downstream services via
 `POST /checkouts` (Phase 1B.4), with no change to any business logic or
 application instrumentation; none of the four application services
-connect to PostgreSQL. There are still no dashboards or alerts
-(Tempo and Loki are both provisioned as Grafana datasources, but no
-dashboards use them yet), and no AI functionality.
+connect to PostgreSQL. As of Phase 2B.3, Grafana is no longer just
+three connected-but-unused datasources: **three dashboards are
+auto-provisioned on startup** — Application Health (per-service HTTP
+throughput/latency/error-rate from real Prometheus metrics, plus
+checkout-service's downstream dependency traffic and latency),
+Centralized Logging (real Loki log streams and log-line-rate-by-service,
+no fabricated severity filter — see below), and Observability
+Infrastructure (Prometheus scrape-target availability and the OTel
+Collector's own ingestion/export/process health). Every query on every
+panel was verified against real telemetry from a running stack before
+being added, and a dedicated validator
+(`scripts/verify-grafana-dashboards.py`) independently re-executes
+every panel's own query directly against Prometheus/Loki, with
+dashboard/interval variables substituted for real values. There is
+still no alerting (Grafana has no alert rules, and Prometheus has no
+Alertmanager), and no AI functionality.
 
 ## Problem this project will eventually solve
 
@@ -81,19 +93,20 @@ The following components are **planned** and do not exist yet:
 - A LangGraph-based agent runtime for investigation and hypothesis formation
 - A Go infrastructure tool gateway for safely executing remediation actions
 - Demo commerce microservices as a realistic monitored target
-- Application-level observability: dashboards and alerts (the OTel
-  Collector / Prometheus / Grafana infrastructure exists, all four
-  application services export metrics and traces to it, one real
-  `POST /checkouts` request produces a complete, verified distributed
-  trace across checkout-service and all three of its downstream
-  branches — payment, inventory, notification, as siblings, not a
-  sequential chain — that trace is retrievable from a persistent trace
-  backend, Grafana Tempo (Phase 2B.1), and, as of Phase 2B.2, the four
-  services' existing stdout/stderr logs are centrally collected and
-  persisted via Grafana Alloy + Grafana Loki — see
+- Alerting (the OTel Collector / Prometheus / Grafana infrastructure
+  exists, all four application services export metrics and traces to
+  it, one real `POST /checkouts` request produces a complete, verified
+  distributed trace across checkout-service and all three of its
+  downstream branches — payment, inventory, notification, as siblings,
+  not a sequential chain — that trace is retrievable from a persistent
+  trace backend, Grafana Tempo (Phase 2B.1), the four services'
+  existing stdout/stderr logs are centrally collected and persisted via
+  Grafana Alloy + Grafana Loki (Phase 2B.2), and, as of Phase 2B.3,
+  three dashboards built from real, verified queries are
+  auto-provisioned in Grafana — see
   [Observability Infrastructure](#observability-infrastructure) below —
-  but there are still no dashboards or alerts, and logs are not yet
-  correlated with traces)
+  but there is still no alerting, and logs are not yet correlated with
+  traces)
 - Kafka or Redpanda for event streaming
 - Kubernetes as the deployment target, provisioned via Terraform on AWS
 
@@ -134,8 +147,9 @@ repository — and returns a combined result. None of the four
 application services connect to PostgreSQL yet.
 
 An observability stack — an OpenTelemetry Collector, Prometheus,
-Grafana, (Phase 2B.1) Grafana Tempo, and (Phase 2B.2) Grafana Loki +
-Grafana Alloy — also runs via Docker Compose (see
+Grafana (with three auto-provisioned dashboards as of Phase 2B.3),
+(Phase 2B.1) Grafana Tempo, and (Phase 2B.2) Grafana Loki + Grafana
+Alloy — also runs via Docker Compose (see
 [Observability Infrastructure](#observability-infrastructure) below).
 `checkout-service` is instrumented with the OpenTelemetry Java
 auto-instrumentation agent (pinned `v2.31.1`) and exports HTTP server
@@ -180,9 +194,11 @@ and `notification-service` log per request. None of the four
 services' current log output contains a trace or span ID, so logs and
 traces are not yet correlated — see
 [Observability Infrastructure](#observability-infrastructure) below
-for details. There are still no dashboards or alerts (Tempo and Loki
-are both provisioned Grafana datasources, but no dashboards reference
-them yet). No AI integration has been added yet.
+for details. As of Phase 2B.3, Grafana auto-provisions three
+dashboards (Application Health, Centralized Logging, Observability
+Infrastructure) built entirely from metrics/logs confirmed to exist
+against a real running stack. There is still no alerting. No AI
+integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -763,10 +779,12 @@ now persisted in and independently re-verified from Tempo's own HTTP query API:
   (`observability/grafana/provisioning/datasources/datasource.yml`,
   resolving `http://prometheus:9090`/`http://tempo:3200`/
   `http://loki:3100` by Compose service name) so no manual click-through
-  setup is needed after `docker compose up`. No dashboards are
-  provisioned yet beyond what's needed to prove Grafana can query all
-  three. Anonymous auth is disabled; the admin password is a
-  local-only placeholder from `.env.example`, never a real credential.
+  setup is needed after `docker compose up`. As of Phase 2B.3, three
+  dashboards (`observability/grafana/provisioning/dashboards/json/`)
+  are also auto-provisioned — see
+  [grafana dashboards (Phase 2B.3)](#grafana-dashboards-phase-2b3)
+  below. Anonymous auth is disabled; the admin password is a local-only
+  placeholder from `.env.example`, never a real credential.
 
 All host ports above (`4317`/`4318`/`13133` for otel-collector, `9090`
 for prometheus, `3200` for tempo, `3100` for loki, `12345` for alloy,
@@ -910,6 +928,126 @@ workflow ever moves to a shared, persistent, or self-hosted runner, or
 switches to `pull_request_target`, this reasoning no longer holds and
 would need to be revisited.
 
+### grafana dashboards (Phase 2B.3)
+
+Three dashboards are auto-provisioned on Grafana startup via
+`observability/grafana/provisioning/dashboards/dashboards.yml` (a file
+provider pointed at
+`observability/grafana/provisioning/dashboards/json/`) — a second,
+separate mount alongside the existing `datasources/` mount in
+`docker-compose.yml`'s `grafana` service, added without touching or
+shadowing it. Every metric/label/query below was confirmed against a
+real running stack (real checkout traffic, real Loki log streams)
+*before* being written into a dashboard — none are assumed from
+documentation.
+
+- **Application Health** (`application-health`, Prometheus): request
+  throughput (`sum by (service_name) (rate(http_server_request_duration_seconds_count{job="otel-collector-app-metrics"}[$__rate_interval]))`),
+  p50/p95 latency via `histogram_quantile` over
+  `http_server_request_duration_seconds_bucket` (all four services
+  confirmed to share identical OTel SDK default histogram boundaries —
+  5ms to 10s — so p95 is directly comparable across services), HTTP
+  error rate split into 4xx/5xx using the real `http_response_status_code`
+  label (confirmed populated with a genuine `400` from an invalid
+  checkout request during verification), and checkout-service's
+  downstream dependency traffic/latency via
+  `http_client_request_duration_seconds_*{service_name="checkout-service"}`
+  (scoped specifically to `checkout-service` so notification-service's
+  own unrelated outbound OTLP-export HTTP calls, which are also
+  auto-instrumented, don't pollute the panel). A `service` template
+  variable (`label_values(http_server_request_duration_seconds_count{job="otel-collector-app-metrics"}, service_name)`)
+  filters every panel to one, several, or all four services. Absence of
+  traffic renders as a gap (PromQL's `0/0 = NaN` for the error-rate
+  ratio, no series at all for throughput/latency), never a fabricated
+  zero.
+- **Centralized Logging** (`centralized-logging`, Loki): a log-line-rate
+  panel (`sum by (service) (rate({service=~"$log_service"}[$__interval]))`
+  — LogQL's `rate()`, entries/sec, not `count_over_time()`'s raw count
+  per window, which was the original implementation and was corrected
+  after review since a raw count is not a rate and isn't comparable
+  across different zoom levels) and a raw log-stream panel
+  (`{service=~"$log_service"}`), both behind a `log_service` variable.
+  Deliberately **no severity/level filter**:
+  Loki's own automatic `detected_level` heuristic was checked against
+  real log output from all four services and found unreliable —
+  checkout-service (Spring Boot `INFO `/`WARN ` prefixes) and
+  payment-service (Uvicorn `INFO:` prefix) are classified correctly,
+  but inventory-service (plain Go output, no level prefix) and
+  notification-service (pino JSON with a numeric `level` field) both
+  came back `"unknown"`. Building a severity filter on top of that
+  would silently misrepresent half the services, so it was not added —
+  an investigated-and-rejected feature, not an oversight. The dashboard
+  description also restates the pre-existing limitations directly (not
+  hidden): checkout-service/inventory-service only log at startup, and
+  no log line in any of the four services contains a trace or span ID,
+  so **this dashboard does not claim or imply log/trace correlation**.
+- **Observability Infrastructure** (`observability-infrastructure`,
+  Prometheus): scrape-target availability (`up{job=~"prometheus|otel-collector|otel-collector-app-metrics"}`,
+  the only three scrape jobs Prometheus is configured with), Collector
+  telemetry ingestion (`otelcol_receiver_accepted_spans`/
+  `_accepted_metric_points`/`_refused_spans`/`_refused_metric_points` by
+  receiver — refused *metric points* are a genuinely separate query
+  from refused spans, added after review found the original
+  implementation only queried refused spans while its description
+  claimed both), Collector
+  export health (`otelcol_exporter_sent_spans` by exporter — `debug`
+  and `otlp_grpc/tempo` — and `otelcol_exporter_queue_size`), and
+  Collector process health (`otelcol_process_uptime`,
+  `otelcol_process_memory_rss`). This is the Collector's own internal
+  self-telemetry (`job="otel-collector"`, scraped from its own `:8888`
+  endpoint), not the application services' business metrics.
+
+**Datasource references use plain names, not UIDs — a deliberate
+correction made during implementation, not the original design:** an
+earlier version of `datasource.yml` pinned an explicit `uid:` on each
+datasource so dashboard JSON could reference stable UIDs. This broke
+Grafana startup outright on this very machine's own `grafana_data`
+volume (already containing Prometheus/Tempo/Loki datasources
+auto-provisioned under earlier, auto-generated UIDs from Phase 2B.1/
+2B.2): Grafana 13.0.2 fails with `"Datasource provisioning error: data
+source not found"` rather than reconciling a name-matched datasource's
+UID change, and refuses to start at all. Since this repository's
+`grafana_data` volume is meant to survive upgrades across phases (see
+the volume-persistence checks in `scripts/verify-observability.sh`),
+pinning a `uid` here would break Grafana for anyone who already ran an
+earlier phase before pulling this one. `datasource.yml` therefore has
+no explicit `uid:` fields, and every dashboard panel/target references
+its datasource by name (`"Prometheus"` / `"Loki"`) instead, which
+Grafana resolves identically regardless of the datasource's actual
+underlying UID — confirmed working against both a fresh and an
+already-populated `grafana_data` volume.
+
+**Verification** (`scripts/verify-grafana-dashboards.py`, stdlib-only,
+the same script both the local verifier and CI run): confirms Grafana
+itself is healthy; that all three dashboards exist, are
+`meta.provisioned` (not UI-created), have exactly their expected
+panels; that every panel's and every target's datasource reference
+resolves to the dashboard's expected datasource *and* that that
+datasource is really provisioned in Grafana with the expected type
+(cross-checked against `GET /api/datasources`); that expected template
+variables exist, reference the right datasource, and have a nonempty
+query definition; that panel query text references the metric/label
+substrings this script independently confirmed are real; and then, for
+**every panel** (not a separately maintained sample list, which risks
+silently drifting from what the dashboards actually ship — an earlier
+version of this script worked that way and was corrected), requires
+every target to have a nonempty expression and the right datasource,
+substitutes each dashboard's own template variables (using their real
+`allValue`, e.g. `$service` → `.*`) and Grafana's built-in interval
+variables (`$__rate_interval`/`$__interval` → `5m`) for concrete
+values, and **re-executes that exact substituted expression** directly
+against Prometheus's or Loki's own HTTP API — bypassing Grafana's query
+proxy entirely. A query is recognized as legitimately allowed to be
+empty (5xx error rate, refused-telemetry counters) by inspecting its
+own expression text for a `"5.."` status-code match or a `refused`
+metric name, not a hand-maintained list; every other target — and every
+panel as a whole, unless every one of its targets is of the
+legitimately-empty kind — is required to return real, nonempty data.
+This script cannot and does not verify that a panel visually renders
+correctly in a browser — only that Grafana served the expected
+provisioned structure and that its actual queries are valid and return
+real data.
+
 ### checkout-service instrumentation (Phase 2A.2)
 
 `checkout-service` is instrumented using the **OpenTelemetry Java
@@ -953,8 +1091,8 @@ make db-down
 ```
 
 **Bundled verification:** `make verify-observability` (or
-`scripts/verify-observability.sh`) runs the full Phase 2A.1-2B.2
-verification path in one deterministic script (sections A-O) — starts
+`scripts/verify-observability.sh`) runs the full Phase 2A.1-2B.3
+verification path in one deterministic script (sections A-P) — starts
 Compose, waits for every service's health (with the `otel-collector`
 exception above; `tempo` has a real healthcheck and is included in the
 normal wait loop; `loki`/`alloy` have neither and are checked
@@ -983,19 +1121,27 @@ services via `scripts/verify-loki-logs.py` (the same validator CI uses
 already-ingested log line survives a graceful `docker compose restart
 loki` using the same persistent volume, with `alloy` stopped throughout
 so it cannot resend it, then confirms `alloy` and normal log collection
-both resume once restarted. All of this uses bounded retries (metric/
+both resume once restarted. As of Phase 2B.3, it also verifies all
+three auto-provisioned Grafana dashboards via
+`scripts/verify-grafana-dashboards.py` (the same validator CI uses —
+no duplicated validation logic): correct panels, correct datasource
+references, valid template variables, and every panel's own PromQL/
+LogQL (variables substituted with real values) re-executed directly
+against Prometheus and Loki with real data. All of this uses bounded
+retries (metric/
 trace/log export, Tempo's/Loki's own ingest-to-query paths, and
 post-restart readiness are all asynchronous) and stays safe under
 `set -euo pipefail`. The script then always tears the environment down
 (without deleting volumes) and confirms every named volume, including
 `tempo_data`, `loki_data`, and `alloy_data`, still exists.
 
-**Not implemented yet:** dashboards beyond the minimal
-datasource-connectivity check; alerting rules; log/trace correlation
-(no service's current log output contains a trace or span ID — see
-[alloy configuration](#alloy-configuration-phase-2b2) above); and any
-consumption of telemetry by an agent. Those are deliberately deferred
-to later phases.
+**Not implemented yet:** alerting rules (neither Grafana alert rules
+nor Prometheus Alertmanager); log/trace correlation (no service's
+current log output contains a trace or span ID — see
+[alloy configuration](#alloy-configuration-phase-2b2) above); dashboard
+panels beyond what Phase 2B.3 built (e.g. no Tempo/traces panel yet);
+and any consumption of telemetry by an agent. Those are deliberately
+deferred to later phases.
 
 ## Continuous Integration
 
@@ -1048,7 +1194,11 @@ are all asynchronous) — then always tears the environment down
 (without deleting volumes). The more expensive Loki restart-persistence
 test (see the bundled local verifier above) remains local-only; CI
 independently proves all four services' logs are queryable, which is
-sufficient given the restart test's cost.
+sufficient given the restart test's cost. As of Phase 2B.3, CI also
+runs `scripts/verify-grafana-dashboards.py` (the identical script the
+local verifier uses) after the checkout/metrics/log steps above, since
+several of its representative queries need that real traffic and log
+ingestion to already have happened.
 
 The repository has a GitHub remote
 (`abheesh-03/autonomous-reliability-platform`). The workflow version
@@ -1073,16 +1223,20 @@ Phase 2A.5 extended the same two steps once more with
 `notification-service`'s checks and was committed (`7e348a2`); that
 version also ran successfully on GitHub Actions (run #16), working tree
 clean afterward. Phase 2B.1 adds Tempo readiness, the Tempo datasource
-check, and a new trace-retrieval-from-Tempo step (see above). Phase
-2B.2 further adds Loki/Alloy readiness, the Loki datasource check, and
-the real-logs-from-all-four-services step (see above), reusing
-`scripts/verify-loki-logs.py`. Both phases' workflow versions have been
-locally validated end-to-end by reproducing the workflow's steps
-against the real Compose network (via `make verify-observability`,
-which covers equivalent — and, for Phase 2B.2, additional — ground),
-but neither the Phase 2B.1 nor the Phase 2B.2 version of the workflow
-has **run on GitHub Actions yet** — that will only be true once each
-runs there after a push.
+check, and a new trace-retrieval-from-Tempo step (see above); that
+version was committed (`d14a1cb`) and ran successfully on GitHub
+Actions (run `36724605466`). Phase 2B.2 further adds Loki/Alloy
+readiness, the Loki datasource check, and the
+real-logs-from-all-four-services step (see above), reusing
+`scripts/verify-loki-logs.py`; that version was committed (`20170ea`)
+and also ran successfully on GitHub Actions (run `36737863185`). Phase
+2B.3's version of the workflow (adding the Grafana dashboard
+verification step above) has been locally validated end-to-end by
+reproducing the workflow's steps against the real Compose network (via
+`make verify-observability`, which covers equivalent — and,
+additionally, dashboard-verification — ground), but has **not yet run
+on GitHub Actions** — that will only be true once it runs there after a
+push.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -2266,11 +2420,9 @@ problem today.
   locally); log collection and teardown now include `loki`/`alloy`. The
   more expensive Loki restart-persistence test remains local-only, per
   the same reasoning Phase 2B.1 applied to Tempo. Locally reproduced
-  equivalent verification via `make verify-observability` —
-  **not yet verified running on GitHub Actions in this updated form**
-  (Phase 2A.5's version of the workflow did run successfully there, per
-  commit `7e348a2`, CI run #16; Phase 2B.1's has not yet run there
-  either).
+  equivalent verification via `make verify-observability`, then
+  committed (`20170ea`) and confirmed running successfully on GitHub
+  Actions (run `36737863185`).
 - **Limitations, honestly reported, not worked around:** `checkout-service`
   and `inventory-service` currently produce log output only at container
   startup — no per-request access logging exists in either today, so
@@ -2286,3 +2438,127 @@ problem today.
   full daemon access, active in both local dev and CI (including fork
   PRs) — acceptable under the current CI trust model (see above), but
   worth re-evaluating if that model ever changes.
+
+### Phase 2B.3 — Grafana Dashboards
+
+- **Inspected real telemetry before writing any dashboard, not
+  assumed:** started the full stack, fired 15 real `POST /checkouts`
+  requests plus one deliberately invalid one (to get a genuine `400`),
+  then queried Prometheus's `/api/v1/label/__name__/values` and
+  `/api/v1/query` directly. Confirmed the actual metric names in use —
+  `http_server_request_duration_seconds_{bucket,count,sum}`,
+  `http_client_request_duration_seconds_{bucket,count,sum}`,
+  `http_server_active_requests`, `jvm_*`, `go_*`, `otelcol_*` — and
+  their real labels (`service_name`, `http_route`,
+  `http_request_method`, `http_response_status_code`, `server_address`
+  for client calls). **Empirically discovered, not assumed:** the OTel
+  Collector's own self-telemetry additionally exposes a *second*, oddly
+  named set of metrics using raw dotted OTel semantic-convention names
+  (`http.server.request.duration_count`, `rpc.client.call.duration_count`)
+  with no `service_name` label at all — these turned out to be the
+  Collector's own HTTP/gRPC server instrumenting itself
+  (`job="otel-collector"`, `instance="otel-collector:8888"`), unrelated
+  to the four application services, and were correctly excluded from
+  the Application Health dashboard. Confirmed all four services share
+  identical OTel SDK default histogram bucket boundaries (5ms–10s), so
+  `histogram_quantile` p95 is directly comparable across services.
+  Confirmed Loki's real labels (`service`, `compose_project`,
+  `environment`, `service_name`) and, critically, that its automatic
+  `detected_level` heuristic is **not** reliable across all four
+  services (see the Centralized Logging dashboard entry below).
+  Confirmed Tempo's `/api/search` and `/api/search/tags` work with the
+  current config, but no dashboard panel ended up needing them (no
+  traces panel was in scope for this phase).
+- New `observability/grafana/provisioning/dashboards/dashboards.yml` +
+  `observability/grafana/provisioning/dashboards/json/{application-health,centralized-logging,observability-infrastructure}.json`:
+  three dashboards, detailed in
+  [grafana dashboards (Phase 2B.3)](#grafana-dashboards-phase-2b3)
+  above. `docker-compose.yml`'s `grafana` service gained a second,
+  separate read-only mount for
+  `observability/grafana/provisioning/dashboards`, added without
+  touching or shadowing the existing `datasources` mount or any other
+  Grafana provisioning subdirectory.
+- **Real bug hit and fixed during implementation, not just noted:** the
+  first version of `datasource.yml` pinned explicit `uid:` values so
+  dashboards could reference stable datasource UIDs. This broke
+  Grafana's own startup (`Datasource provisioning error: data source
+  not found`, hard failure, container never becomes healthy) against
+  this machine's existing `grafana_data` volume, which already had
+  Prometheus/Tempo/Loki provisioned under earlier, auto-generated UIDs
+  from Phase 2B.1/2B.2 — reproduced and confirmed via real container
+  logs. Reverted the `uid:` pins and switched every dashboard panel/
+  target to reference datasources by name (`"Prometheus"`/`"Loki"`)
+  instead, then re-verified Grafana starts cleanly against the same
+  already-populated volume and that all three dashboards still resolve
+  their queries correctly.
+- New `scripts/verify-grafana-dashboards.py`: stdlib-only, checks
+  Grafana health, that all three dashboards exist and are
+  `meta.provisioned` (not UI-created) with exactly their expected
+  panels, that every panel's/target's datasource reference resolves to
+  the expected datasource *and* that that datasource is really
+  provisioned with the expected type (cross-checked against
+  `GET /api/datasources`, not just trusted from the dashboard JSON),
+  that expected template variables exist, reference the right
+  datasource, and have a nonempty query definition, and that panel
+  query text references metric/label substrings independently confirmed
+  to be real. It then, for **every panel's own targets** (substituting
+  each dashboard's real template-variable `allValue` and Grafana's
+  built-in interval variables for concrete values), **re-executes those
+  exact expressions directly against Prometheus's and Loki's own HTTP
+  APIs**, bypassing Grafana's query proxy entirely — requiring real
+  (nonempty) data for every target except ones its own expression text
+  identifies as legitimately allowed to be empty (a `"5.."` status-code
+  match or a `refused` metric name), and requiring each panel as a whole
+  to have at least one such real result unless every one of its targets
+  is of that legitimately-empty kind. Explicitly does not and cannot
+  verify visual rendering in a browser. The same script is used by both
+  the local verifier and CI — no duplicated validation logic.
+- **Post-review corrections (same phase, before commit):** the
+  Centralized Logging panel's title/description claimed "log lines/sec"
+  while its query used `count_over_time()` (a raw count per window, not
+  a rate) — corrected by switching the query itself to LogQL's `rate()`
+  (verified empirically to return real fractional entries/sec values,
+  not the earlier integer-like counts) and renaming the panel to "Log
+  Line Rate by Service". The Observability Infrastructure ingestion
+  panel's description claimed both refused spans *and* refused metric
+  points were monitored, but only `otelcol_receiver_refused_spans` was
+  actually queried — corrected by adding the missing
+  `otelcol_receiver_refused_metric_points` query (confirmed to be a
+  real, queryable metric) rather than narrowing the claim. The
+  validator itself was then strengthened to catch this exact class of
+  problem going forward: it now executes every panel's actual queries
+  (see above) instead of a separately maintained "representative"
+  query list, so a future description/query or query-list/panel
+  mismatch would fail the check rather than go unnoticed.
+- `scripts/verify-observability.sh` extended (not replaced), sections
+  A–P: dashboard config files added to the static-file check; new
+  section N runs `scripts/verify-grafana-dashboards.py` (bounded
+  retries) after all telemetry-generating sections (checkout traffic,
+  metrics, traces, logs) so its representative queries have real data
+  to find. Every prior Phase 2A.1-2B.2 assertion is unchanged. The full
+  `make verify-observability` run passed end-to-end from a fully
+  torn-down state (sections A–P, zero failures), including every new
+  dashboard check.
+- `.github/workflows/ci.yml` extended, not duplicated: a new "Verify
+  Grafana dashboards" step reuses `scripts/verify-grafana-dashboards.py`
+  (the identical script used locally), placed after the existing
+  checkout/metrics/trace/log steps so its queries have real data
+  available, and before "Show service logs". Locally reproduced
+  equivalent verification via `make verify-observability` — not yet
+  verified running on GitHub Actions in this updated form.
+- **Limitations, honestly reported, not worked around:** no severity/
+  level filter on the Centralized Logging dashboard — Loki's
+  `detected_level` heuristic was checked against real log output and
+  found unreliable for inventory-service and notification-service (see
+  above), so building one would have silently misrepresented half the
+  services; this was investigated and deliberately rejected, not
+  overlooked. No log/trace correlation — no service's current log
+  output contains a trace or span ID, and this phase did not change any
+  application logging code to add it. No alerting of any kind (no
+  Grafana alert rules, no Prometheus Alertmanager) — explicitly out of
+  scope for this phase, per its own instructions. No dedicated Tempo/
+  traces dashboard panel — not part of this phase's explicit panel
+  list, and adding one was judged unnecessary scope. `checkout-service`
+  and `inventory-service` still only log at container startup, so their
+  log-line-rate panel behavior (a brief spike, then nothing) is expected
+  and correct, not a collection gap.

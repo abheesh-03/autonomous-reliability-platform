@@ -1,0 +1,19 @@
+# Auto-provisions the dashboard JSON files under json/ (Phase 2B.3), so
+# no manual "import dashboard" click-through is needed after
+# `docker compose up` — mirrors how datasources/datasource.yml already
+# auto-provisions Prometheus/Tempo/Loki. This directory is mounted
+# separately from datasources/ (see docker-compose.yml's grafana
+# service) so it does not disturb that existing mount.
+apiVersion: 1
+
+providers:
+  - name: autonomous-reliability-platform
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards/json
+      foldersFromFilesStructure: false

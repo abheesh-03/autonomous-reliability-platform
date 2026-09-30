@@ -7,16 +7,18 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 2B.2, the repository contains foundational scaffolding, a
+As of Phase 2B.3, the repository contains foundational scaffolding, a
 running infrastructure dependency, four application services with the
 **first real service-to-service workflow**, and an
 **observability infrastructure stack instrumented for all four
 services, with a complete, verified distributed trace across the whole
 checkout workflow — persisted in and independently re-verified from a
-real trace backend, Grafana Tempo (Phase 2B.1) — and, as of Phase 2B.2,
-each service's existing stdout/stderr logs centrally collected and
-persisted via Grafana Alloy + Grafana Loki**. Conceptually, the current
-demo application shape is:
+real trace backend, Grafana Tempo (Phase 2B.1) — each service's
+existing stdout/stderr logs centrally collected and persisted via
+Grafana Alloy + Grafana Loki (Phase 2B.2), and, as of Phase 2B.3, three
+Grafana dashboards auto-provisioned from real, individually-verified
+queries against that telemetry**. Conceptually, the current demo
+application shape is:
 
 ```
 Client
@@ -310,7 +312,9 @@ Full inventory:
   services; as of Phase 2B.1, traces are also persisted in and queryable
   from Tempo, not just visible in Collector logs; as of Phase 2B.2, each
   service's existing stdout/stderr logs are also centrally collected and
-  persisted in Loki, via a completely separate path from the Collector.
+  persisted in Loki, via a completely separate path from the Collector;
+  as of Phase 2B.3, Grafana also auto-provisions three dashboards built
+  from queries independently verified against this real telemetry.
 
   **Implemented:**
   - `otel-collector` (`otel/opentelemetry-collector-contrib:0.161.0`):
@@ -380,11 +384,49 @@ Full inventory:
     `observability/grafana/provisioning/datasources/datasource.yml`
     (resolving `http://prometheus:9090`/`http://tempo:3200`/
     `http://loki:3100` by Compose service name, not `localhost`) — no
-    manual click-through setup needed after `docker compose up`.
+    manual click-through setup needed after `docker compose up`. As of
+    Phase 2B.3, three dashboards are also auto-provisioned via a
+    second, separate mount for
+    `observability/grafana/provisioning/dashboards` (Application
+    Health, Centralized Logging, Observability Infrastructure — see
+    below). Datasources are referenced by name in dashboard JSON
+    (`"Prometheus"`/`"Loki"`), not by UID: an explicit `uid:` in
+    `datasource.yml` was tried and reverted after it broke Grafana
+    startup against an already-populated `grafana_data` volume from an
+    earlier phase (`Datasource provisioning error: data source not
+    found`) — reproduced and confirmed empirically, not assumed.
     Persistent named volume (`grafana_data`). Anonymous auth disabled;
     admin credentials come from `.env`
     (`GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`), local-only
     placeholders, never a real credential.
+  - **Dashboards** (Phase 2B.3,
+    `observability/grafana/provisioning/dashboards/json/`): three
+    provisioned dashboards, all built from metrics/labels/queries
+    confirmed against a real running stack before being written —
+    **Application Health** (Prometheus: per-service HTTP throughput,
+    p50/p95 latency via `histogram_quantile` over
+    `http_server_request_duration_seconds_bucket`, 4xx/5xx error rate
+    via the real `http_response_status_code` label, and
+    checkout-service's downstream dependency traffic/latency via
+    `http_client_request_duration_seconds_*`, behind a `service`
+    template variable); **Centralized Logging** (Loki: a log-line-rate
+    panel using LogQL's `rate()` — not `count_over_time()`, which
+    returns a raw count per window rather than a rate, and was corrected
+    after review — and a raw log-stream panel, behind a `log_service`
+    variable — deliberately no severity filter, since Loki's
+    `detected_level` heuristic was confirmed unreliable for
+    inventory-service and notification-service); **Observability
+    Infrastructure** (Prometheus: scrape-target `up`, and the OTel
+    Collector's own self-telemetry — `otelcol_receiver_accepted_spans`/
+    `_accepted_metric_points`/`_refused_spans`/`_refused_metric_points`,
+    `otelcol_exporter_sent_spans`/`_queue_size`, `otelcol_process_uptime`).
+    Verified through Grafana's real API by
+    `scripts/verify-grafana-dashboards.py`, which also independently
+    re-executes every panel's own PromQL/LogQL (with dashboard/interval
+    variables substituted for real values) directly against
+    Prometheus/Loki (not just checking the dashboard JSON exists, and
+    not a separately maintained query list that could drift from what
+    the dashboards actually ship).
 
   All host-published ports (`otel-collector`'s `4317`/`4318`/`13133`,
   `prometheus`'s `9090`, `tempo`'s `3200`, `loki`'s `3100`, `alloy`'s
@@ -394,8 +436,10 @@ Full inventory:
   PostgreSQL, which remain published on all interfaces.
 
   **Not implemented:**
-  - Dashboards beyond the minimal datasource-connectivity path, or any
-    alerting rules
+  - Alerting of any kind (no Grafana alert rules, no Prometheus
+    Alertmanager)
+  - A dedicated Tempo/traces dashboard panel (not part of Phase 2B.3's
+    explicit panel list)
   - Any consumption of telemetry by an agent
   - Log/trace correlation: none of the four application services'
     current log output contains a trace or span ID (investigated
@@ -432,7 +476,10 @@ Full inventory:
   resent it. `checkout-service` and `inventory-service` currently only
   log at container startup; none of the four services' current log
   output contains a trace or span ID, so logs and traces are not
-  correlated yet.
+  correlated yet. As of Phase 2B.3, three Grafana dashboards are
+  auto-provisioned from queries independently verified against this
+  same real telemetry (see the Dashboards entry above); Grafana is no
+  longer just three connected-but-unused datasources.
 
 There are no other application services, no message brokers, no
 orchestration, no cloud infrastructure, and no AI provider integration.
@@ -489,10 +536,11 @@ repository. Payment, inventory, and notification never call each other
 or call back into checkout-service.
 
 ### Observability
-**CURRENT:** An OpenTelemetry Collector, Prometheus, Grafana, (as of
-Phase 2B.1) Grafana Tempo, and (as of Phase 2B.2) Grafana Loki +
-Grafana Alloy all run via Docker Compose (see Current Implementation
-above). All four application services are instrumented,
+**CURRENT:** An OpenTelemetry Collector, Prometheus, Grafana (with
+three auto-provisioned dashboards as of Phase 2B.3), (as of Phase 2B.1)
+Grafana Tempo, and (as of Phase 2B.2) Grafana Loki + Grafana Alloy all
+run via Docker Compose (see Current Implementation above). All four
+application services are instrumented,
 each its own idiomatic way: `checkout-service` with the OpenTelemetry
 Java auto-instrumentation agent (pinned `v2.31.1`); `payment-service`
 with OpenTelemetry Python zero-code auto-instrumentation (pinned
@@ -533,14 +581,17 @@ restart using the same persistent volume. `checkout-service` and
 `inventory-service` currently only log at container startup — neither
 has per-request access logging yet. Logs and traces are **not**
 correlated: no service's current log output contains a trace or span
-ID. There are still no dashboards or alerting rules (Tempo and Loki are
-both provisioned Grafana datasources, but nothing visualizes them yet);
-none of this telemetry is yet consumed by an agent.
+ID. As of Phase 2B.3, Grafana auto-provisions three dashboards
+(Application Health, Centralized Logging, Observability Infrastructure)
+built entirely from metrics/logs/queries confirmed against real
+telemetry — Tempo and Loki are no longer just connected-but-unused
+datasources, though no dedicated traces panel exists yet. There is
+still no alerting, and none of this telemetry is yet consumed by an
+agent.
 
 **FUTURE (not yet implemented):**
-- Meaningful Grafana dashboards (including trace- and log-based ones,
-  now that Tempo and Loki are both available) and Prometheus alerting
-  rules
+- Alerting (Grafana alert rules and/or Prometheus Alertmanager)
+- A dedicated Tempo/traces dashboard panel
 - Log/trace correlation (emitting trace and span IDs into application
   log output, and querying Loki/Tempo together by that shared ID)
 - Per-request access logging in `checkout-service` and

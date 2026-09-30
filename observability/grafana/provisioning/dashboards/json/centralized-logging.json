@@ -1,0 +1,77 @@
+{
+  "uid": "centralized-logging",
+  "title": "Centralized Logging",
+  "description": "Real application log streams collected by Grafana Alloy from Docker and stored in Grafana Loki (Phase 2B.2) — not synthetic log lines. Known limitation, shown here rather than hidden: checkout-service and inventory-service currently only log at container startup (no per-request access logging exists in either yet), while payment-service and notification-service log per request. There is no severity filter on this dashboard: Loki's automatic detected_level heuristic only reliably classifies checkout-service (Spring Boot \"INFO \"/\"WARN \" prefixes) and payment-service (Uvicorn \"INFO:\" prefix) — it reports \"unknown\" for inventory-service (plain Go log output with no level prefix) and notification-service (pino JSON with a numeric level field), confirmed empirically, so a severity filter would silently misrepresent half the services. No log line in any of the four services currently contains a trace ID or span ID, so logs and traces are not correlated here or anywhere else in this platform — that is not invented or implied by this dashboard.",
+  "tags": ["autonomous-reliability-platform", "phase-2b3", "logs"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "log_service",
+        "type": "query",
+        "label": "Service",
+        "datasource": "Loki",
+        "query": "label_values(service)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Log Line Rate by Service",
+      "description": "sum by (service) (rate({service=~\"$log_service\"}[$__interval])) — log lines/sec ingested per service, using LogQL's rate() (entries per second over the window). Not count_over_time(), which returns a raw count per window rather than a rate, and is not directly comparable across different zoom levels/interval widths. checkout-service and inventory-service are expected to show a single brief spike at container start, then nothing — that is correct behavior for this codebase today, not missing data collection.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": "Loki",
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "spanNulls": false, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Loki",
+          "expr": "sum by (service) (rate({service=~\"$log_service\"}[$__interval]))",
+          "legendFormat": "{{service}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "logs",
+      "title": "Application Log Stream",
+      "description": "{service=~\"$log_service\"} — real, raw log lines exactly as emitted by each service's own stdout/stderr and shipped by Alloy, with Loki's original ingestion timestamp. No reformatting, no injected fields.",
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 8 },
+      "datasource": "Loki",
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": "Loki",
+          "expr": "{service=~\"$log_service\"}"
+        }
+      ]
+    }
+  ]
+}

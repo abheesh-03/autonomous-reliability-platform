@@ -2,9 +2,22 @@
 # as Grafana datasources, so no manual click-through setup is needed
 # after `docker compose up`. All three resolve via their Compose
 # service names (not localhost), since this runs inside the Grafana
-# container. Prometheus remains the default; Tempo and Loki are not (no
-# dashboards are provisioned yet, so there is no dependency on which
-# one is default).
+# container. Prometheus remains the default.
+#
+# No explicit `uid:` here (Phase 2B.3 tried this and reverted it):
+# setting one conflicts with a datasource of the same name already
+# provisioned under an earlier, auto-generated uid in an existing
+# grafana_data volume — confirmed empirically, Grafana 13.0.2 fails to
+# start with "Datasource provisioning error: data source not found"
+# rather than reconciling the uid change. Since this repo's
+# grafana_data volume is meant to survive upgrades across phases (see
+# scripts/verify-observability.sh's volume-persistence checks), pinning
+# a uid here would break that for anyone who already ran an earlier
+# phase. Provisioned dashboards
+# (observability/grafana/provisioning/dashboards/json/*.json)
+# reference these datasources by name instead (e.g. "Prometheus"),
+# which Grafana resolves the same way regardless of the datasource's
+# actual underlying uid.
 apiVersion: 1
 
 datasources:

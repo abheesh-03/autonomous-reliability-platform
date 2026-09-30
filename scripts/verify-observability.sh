@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# verify-observability.sh — Bundled Phase 2A.1-2B.2 verification.
+# verify-observability.sh — Bundled Phase 2A.1-2B.3 verification.
 #
 # Starts the full Docker Compose environment, waits for every
 # application and observability service to become healthy (with a
@@ -26,9 +26,16 @@
 # Loki's own query API (scripts/verify-loki-logs.py, the same validator
 # CI uses), and that an already-ingested log entry survives a graceful
 # Loki restart using the same loki_data volume while Alloy is stopped
-# (ruling out "Alloy just resent it") — then always tears the
-# environment down (without deleting volumes) and confirms every named
-# volume, including tempo_data/loki_data/alloy_data, still exists.
+# (ruling out "Alloy just resent it"). Phase 2B.3 then verifies the
+# three auto-provisioned Grafana dashboards (Application Health,
+# Centralized Logging, Observability Infrastructure) through Grafana's
+# real API — correct panels, datasource references, template
+# variables — and independently re-executes a curated set of the
+# dashboards' own PromQL/LogQL queries directly against Prometheus and
+# Loki (scripts/verify-grafana-dashboards.py, the same validator CI
+# uses) — then always tears the environment down (without deleting
+# volumes) and confirms every named volume, including
+# tempo_data/loki_data/alloy_data, still exists.
 #
 # Exits non-zero immediately on the first failed check.
 
@@ -73,7 +80,12 @@ for f in \
   observability/grafana/provisioning/datasources/datasource.yml \
   observability/loki/loki.yaml \
   observability/alloy/config.alloy \
-  scripts/verify-loki-logs.py
+  scripts/verify-loki-logs.py \
+  observability/grafana/provisioning/dashboards/dashboards.yml \
+  observability/grafana/provisioning/dashboards/json/application-health.json \
+  observability/grafana/provisioning/dashboards/json/centralized-logging.json \
+  observability/grafana/provisioning/dashboards/json/observability-infrastructure.json \
+  scripts/verify-grafana-dashboards.py
 do
   [ -f "$f" ] || fail "missing required config file: $f"
   echo "  found: $f"
@@ -622,9 +634,47 @@ done
 echo "  log collection resumed after Alloy restart (fresh payment-service and notification-service logs, newer than the pre-request timestamp, confirmed in Loki)"
 
 # --------------------------------------------------------------------
-# N. Container/log sanity
+# N. Observability: Grafana dashboards (Phase 2B.3)
 # --------------------------------------------------------------------
-section "N. Container/log sanity"
+section "N. Observability: Grafana dashboards"
+
+echo "-- verifying the three provisioned dashboards (Application Health,"
+echo "   Centralized Logging, Observability Infrastructure) through"
+echo "   Grafana's real authenticated API: correct panels, correct"
+echo "   datasource references, valid template variables, and that a"
+echo "   curated set of the dashboards' own PromQL/LogQL queries execute"
+echo "   successfully with real data when re-run directly against"
+echo "   Prometheus/Loki (not just that the dashboard JSON exists) --"
+
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+GRAFANA_ADMIN_USER="${GRAFANA_ADMIN_USER:-admin}"
+GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-local_dev_only_change_me}"
+
+dashboards_ok=false
+for i in $(seq 1 20); do
+  if python3 scripts/verify-grafana-dashboards.py \
+       --grafana-url http://127.0.0.1:3000 \
+       --user "$GRAFANA_ADMIN_USER" --password "$GRAFANA_ADMIN_PASSWORD" \
+       --prometheus-url http://127.0.0.1:9090 \
+       --loki-url http://127.0.0.1:3100
+  then
+    dashboards_ok=true
+    break
+  fi
+  echo "  attempt $i/20: Grafana dashboards not yet fully verifiable"
+  sleep 3
+done
+[ "$dashboards_ok" = true ] || fail "scripts/verify-grafana-dashboards.py never confirmed all three provisioned dashboards (structure, datasources, variables, and live underlying queries)"
+
+# --------------------------------------------------------------------
+# O. Container/log sanity
+# --------------------------------------------------------------------
+section "O. Container/log sanity"
 
 docker compose ps
 
@@ -686,9 +736,9 @@ fi
 echo "  no persistent Alloy->Loki log-shipping errors in the most recent logs"
 
 # --------------------------------------------------------------------
-# O. Persistence after cleanup
+# P. Persistence after cleanup
 # --------------------------------------------------------------------
-section "O. Persistence after cleanup"
+section "P. Persistence after cleanup"
 
 echo "-- docker compose down (preserving volumes) --"
 docker compose down
@@ -718,4 +768,4 @@ for logical_vol in postgres_data prometheus_data grafana_data tempo_data loki_da
 done
 
 section "SUCCESS"
-echo "Phase 2A.1-2B.2 observability verification passed."
+echo "Phase 2A.1-2B.3 observability verification passed."
