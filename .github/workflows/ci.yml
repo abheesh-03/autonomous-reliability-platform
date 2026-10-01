@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh
 
       - name: Verify Makefile is usable
         run: make help
@@ -50,6 +50,18 @@ jobs:
 
       - name: Run payment-service tests
         working-directory: services/payment-service
+        run: pytest -v
+
+      # Phase 3B: unit tests only (fake repository, no real database —
+      # see services/control-plane/tests/conftest.py). Reuses the same
+      # Python 3.13 setup as payment-service above, no second
+      # setup-python step needed.
+      - name: Install control-plane dependencies
+        working-directory: services/control-plane
+        run: pip install -e ".[dev]"
+
+      - name: Run control-plane tests
+        working-directory: services/control-plane
         run: pytest -v
 
       - name: Set up Go 1.27
@@ -157,6 +169,24 @@ jobs:
       # own health waits, since it is independent of them.
       - name: Verify persistence (Phase 3A)
         run: ./scripts/verify-persistence.sh
+
+      # Phase 3B: brings up the control-plane container (building its
+      # image if not already built — the same implicit-build-on-`up`
+      # pattern already used for the four demo services below, no
+      # separate `docker compose build` step), re-applies migrations
+      # idempotently (safe even though Phase 3A's step above already
+      # did), and proves the real FastAPI service against the real
+      # PostgreSQL reliability.incidents table end to end — insert via
+      # SQL, fetch via HTTP, filters, pagination, ordering, 404/422,
+      # read-only (no incidental writes), and recovery after a real
+      # PostgreSQL restart. Reuses the identical shared script used
+      # locally (scripts/verify-control-plane.sh) — no integration
+      # logic duplicated in this workflow. Deliberately placed AFTER
+      # the Phase 3A persistence verifier above (which itself restarts
+      # PostgreSQL) completes, and before the four demo services' own
+      # health waits, since it is independent of them.
+      - name: Verify control plane (Phase 3B)
+        run: ./scripts/verify-control-plane.sh
 
       - name: Wait for checkout-service to become healthy
         run: |
@@ -606,6 +636,7 @@ jobs:
         if: always()
         run: |
           docker compose logs --tail=100 postgres
+          docker compose logs --tail=100 control-plane
           docker compose logs --tail=100 checkout-service
           docker compose logs --tail=100 payment-service
           docker compose logs --tail=100 inventory-service

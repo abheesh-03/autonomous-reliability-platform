@@ -17,9 +17,12 @@ production-style system.
 ## Status
 
 **Actively under early development.** Phase 2 (observability — metrics,
-traces, logs, dashboards, alerting) is **closed**. The project is
-currently in **Phase 3A — Incident Domain Model + PostgreSQL
-Persistence**. An OpenTelemetry Collector, Prometheus, and
+traces, logs, dashboards, alerting) is **closed**. Phase 3A (incident
+domain model + PostgreSQL persistence) is also **closed**. The project
+is currently in **Phase 3B — FastAPI Control Plane** (a read-only HTTP
+API over `reliability.incidents`; see
+[Control Plane](#control-plane-phase-3b) below). An OpenTelemetry
+Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
 services are instrumented, each its own idiomatic way: `checkout-service`
 with the OpenTelemetry Java auto-instrumentation agent (Phase 2A.2);
@@ -83,8 +86,15 @@ restarted the Collector, and confirmed both systems returned to
 deliberately **no outbound notification integration** yet (email,
 Slack, PagerDuty, or any webhook) — Alertmanager's single receiver is
 a no-op local sink, so this phase builds the alert pipeline itself, not
-a notification channel — and no automatic remediation, control plane,
-or AI functionality of any kind.
+a notification channel. As of Phase 3A, PostgreSQL's existing
+`postgres` service also holds a real, durable `reliability.incidents`
+schema (applied via versioned Flyway migrations), with no application
+code reading or writing it yet. As of Phase 3B, there is now a **fifth
+backend application**, a read-only FastAPI control plane
+(`services/control-plane`) exposing `GET /api/v1/incidents` and
+`GET /api/v1/incidents/{id}` over that schema — no incident-creation
+API, no lifecycle mutation, and no authentication exist yet, and no
+automatic remediation or AI functionality of any kind.
 
 ## Problem this project will eventually solve
 
@@ -101,8 +111,17 @@ audit trail of what it observed, what it concluded, and what it did.
 The following components are **planned** and do not exist yet:
 
 - A Next.js operations console for human oversight and approvals
-- A FastAPI control plane coordinating investigation and remediation workflows
-- PostgreSQL for durable state (incidents, decisions, audit trail)
+- A FastAPI control plane coordinating investigation and remediation
+  workflows (as of Phase 3B, a **read-only** version of this exists —
+  `services/control-plane` exposes `GET /api/v1/incidents` and
+  `GET /api/v1/incidents/{id}` over `reliability.incidents` — but
+  ingesting alerts, coordinating investigation, lifecycle mutation, and
+  authentication are all still planned; see
+  [Control Plane](#control-plane-phase-3b) below)
+- PostgreSQL for durable state (incidents, decisions, audit trail —
+  as of Phase 3A, the `reliability.incidents` table exists and is read
+  by the Phase 3B control plane above; decisions/audit-trail tables are
+  still planned)
 - Redis for ephemeral/coordination state
 - A LangGraph-based agent runtime for investigation and hypothesis formation
 - A Go infrastructure tool gateway for safely executing remediation actions
@@ -233,10 +252,24 @@ dedicated
 [docs/architecture/incident-domain-model.md](docs/architecture/incident-domain-model.md)),
 applied through versioned Flyway migrations and independently verified
 against the real database — constraints, deduplication, and restart
-persistence all empirically proven. There is still no code that writes
-to this table yet (no Alertmanager ingestion, no API, no agent) — this
-phase builds only the durable data foundation a future control plane
-will use. No AI integration has been added yet.
+persistence all empirically proven. That phase built only the durable
+data foundation — no application code read or wrote the table yet. As
+of Phase 3B, **Phase 3A is closed** and the first application code to
+read it exists: a read-only FastAPI **control plane**
+(`services/control-plane`, see
+[Control Plane](#control-plane-phase-3b) below and the dedicated
+[docs/api/control-plane.md](docs/api/control-plane.md)), a fifth
+backend application connecting to the existing `postgres` service via
+SQLAlchemy async + `asyncpg`, exposing `GET /api/v1/incidents` (with
+status/severity/source filtering, pagination, and deterministic
+ordering) and `GET /api/v1/incidents/{id}`, plus `GET /health/live`
+and `GET /health/ready`. It stays up and `/health/ready` correctly
+reports `503` even if PostgreSQL or the migration isn't ready yet, and
+recovers on its own — without a manual restart — once they are,
+verified empirically against both a real, unmigrated database and a
+real PostgreSQL restart. There is still no write path of any kind (no
+Alertmanager ingestion, no incident-creation API, no lifecycle
+mutation) and no authentication. No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -332,6 +365,48 @@ data):
 make verify-persistence
 ```
 
+## Control Plane (Phase 3B)
+
+`services/control-plane` is the fifth backend application in this
+repository (a Python 3.13 / FastAPI project, SQLAlchemy 2.x async +
+`asyncpg`) — and the first application code that reads
+`reliability.incidents`. It is **read-only**: there is no
+incident-creation, update, or delete endpoint anywhere in this API.
+Full detail — endpoints, request/response shapes, DB configuration,
+startup/readiness behavior (including how it stays alive and recovers
+on its own when PostgreSQL or the Phase 3A migration isn't ready yet),
+error handling, and security limitations — is in
+[docs/api/control-plane.md](docs/api/control-plane.md); summary here:
+
+- **Endpoints:** `GET /health/live`, `GET /health/ready`,
+  `GET /api/v1/incidents` (status/severity/source filters, pagination,
+  deterministic `last_seen_at DESC, id DESC` ordering), and
+  `GET /api/v1/incidents/{id}`.
+- **Startup ordering:** the `flyway` service is still gated behind
+  `profiles: ["tools"]` (Phase 3A), so a plain `docker compose up -d`
+  does **not** migrate the database automatically. `control-plane`
+  handles this: engine construction never blocks on a reachable
+  database, so the container starts and stays healthy regardless, and
+  `/health/ready` is the one endpoint that accurately reports `503`
+  until both PostgreSQL and `reliability.incidents` are genuinely
+  available — recovering on its own, with no manual restart, once
+  migrations are applied or PostgreSQL comes back. Verified empirically
+  against both a real unmigrated database and a real PostgreSQL
+  restart — see
+  [docs/api/control-plane.md](docs/api/control-plane.md#startup-and-migration-ordering).
+- **Runs via the existing `docker-compose.yml`**, published on
+  `127.0.0.1:8000` only, depends on `postgres` being healthy but not on
+  `flyway`, no new persistent volume.
+- **No authentication** — local development only.
+
+```bash
+make db-up                # starts PostgreSQL *and* control-plane
+make db-migrate            # apply Phase 3A migrations — control-plane serves 503 until this runs
+curl http://localhost:8000/api/v1/incidents
+make control-plane-test    # unit tests (mocked repository/engine), 20/20 passing
+make verify-control-plane  # real integration test against the running, PostgreSQL-backed service
+```
+
 ## Developer Commands
 
 The commands above are also available as `make` targets, for convenience:
@@ -346,6 +421,10 @@ make db-logs         # show recent PostgreSQL logs
 make db-down         # stop PostgreSQL — preserves the data volume
 make db-migrate      # apply versioned database migrations (Flyway; safe to rerun)
 make verify-persistence  # Phase 3A persistence verification (migrations, schema, constraints, restart persistence)
+make control-plane-build   # build the control-plane Docker image
+make control-plane-test    # run control-plane unit tests on Python 3.13 (via Docker)
+make control-plane-logs    # show recent control-plane logs
+make verify-control-plane  # Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)
 make verify-observability  # Phase 2A.1-2B.4 observability verification
 ```
 
@@ -1411,14 +1490,24 @@ its tests pass (Python 3.13 via `actions/setup-python`), that
 `inventory-service` is `gofmt`-clean and passes `go vet`/`go test`/build
 (Go 1.27 via `actions/setup-go`), that `notification-service` installs
 (`npm ci`), typechecks, tests, and builds (Node 24 via `actions/setup-node`),
-that Docker Compose config resolves, that PostgreSQL and all four
-application services start and reach a healthy state (bounded retry
-loops, not assumed), a basic SQL smoke test, and — as of Phase 3A,
-immediately after PostgreSQL becomes healthy — the full persistence
-verification (`scripts/verify-persistence.sh`, the identical script
-used locally: migrations, schema/constraints/indexes, valid-incident
-round-trip, invalid-data rejection, deduplication, rerun safety, and
-restart persistence against the real database), HTTP smoke tests
+that `control-plane`'s dependencies install and its 20 unit tests pass
+(reusing the same Python 3.13 setup as `payment-service`, no second
+`setup-python` step), that Docker Compose config resolves, that
+PostgreSQL and all four application services start and reach a healthy
+state (bounded retry loops, not assumed), a basic SQL smoke test, and —
+as of Phase 3A, immediately after PostgreSQL becomes healthy — the full
+persistence verification (`scripts/verify-persistence.sh`, the
+identical script used locally: migrations, schema/constraints/indexes,
+valid-incident round-trip, invalid-data rejection, deduplication,
+rerun safety, and restart persistence against the real database) and —
+as of Phase 3B, immediately after that, and critically **before**
+`control-plane`'s own readiness is assumed anywhere else in the
+workflow — the full control-plane integration verification
+(`scripts/verify-control-plane.sh`, the identical script used locally:
+real PostgreSQL-backed incident round-trips, filtering, pagination,
+ordering, empty-result/404/422 handling, read-only-ness, and a real
+PostgreSQL restart/recovery proof via the running service's own
+connection pool), HTTP smoke tests
 against all four application services' health endpoints, an end-to-end
 smoke
 test that calls `POST /checkouts` and verifies the real orchestrated
@@ -1469,6 +1558,18 @@ same real `inactive → firing → Alertmanager → resolved → inactive`
 transition and telemetry recovery in CI, placed after every other
 telemetry/dashboard step since it deliberately stops `otel-collector`.
 Alertmanager logs were added to the existing "Show service logs"
+failure-diagnostics step. As of Phase 3B, the workflow also installs
+`control-plane`'s dependencies and runs its unit tests (reusing the
+Python 3.13 setup already in place for `payment-service`), and runs
+`scripts/verify-control-plane.sh` — the identical script the local
+verifier uses, no duplicated logic in the workflow YAML — placed
+immediately after the Phase 3A persistence-verification step and
+before the Phase 1/2 service health waits, since control-plane
+integration verification itself applies the Phase 3A migrations (via
+the same `flyway migrate` mechanism) that `verify-persistence.sh`
+already exercises moments earlier. `scripts/verify-control-plane.sh`
+was also added to the existing shell-syntax-check step, and
+`control-plane` logs were added to the existing "Show service logs"
 failure-diagnostics step.
 
 The repository has a GitHub remote
@@ -1516,6 +1617,15 @@ workflow's steps against the real Compose network (via `make
 verify-observability`, which covers equivalent — and, additionally,
 the full alert lifecycle — ground), but has **not yet run on GitHub
 Actions** — that will only be true once it runs there after a push.
+Phase 3B's version of the workflow (adding the control-plane
+dependency install/test, build-on-`up`, and
+`scripts/verify-control-plane.sh` integration steps above) has been
+locally validated by running `scripts/verify-control-plane.sh` directly
+against the real Compose stack (all 14 sections passed) and by
+separately proving the pre-migration/restart-recovery startup ordering
+against a disposable Compose project (see
+[docs/api/control-plane.md](docs/api/control-plane.md#startup-and-migration-ordering)),
+but has likewise **not yet run on GitHub Actions**.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -3150,3 +3260,188 @@ problem today.
   later migrations. No FastAPI service, AI/LLM agent, LangGraph, RAG,
   frontend, Kafka, Redis, Kubernetes, or Terraform/AWS were added, per
   this phase's explicit scope.
+
+### Phase 3B — FastAPI Control Plane
+
+- New `services/control-plane`: a Python 3.13 / FastAPI project (`src`
+  layout, `pyproject.toml`, no Poetry/Pipenv — matching
+  `payment-service`'s convention), the fifth backend application in
+  this repository, read-only at the HTTP level. **Dependency versions —
+  determined empirically, not assumed:** `pip index versions` run
+  inside a throwaway `python:3.13-slim` container for every package
+  (fastapi, uvicorn, pydantic, sqlalchemy, asyncpg, pytest,
+  pytest-asyncio, httpx) confirmed each pin (`fastapi==0.142.2`,
+  `uvicorn==0.54.0`, `pydantic==2.13.5`, `sqlalchemy[asyncio]==2.1.1`,
+  `asyncpg==0.31.0`; dev: `pytest==9.1.1`, `pytest-asyncio==1.4.0`,
+  `httpx==0.28.1`) was genuinely current, with real, clean dependency
+  resolution (and `pip check`) verified in that same container before
+  committing to them — no second ORM, no second migration tool; Flyway
+  (Phase 3A) remains the only thing that owns the schema.
+- **Database integration:** `core/config.py`'s `DatabaseSettings` reads
+  `POSTGRES_HOST`/`POSTGRES_INTERNAL_PORT`/`POSTGRES_USER`/
+  `POSTGRES_PASSWORD`/`POSTGRES_DB` from individual environment
+  variables (never a pre-built connection string, never a source-code
+  credential); `db/engine.py` hands them to SQLAlchemy's `URL.create()`,
+  which percent-encodes each component — a password containing `@`,
+  `/`, or `#` cannot corrupt the resulting URL the way manual
+  concatenation would. The async engine
+  (`create_async_engine(..., pool_pre_ping=True, pool_size=5,
+  pool_timeout=5s, connect_args={timeout: 5s, command_timeout: 10s})`)
+  is constructed once in FastAPI's `lifespan` and disposed once on
+  shutdown — route handlers never build their own engine or session.
+  The repository layer (`repositories/incident_repository.py`) uses a
+  bare, metadata-free `sa.table()`/`sa.column()` Core expression —
+  deliberately not an ORM-mapped declarative model — so there is no
+  `Table.create()`/`metadata.create_all()` capability anywhere in this
+  codebase; the schema is reflected by hand to match
+  `V1__create_incident_schema.sql` exactly and is never auto-created.
+  Every filter is a real bound parameter, not string interpolation.
+- **Startup/migration ordering — the core design constraint of this
+  phase, and separately, empirically verified, not just asserted by
+  code inspection:** the existing `flyway` Compose service (Phase 3A)
+  stays gated behind `profiles: ["tools"]`, so `reliability.incidents`
+  may not exist when `control-plane` starts. `create_async_engine()`
+  does not open a connection at construction time, so engine
+  construction (during `lifespan` startup) cannot fail for this reason;
+  `GET /health/live` never touches the database; only
+  `GET /health/ready` (`SELECT 1 FROM reliability.incidents LIMIT 1`,
+  any exception → `503`) reflects real readiness. Verified against a
+  **disposable** Compose project (`COMPOSE_PROJECT_NAME=cp-ordering-test`,
+  its own brand-new, unmigrated PostgreSQL volume, deleted afterward via
+  `docker compose -p ... down -v`; the real project's `postgres_data`
+  volume was never touched — same established pattern as Phase 3A's
+  post-review fresh-database test): brought up fresh/unmigrated,
+  confirmed `/health/live`=200 and Docker-reported `healthy` despite the
+  missing table, confirmed `/health/ready`=503; ran
+  `docker compose run --rm flyway migrate` in that same project **with
+  no control-plane restart**, confirmed `/health/ready` transitioned to
+  200 and the container's own uptime stayed continuous throughout;
+  inserted a row via `psql` and confirmed it round-tripped through
+  `GET /api/v1/incidents`; ran `docker compose restart postgres` in that
+  same project, confirmed `/health/ready` transiently 503 then recovered
+  to 200 — again with no control-plane restart — followed by a real,
+  successful `GET /api/v1/incidents/{id}` proving the connection pool
+  itself (not just the probe) had recovered; also confirmed 200/404/422
+  (malformed UUID)/422 (`limit=500`)/422 (`status=bogus`) all behaved
+  correctly against that same fresh instance.
+- **Endpoints** (`api/health.py`, `api/incidents.py`): `GET /health/live`
+  (`{"status": "UP"}`, no DB round-trip); `GET /health/ready`
+  (`{"status": "ready"}`/200 or `{"status": "unavailable"}`/503, the
+  underlying exception logged server-side only, never in the response);
+  `GET /api/v1/incidents` (`status`/`severity`/`source` filters — the
+  first two validated against the exact Phase 3A vocabulary via
+  `Literal.__args__`-derived frozensets, invalid values →422;
+  `limit` 1–100 default 20, `offset` ≥0 default 0, both FastAPI
+  `Query(ge=..., le=...)`-enforced →422 automatically; deterministic
+  `last_seen_at DESC, id DESC` ordering; `total` is a separate `COUNT(*)`
+  over the filtered-but-unpaginated query, not `len(items)`; an empty
+  result is a genuine `{"items": [], "total": 0, ...}`, never
+  fabricated); `GET /api/v1/incidents/{incident_id}` (`uuid.UUID`
+  path-typed, so a malformed value is automatically →422 with no extra
+  code; 404 with `{"detail": "incident not found"}` if no row matches).
+  A single global `@app.exception_handler(SQLAlchemyError)` in
+  `main.py` translates any database failure to a consistent 503
+  (`{"detail": "database temporarily unavailable"}`) across every
+  route, logging the real exception server-side only — confirmed, via a
+  unit test with a secret embedded in the fake exception's message,
+  that the secret never appears in the HTTP response.
+- **Domain model** (`domain/incident.py`): a Pydantic v2 `Incident`
+  model with the exact 12-column Phase 3A field set and the exact
+  `Severity`/`Status` vocabularies — no invented columns, no schema
+  drift from `V1__create_incident_schema.sql`, maintained by hand since
+  that migration file is never modified or reflected from here.
+- **Docker Compose:** new `control-plane` service in `docker-compose.yml`
+  — builds from `services/control-plane/Dockerfile` (Python 3.13-slim,
+  non-root `app` user, no observability extra — this service's own
+  OTel instrumentation is explicitly out of scope for this phase),
+  `depends_on: postgres: condition: service_healthy` but **not**
+  `flyway` (per the startup-ordering design above), published on
+  `127.0.0.1:8000` only, Docker healthcheck against `GET /health/live`
+  (not `/health/ready`, since the schema may legitimately not exist
+  yet), no new persistent volume, no `profiles:` restriction (unlike
+  `flyway`, it **does** start on a plain `docker compose up -d`).
+  Validated via `docker compose config --quiet`. Every existing
+  service, volume, and port left untouched.
+- **Observability compatibility — investigated, no change needed:**
+  `scripts/verify-observability.sh` was checked for any assumption of
+  an exact container count. It has none: its Docker-health wait loop
+  iterates an explicit named-service list that does not (and does not
+  need to) include `control-plane`, and its exited-container scan
+  iterates generically over `docker compose ps -aq`, which now also
+  harmlessly covers `control-plane`. No existing Phase 2A.1–2B.4
+  assertion was weakened or required a narrow fix.
+- New `services/control-plane/tests/` (pytest, 20 tests, all passing):
+  dependency-injected fakes — an in-memory `FakeIncidentRepository`
+  (installed via `app.dependency_overrides[get_incident_repository]`,
+  the explicit DI seam `api/dependencies.py` provides) and fake
+  engine/connection doubles for the health endpoints — covering valid
+  serialization, empty collection, pagination, status/severity/source
+  filtering, deterministic ordering, UUID lookup, 404, malformed UUID
+  (422), three invalid-pagination cases (422), two invalid-filter cases
+  (422), and two explicit 503-with-no-leaked-secret cases. No real
+  database involved — explicitly **not** sufficient for acceptance on
+  their own; see below.
+- New `scripts/verify-control-plane.sh` (bash + `psql` + `curl`,
+  modeled directly on the corrected Phase 3A
+  `scripts/verify-persistence.sh` pattern — run-scoped UUID marker,
+  non-suppressed happy-path cleanup with an exact-count assertion, plus
+  a separate best-effort `EXIT` trap): a 14-section real integration
+  test against the actual running stack — no incident-creation HTTP API
+  is used or introduced; test incidents are inserted directly via
+  `psql`, scoped to a run-unique `source` value
+  (`verify-control-plane-test-<uuid>`). Covers: PostgreSQL health and
+  Phase 3A migration application; control-plane liveness/readiness;
+  inserting 4 real incidents (varied status/severity, one pre-resolved)
+  and fetching one by id with full field/ISO-timestamp verification;
+  status/severity/source filtering; pagination and ordering; an
+  empty-result case; detail lookup of a resolved incident; 404 for a
+  random UUID and 422 for a malformed UUID and five invalid-query cases;
+  a read-only check (`updated_at` compared byte-for-byte before/after a
+  batch of GETs); a real `docker compose restart postgres` followed by
+  bounded-retry readiness recovery and a real post-restart data fetch,
+  with the control-plane container's own continuous uptime printed as
+  evidence it was never restarted; and exact-count-verified cleanup. All
+  14 sections passed on the first real run against the live stack.
+- `Makefile` extended: `control-plane-build` (`docker compose build
+  control-plane`), `control-plane-test` (unit tests via a
+  `python:3.13-slim` container, same convention as `payment-test`),
+  `control-plane-logs`, and `verify-control-plane`
+  (`./scripts/verify-control-plane.sh`) — all added to `.PHONY` and
+  `help`; every existing target unchanged. `make control-plane-test`
+  confirmed 20 passed (one pre-existing, harmless
+  `StarletteDeprecationWarning` already present in `payment-service`'s
+  own test suite — not a new issue).
+- `.github/workflows/ci.yml` extended, not duplicated: new steps
+  install `control-plane`'s dependencies and run its unit tests
+  (reusing the Python 3.13 setup already present for `payment-service`,
+  no second `setup-python`), and a new "Verify control plane (Phase 3B)"
+  step runs the identical `scripts/verify-control-plane.sh` used
+  locally — no lifecycle/test logic duplicated in the YAML — placed
+  immediately after the Phase 3A "Verify persistence" step (which
+  itself applies the migrations control-plane's readiness depends on)
+  and before the Phase 1/2 application-service health waits.
+  `scripts/verify-control-plane.sh` was also added to the existing
+  shell-syntax-check step, and `control-plane` logs were added to the
+  existing "Show service logs" failure-diagnostics step. CI YAML
+  validity reconfirmed via `python3 -c "import yaml; yaml.safe_load(...)"`
+  after all edits. Not yet verified running on GitHub Actions in this
+  updated form.
+- New `docs/api/control-plane.md`: the authoritative, detailed
+  reference for the API — endpoints, request/response shapes, DB
+  configuration, the startup/migration-ordering design and its
+  empirical proof, error handling, architecture notes, Docker/Compose
+  behavior, testing, the integration-verifier's full coverage, security
+  limitations, and what remains for Phase 3C/3D. `README.md` and
+  `docs/architecture/system-overview.md` updated to summarize and link
+  to it (the FastAPI control plane and PostgreSQL "durable state" bullets
+  in "Planned high-level architecture" / "Planned Architecture" updated
+  to reflect partial implementation, not left stale).
+- **Limitations, honestly reported, not worked around:** no
+  incident-creation, update, or delete endpoint of any kind — this
+  phase is read-only, by explicit design; no Alertmanager ingestion
+  (Phase 3C); no lifecycle transition endpoints (Phase 3D); no
+  authentication or authorization — local development only; no rate
+  limiting or TLS; the control plane's own OpenTelemetry instrumentation
+  was explicitly out of scope and was not added; no operations console,
+  agent, LangGraph, RAG, Kafka, Redis, Kubernetes, or Terraform/AWS were
+  added, per this phase's explicit scope.

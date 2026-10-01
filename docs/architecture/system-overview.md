@@ -27,7 +27,12 @@ Phase 3A, **a durable incident data foundation**: PostgreSQL's existing
 and independently verified against the real database — see
 [Incident domain model](#incident-domain-model-phase-3a) below and
 [docs/architecture/incident-domain-model.md](incident-domain-model.md)
-for full detail. Conceptually, the current demo
+for full detail. As of Phase 3B, there is also a **fifth backend
+application**, a read-only FastAPI control plane
+(`services/control-plane`) sitting in front of `reliability.incidents`
+— see [Control plane](#control-plane-phase-3b) below and
+[docs/api/control-plane.md](../api/control-plane.md) for full detail.
+Conceptually, the current demo
 application shape is:
 
 ```
@@ -61,6 +66,11 @@ prometheus --alert rules (rules/alerts.yml)--> alertmanager --> (future control 
    schema in the existing postgres service, applied via versioned
    Flyway migrations. No code exists yet that turns a real Alertmanager
    alert into a row here — that ingestion step is Phase 3C.)
+
+postgres (reliability.incidents) --SQLAlchemy async / asyncpg (read-only)--> control-plane :8000 --> (future) operations console
+  (Phase 3B: control-plane only reads reliability.incidents via
+   GET /api/v1/incidents and GET /api/v1/incidents/{id}. Nothing writes
+   to the table through this API yet — no POST/PATCH/DELETE exists.)
 
 Complete distributed trace (one real POST /checkouts, now persisted in Tempo):
                     +-> checkout payment CLIENT      -> payment SERVER
@@ -136,6 +146,32 @@ Full inventory:
   This phase builds the data foundation only: no Alertmanager ingestion
   (Phase 3C) and no lifecycle transition validation (Phase 3D) exist
   yet.
+- **Control plane** (Phase 3B, `services/control-plane`): a **FastAPI**
+  service, the fifth backend application in this repository (but
+  explicitly not one of the four demo commerce services above, and not
+  yet instrumented with OpenTelemetry). It is **read-only**: it exposes
+  `GET /api/v1/incidents` (status/severity/source filters, pagination,
+  deterministic `last_seen_at DESC, id DESC` ordering) and
+  `GET /api/v1/incidents/{id}` over `reliability.incidents`, plus
+  `GET /health/live` and `GET /health/ready`. It connects via SQLAlchemy
+  2.x async + `asyncpg`, credentials from environment variables only,
+  and never calls `metadata.create_all()` — Flyway remains the sole
+  schema owner. Engine construction is non-blocking, so the service
+  stays up and `/health/ready` correctly reports `503` if PostgreSQL or
+  the `reliability` schema is temporarily unavailable (e.g. migrations
+  not yet applied, or PostgreSQL mid-restart), recovering on its own
+  once they become available — verified empirically against a real,
+  unmigrated database and a real PostgreSQL restart, with no manual
+  container restart. Runs via the existing `docker-compose.yml`
+  (`control-plane` service, `127.0.0.1:8000`), does not depend on the
+  `flyway` service automatically, and has no new persistent volume.
+  Full detail: [docs/api/control-plane.md](../api/control-plane.md).
+  Verified by `scripts/verify-control-plane.sh`
+  (`make verify-control-plane`, also run in CI) against the real,
+  running, PostgreSQL-backed service — not mocked. **Still planned:**
+  any write path (incident creation/mutation is Phase 3C/3D), any
+  authentication, and any consumption by an agent or operations
+  console.
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.
@@ -590,7 +626,15 @@ proposed remediation actions.
 ### Control plane
 A **FastAPI** service coordinating the overall workflow: receiving
 incident signals, orchestrating investigation, storing state, and exposing
-APIs consumed by the operations console.
+APIs consumed by the operations console. As of Phase 3B, this component
+**partially exists**: `services/control-plane` is a real, running
+FastAPI service with a read-only HTTP API over `reliability.incidents`
+— see [Control plane](#control-plane-phase-3b) above and
+[docs/api/control-plane.md](../api/control-plane.md). **Still planned:**
+receiving incident signals (Alertmanager ingestion, Phase 3C),
+orchestrating investigation, any write/lifecycle-transition API
+(Phase 3D), authentication, and consumption by the operations console
+or an agent.
 
 ### Durable state
 **PostgreSQL** for persisting incidents, investigation history, decisions,
@@ -600,11 +644,14 @@ of Phase 3A, has its **first real schema**: `reliability.incidents`,
 applied through versioned Flyway migrations — see
 [Incident domain model](#incident-domain-model-phase-3a) above and
 [docs/architecture/incident-domain-model.md](incident-domain-model.md).
-**Still planned:** any application code reading or writing this table
-(no API, no ingestion from Alertmanager — Phase 3C — and no agent
-exists yet); incident lifecycle transition validation (Phase 3D);
-additional tables for investigation history, decisions, approvals, and
-the audit trail (future migrations, not yet written).
+As of Phase 3B, a read-only FastAPI control plane
+(`services/control-plane`) reads this table over a real HTTP API — see
+[Control plane](#control-plane-phase-3b) above.
+**Still planned:** any application code *writing* to this table (no
+ingestion from Alertmanager — Phase 3C — and no agent exists yet);
+incident lifecycle transition validation (Phase 3D); additional tables
+for investigation history, decisions, approvals, and the audit trail
+(future migrations, not yet written).
 
 ### Coordination / ephemeral state
 **Redis** for short-lived state such as in-flight workflow coordination.

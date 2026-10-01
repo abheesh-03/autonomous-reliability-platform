@@ -4,9 +4,9 @@
 # Services:
 #   - postgres: local PostgreSQL database (Phase 0.2). Not used by any
 #     of the four demo application services for business data (still
-#     true as of Phase 3A). As of Phase 3A, it does hold the new
+#     true as of Phase 3B). As of Phase 3A, it does hold the new
 #     "reliability" schema (reliability.incidents) — the durable
-#     incident-data foundation for the future control plane — applied
+#     incident-data foundation the control plane below reads — applied
 #     via the "flyway" service below, never written to directly.
 #   - flyway (Phase 3A): applies versioned migrations from
 #     database/migrations/ to the "reliability" schema only (never
@@ -14,6 +14,14 @@
 #     table). Never started by `docker compose up -d` (profiles:
 #     [tools]) — only via `make db-migrate` or an explicit
 #     `docker compose run`.
+#   - control-plane (Phase 3B): a read-only FastAPI service over
+#     reliability.incidents — the first real backend application built
+#     on the Phase 3A incident model. Not one of the four demo commerce
+#     services; does not call or get called by any of them. Depends
+#     only on postgres being healthy, never on flyway (migrations are
+#     an explicit, separate step — see above); its own readiness
+#     endpoint, not container startup, is what reports whether the
+#     incidents table actually exists yet.
 #   - checkout-service: orchestrates payment authorization, inventory
 #     reservation, and notification triggering via POST /checkouts
 #     (Phase 1B.4) — the first service-to-service workflow in this
@@ -106,6 +114,49 @@ services:
     volumes:
       - ./database/migrations:/flyway/sql:ro
     command: ["migrate"]
+
+  # Phase 3B: the first real backend application reading
+  # reliability.incidents — a read-only FastAPI control plane. Not one
+  # of the four demo commerce services below, and does not call or get
+  # called by any of them. Deliberately does NOT depend on the
+  # `flyway` service above (which never runs automatically anyway,
+  # being gated behind profiles: ["tools"]) — only on `postgres` itself
+  # being healthy. The incidents table may not exist yet when this
+  # container starts (e.g. before `make db-migrate` has ever been run
+  # on a fresh checkout); GET /health/ready is what actually reports
+  # that, not container startup success — see
+  # services/control-plane/src/control_plane/db/engine.py and
+  # docs/api/control-plane.md.
+  control-plane:
+    build:
+      context: ./services/control-plane
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    # Bound to loopback only, like every other observability/infra port
+    # in this stack. No authentication exists yet — see
+    # docs/api/control-plane.md's security-limitations section; this is
+    # local-development-only.
+    ports:
+      - "127.0.0.1:8000:8000"
+    # /health/live, not /health/ready: liveness must stay independent
+    # of whether the migration has been applied yet (see the comment
+    # above) — a container that's merely "not ready" is not the same as
+    # "unhealthy", and Docker restarting it wouldn't fix a missing
+    # migration anyway. python:3.13-slim has no curl/wget, matching
+    # payment-service's own healthcheck pattern below.
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=3)\" || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   checkout-service:
     build:

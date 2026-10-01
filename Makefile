@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs verify-observability verify-persistence
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs verify-observability verify-persistence verify-control-plane
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -26,8 +26,12 @@ help: ## Show available targets
 	@echo "  otel-logs           Show recent otel-collector logs"
 	@echo "  prometheus-logs     Show recent Prometheus logs"
 	@echo "  grafana-logs        Show recent Grafana logs"
+	@echo "  control-plane-build Build the control-plane Docker image"
+	@echo "  control-plane-test  Run control-plane unit tests on Python 3.13 (via Docker)"
+	@echo "  control-plane-logs  Show recent control-plane logs"
 	@echo "  verify-observability Bundled Phase 2A.1-2B.4 verification (starts Compose, checks everything, tears down)"
 	@echo "  verify-persistence  Phase 3A persistence verification (migrations, schema, constraints, restart persistence)"
+	@echo "  verify-control-plane Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -116,8 +120,28 @@ prometheus-logs: ## Show recent Prometheus logs
 grafana-logs: ## Show recent Grafana logs
 	docker compose logs --tail=100 grafana
 
+control-plane-build: ## Build the control-plane Docker image
+	docker compose build control-plane
+
+# Host Python versions vary (this repo targets 3.13); running tests
+# inside a python:3.13-slim container keeps results reproducible and
+# consistent with CI regardless of the developer's local Python
+# version — same convention as payment-test. These are unit tests only
+# (fake repository, no real database, see services/control-plane/tests/
+# conftest.py); run `make verify-control-plane` for the real
+# PostgreSQL-backed integration check.
+control-plane-test: ## Run control-plane unit tests on Python 3.13 (via Docker)
+	docker run --rm -v "$(CURDIR)/services/control-plane:/app" -w /app python:3.13-slim \
+		bash -c "pip install -q -e '.[dev]' && pytest"
+
+control-plane-logs: ## Show recent control-plane logs
+	docker compose logs --tail=100 control-plane
+
 verify-observability: ## Bundled Phase 2A.1-2B.4 verification (starts Compose, checks everything, tears down)
 	./scripts/verify-observability.sh
 
 verify-persistence: ## Phase 3A persistence verification (migrations, schema, constraints, restart persistence)
 	./scripts/verify-persistence.sh
+
+verify-control-plane: ## Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)
+	./scripts/verify-control-plane.sh
