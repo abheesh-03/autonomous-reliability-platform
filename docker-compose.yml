@@ -3,7 +3,17 @@
 #
 # Services:
 #   - postgres: local PostgreSQL database (Phase 0.2). Not used by any
-#     application service for business data yet.
+#     of the four demo application services for business data (still
+#     true as of Phase 3A). As of Phase 3A, it does hold the new
+#     "reliability" schema (reliability.incidents) — the durable
+#     incident-data foundation for the future control plane — applied
+#     via the "flyway" service below, never written to directly.
+#   - flyway (Phase 3A): applies versioned migrations from
+#     database/migrations/ to the "reliability" schema only (never
+#     "public", which already holds an unrelated pre-existing Phase 0
+#     table). Never started by `docker compose up -d` (profiles:
+#     [tools]) — only via `make db-migrate` or an explicit
+#     `docker compose run`.
 #   - checkout-service: orchestrates payment authorization, inventory
 #     reservation, and notification triggering via POST /checkouts
 #     (Phase 1B.4) — the first service-to-service workflow in this
@@ -74,6 +84,28 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # Phase 3A: versioned database migrations via Flyway. `profiles:
+  # [tools]` means this is NEVER started by a normal `docker compose up
+  # -d` (it has no healthcheck and nothing depends on it) — it only
+  # runs when explicitly invoked, via `make db-migrate` or
+  # `docker compose run --rm flyway <command>`. Runs only against the
+  # "reliability" schema (never "public", which already holds an
+  # unrelated pre-existing table from Phase 0), confirmed empirically
+  # against the real pinned Postgres 18 image before being adopted.
+  flyway:
+    image: flyway/flyway:13.9.0
+    profiles: ["tools"]
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      FLYWAY_USER: ${POSTGRES_USER}
+      FLYWAY_PASSWORD: ${POSTGRES_PASSWORD}
+      FLYWAY_SCHEMAS: reliability
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      FLYWAY_CONNECT_RETRIES: "10"
+    volumes:
+      - ./database/migrations:/flyway/sql:ro
+    command: ["migrate"]
 
   checkout-service:
     build:

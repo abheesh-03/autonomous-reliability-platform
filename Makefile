@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs verify-observability
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs verify-observability verify-persistence
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -10,6 +10,7 @@ help: ## Show available targets
 	@echo "  db-status           Show container status"
 	@echo "  db-logs             Show recent PostgreSQL logs"
 	@echo "  db-restart          Restart PostgreSQL without removing data"
+	@echo "  db-migrate          Apply versioned database migrations (Flyway; safe to rerun)"
 	@echo "  checkout-build      Build the checkout-service Docker image"
 	@echo "  checkout-test       Run checkout-service tests locally (requires Java 21)"
 	@echo "  checkout-logs       Show recent checkout-service logs"
@@ -25,7 +26,8 @@ help: ## Show available targets
 	@echo "  otel-logs           Show recent otel-collector logs"
 	@echo "  prometheus-logs     Show recent Prometheus logs"
 	@echo "  grafana-logs        Show recent Grafana logs"
-	@echo "  verify-observability Bundled Phase 2A.1 verification (starts Compose, checks everything, tears down)"
+	@echo "  verify-observability Bundled Phase 2A.1-2B.4 verification (starts Compose, checks everything, tears down)"
+	@echo "  verify-persistence  Phase 3A persistence verification (migrations, schema, constraints, restart persistence)"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -48,6 +50,14 @@ db-logs: ## Show recent PostgreSQL logs
 
 db-restart: ## Restart PostgreSQL without removing data
 	docker compose restart postgres
+
+# Flyway (pinned flyway/flyway:13.9.0, see docker-compose.yml's
+# "flyway" service) applies database/migrations/ to the "reliability"
+# schema only — never "public". Requires PostgreSQL already running
+# (`make db-up`) and healthy. Safe to run repeatedly: Flyway tracks
+# applied versions itself and no-ops once up to date.
+db-migrate: ## Apply versioned database migrations (Flyway; safe to rerun)
+	docker compose run --rm flyway migrate
 
 checkout-build: ## Build the checkout-service Docker image
 	docker compose build checkout-service
@@ -106,5 +116,8 @@ prometheus-logs: ## Show recent Prometheus logs
 grafana-logs: ## Show recent Grafana logs
 	docker compose logs --tail=100 grafana
 
-verify-observability: ## Bundled Phase 2A.1 verification (starts Compose, checks everything, tears down)
+verify-observability: ## Bundled Phase 2A.1-2B.4 verification (starts Compose, checks everything, tears down)
 	./scripts/verify-observability.sh
+
+verify-persistence: ## Phase 3A persistence verification (migrations, schema, constraints, restart persistence)
+	./scripts/verify-persistence.sh

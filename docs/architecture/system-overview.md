@@ -7,20 +7,27 @@ section has been implemented.
 
 ## Current Implementation
 
-As of Phase 2B.4, the repository contains foundational scaffolding, a
-running infrastructure dependency, four application services with the
-**first real service-to-service workflow**, and an
-**observability infrastructure stack instrumented for all four
-services, with a complete, verified distributed trace across the whole
-checkout workflow — persisted in and independently re-verified from a
-real trace backend, Grafana Tempo (Phase 2B.1) — each service's
-existing stdout/stderr logs centrally collected and persisted via
-Grafana Alloy + Grafana Loki (Phase 2B.2), three Grafana dashboards
-auto-provisioned from real, individually-verified queries against that
-telemetry (Phase 2B.3), and, as of Phase 2B.4, a real alerting layer —
+Phase 2 (observability) is **closed** as of Phase 3A. The repository
+contains foundational scaffolding, a running infrastructure dependency,
+four application services with the **first real service-to-service
+workflow**, an **observability infrastructure stack instrumented for
+all four services, with a complete, verified distributed trace across
+the whole checkout workflow — persisted in and independently
+re-verified from a real trace backend, Grafana Tempo (Phase 2B.1) —
+each service's existing stdout/stderr logs centrally collected and
+persisted via Grafana Alloy + Grafana Loki (Phase 2B.2), three Grafana
+dashboards auto-provisioned from real, individually-verified queries
+against that telemetry (Phase 2B.3), and a real alerting layer —
 Prometheus evaluates four alert rules and routes firing alerts to
 Prometheus Alertmanager, with an empirically verified full
-inactive→firing→resolved lifecycle**. Conceptually, the current demo
+inactive→firing→resolved lifecycle (Phase 2B.4)**, and, as of
+Phase 3A, **a durable incident data foundation**: PostgreSQL's existing
+`postgres` service now also holds a dedicated `reliability` schema
+(`reliability.incidents`), applied through versioned Flyway migrations
+and independently verified against the real database — see
+[Incident domain model](#incident-domain-model-phase-3a) below and
+[docs/architecture/incident-domain-model.md](incident-domain-model.md)
+for full detail. Conceptually, the current demo
 application shape is:
 
 ```
@@ -48,6 +55,12 @@ prometheus --alert rules (rules/alerts.yml)--> alertmanager --> (future control 
    groups, and tracks alert state — it never evaluates a PromQL
    expression itself. Alertmanager's only receiver today is a no-op
    local sink: no email/Slack/PagerDuty/webhook exists yet.)
+
+(future Phase 3C) alertmanager --> incident --> postgres (reliability.incidents)
+  (Phase 3A builds only the destination: a dedicated "reliability"
+   schema in the existing postgres service, applied via versioned
+   Flyway migrations. No code exists yet that turns a real Alertmanager
+   alert into a row here — that ingestion step is Phase 3C.)
 
 Complete distributed trace (one real POST /checkouts, now persisted in Tempo):
                     +-> checkout payment CLIENT      -> payment SERVER
@@ -98,8 +111,31 @@ Full inventory:
   configured entirely through environment variables, with a named Docker
   volume for persistent storage and a healthcheck based on `pg_isready`.
   This is the first piece of the planned "durable state" component below
-  to actually exist; it currently has no schema, migrations, or
-  application connecting to it.
+  to actually exist. As of Phase 3A, it holds a real schema
+  (`reliability`, applied via versioned migrations — see below); it
+  still has no application code connecting to it (no API, no agent).
+- **Incident domain model** (Phase 3A, `database/migrations/V1__create_incident_schema.sql`,
+  applied via a pinned `flyway/flyway:13.9.0` Compose service gated
+  behind `profiles: ["tools"]` so it never runs on a normal `docker
+  compose up -d`): a dedicated `reliability` schema (never `public`,
+  which already held an unrelated pre-existing Phase 0 table,
+  `phase_02_verification`, confirmed untouched) holding one table,
+  `reliability.incidents` — `id` (UUID), `source`,
+  `source_fingerprint`, `title`, `description`, `severity`
+  (`critical`/`warning`/`info`), `status` (six-value vocabulary,
+  default `open`), `first_seen_at`/`last_seen_at`/`resolved_at`/
+  `created_at`/`updated_at` (all `TIMESTAMPTZ`). Deduplication: a
+  partial unique index on `(source, source_fingerprint) WHERE status
+  NOT IN ('resolved', 'closed')` — at most one active incident per
+  fingerprint, with resolved/closed rows preserved as history, enforced
+  by PostgreSQL itself, confirmed directly including the
+  resolved-then-recurred-allowed case. Full detail:
+  [docs/architecture/incident-domain-model.md](incident-domain-model.md).
+  Verified by `scripts/verify-persistence.sh` (`make verify-persistence`,
+  also run in CI) against the real database — not SQLite, not mocked.
+  This phase builds the data foundation only: no Alertmanager ingestion
+  (Phase 3C) and no lifecycle transition validation (Phase 3D) exist
+  yet.
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.
@@ -558,9 +594,17 @@ APIs consumed by the operations console.
 
 ### Durable state
 **PostgreSQL** for persisting incidents, investigation history, decisions,
-approvals, remediation actions, and the audit trail. A bare PostgreSQL
-instance now runs locally via Docker Compose (see Current Implementation
-above); the schema and any application usage of it are still planned.
+approvals, remediation actions, and the audit trail. PostgreSQL runs
+locally via Docker Compose (see Current Implementation above), and, as
+of Phase 3A, has its **first real schema**: `reliability.incidents`,
+applied through versioned Flyway migrations — see
+[Incident domain model](#incident-domain-model-phase-3a) above and
+[docs/architecture/incident-domain-model.md](incident-domain-model.md).
+**Still planned:** any application code reading or writing this table
+(no API, no ingestion from Alertmanager — Phase 3C — and no agent
+exists yet); incident lifecycle transition validation (Phase 3D);
+additional tables for investigation history, decisions, approvals, and
+the audit trail (future migrations, not yet written).
 
 ### Coordination / ephemeral state
 **Redis** for short-lived state such as in-flight workflow coordination.

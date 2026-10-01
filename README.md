@@ -16,8 +16,10 @@ production-style system.
 
 ## Status
 
-**Actively under early development.** The project is currently in
-**Phase 2B.4 — Production-Style Alerting**. An OpenTelemetry Collector, Prometheus, and
+**Actively under early development.** Phase 2 (observability — metrics,
+traces, logs, dashboards, alerting) is **closed**. The project is
+currently in **Phase 3A — Incident Domain Model + PostgreSQL
+Persistence**. An OpenTelemetry Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
 services are instrumented, each its own idiomatic way: `checkout-service`
 with the OpenTelemetry Java auto-instrumentation agent (Phase 2A.2);
@@ -224,7 +226,17 @@ full `inactive → pending → firing → (Alertmanager) → resolved →
 inactive` lifecycle, and that application telemetry resumes afterward.
 Alertmanager's only receiver is a no-op local sink — no outbound
 notification integration exists yet, and no control plane consumes
-these incident signals yet. No AI integration has been added yet.
+these incident signals yet. As of Phase 3A, **Phase 2 is closed** and
+PostgreSQL gained its first real schema: `reliability.incidents` (see
+[Incident Domain Model](#incident-domain-model-phase-3a) below and the
+dedicated
+[docs/architecture/incident-domain-model.md](docs/architecture/incident-domain-model.md)),
+applied through versioned Flyway migrations and independently verified
+against the real database — constraints, deduplication, and restart
+persistence all empirically proven. There is still no code that writes
+to this table yet (no Alertmanager ingestion, no API, no agent) — this
+phase builds only the durable data foundation a future control plane
+will use. No AI integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -262,6 +274,64 @@ docker compose down
 Use `docker compose down -v` only if you intentionally want to delete the
 local database volume.
 
+## Incident Domain Model (Phase 3A)
+
+The existing `postgres` service (no second database was introduced)
+now also holds a dedicated `reliability` schema — the durable
+incident-data foundation a future control plane will use. Full detail,
+including every constraint and the deduplication policy, is in
+[docs/architecture/incident-domain-model.md](docs/architecture/incident-domain-model.md);
+summary here:
+
+- **`reliability.incidents`** (`database/migrations/V1__create_incident_schema.sql`):
+  `id` (UUID PK), `source`, `source_fingerprint`, `title`,
+  `description` (nullable), `severity`
+  (`critical`/`warning`/`info`), `status` (six-value vocabulary,
+  defaulting to `open`), `first_seen_at`/`last_seen_at`/`resolved_at`/
+  `created_at`/`updated_at` (all `TIMESTAMPTZ`). `resolved_at` is
+  enforced (via a `CHECK` constraint) to be set if and only if `status`
+  is `resolved` or `closed` — a data-integrity rule, not a lifecycle
+  transition rule (Phase 3D will implement real transition validation).
+- **Deduplication:** a partial unique index on `(source,
+  source_fingerprint) WHERE status NOT IN ('resolved', 'closed')` —
+  at most one *active* incident per fingerprint; a resolved/closed
+  incident is preserved as history, and a new active incident with the
+  same fingerprint is allowed once the prior one resolves. Enforced by
+  PostgreSQL itself (a real `unique_violation`, SQLSTATE `23505` naming
+  the `incidents_active_fingerprint_uniq` constraint), not application
+  code. `scripts/verify-persistence.sh`'s own test of this is a
+  **sequential** check (one `INSERT`, then a second, over the same
+  connection) confirming the constraint rejects a duplicate when
+  exercised — not an empirical two-session/two-connection race test;
+  the actual protection under real concurrent writers comes from
+  PostgreSQL's own unique-index enforcement, a property of the index
+  itself rather than anything this script does procedurally.
+- **Migrations:** versioned, via Flyway (pinned `13.9.0`, compatibility
+  with `postgres:18` confirmed empirically), applied only to the
+  `reliability` schema — `public` (which already holds an unrelated
+  pre-existing table, `phase_02_verification`, from Phase 0) is never
+  touched.
+
+**Apply migrations** (PostgreSQL must already be running and healthy):
+
+```bash
+make db-migrate
+```
+
+Safe to run repeatedly — Flyway tracks applied versions itself and
+no-ops once up to date. Editing an already-applied migration file
+causes the next `db-migrate` to fail closed (a real checksum mismatch),
+confirmed directly.
+
+**Verify persistence** (starts PostgreSQL if needed, applies
+migrations, proves every constraint/index/default/restart-persistence
+claim above against the real database, cleans up only its own test
+data):
+
+```bash
+make verify-persistence
+```
+
 ## Developer Commands
 
 The commands above are also available as `make` targets, for convenience:
@@ -274,6 +344,9 @@ make db-up           # start PostgreSQL
 make db-status       # check PostgreSQL status (wait for "healthy")
 make db-logs         # show recent PostgreSQL logs
 make db-down         # stop PostgreSQL — preserves the data volume
+make db-migrate      # apply versioned database migrations (Flyway; safe to rerun)
+make verify-persistence  # Phase 3A persistence verification (migrations, schema, constraints, restart persistence)
+make verify-observability  # Phase 2A.1-2B.4 observability verification
 ```
 
 `make db-down` never deletes the PostgreSQL named volume.
@@ -1340,8 +1413,14 @@ its tests pass (Python 3.13 via `actions/setup-python`), that
 (`npm ci`), typechecks, tests, and builds (Node 24 via `actions/setup-node`),
 that Docker Compose config resolves, that PostgreSQL and all four
 application services start and reach a healthy state (bounded retry
-loops, not assumed), a basic SQL smoke test, HTTP smoke tests against
-all four application services' health endpoints, an end-to-end smoke
+loops, not assumed), a basic SQL smoke test, and — as of Phase 3A,
+immediately after PostgreSQL becomes healthy — the full persistence
+verification (`scripts/verify-persistence.sh`, the identical script
+used locally: migrations, schema/constraints/indexes, valid-incident
+round-trip, invalid-data rejection, deduplication, rerun safety, and
+restart persistence against the real database), HTTP smoke tests
+against all four application services' health endpoints, an end-to-end
+smoke
 test that calls `POST /checkouts` and verifies the real orchestrated
 response over the actual Compose network, that Prometheus and Grafana
 reach a healthy state, that Prometheus reports all three scrape targets
@@ -2900,3 +2979,174 @@ problem today.
   `promtool`, and initially `inactive`, but not proven to fire
   end-to-end. No AI agent and no Kubernetes/Terraform/AWS/Kafka/Redis
   were added, per this phase's explicit scope.
+
+### Phase 3A — Incident Domain Model + PostgreSQL Persistence
+
+- **Inspected the existing environment before changing anything:**
+  confirmed `postgres:18` is already running via the existing Compose
+  service, backed by the existing persistent `postgres_data` volume,
+  and — not assumed, discovered by querying the real database — that
+  `public` already holds a pre-existing single-row table,
+  `public.phase_02_verification` (`id=1, message='persistent'`), from
+  Phase 0. No second database was introduced; this table is never
+  touched by anything in this phase.
+- **Flyway version — determined empirically, not assumed:** pulled and
+  ran `--version` against every real tag from `11` through `13.9.0`,
+  confirming no `13.10.0`/`14.x` exists — `13.9.0` is the genuine
+  latest stable release. **Real compatibility test against
+  PostgreSQL 18, not assumed:** ran an actual migration against a live
+  `postgres:18.6` container; Flyway's own log confirmed
+  `Database: jdbc:postgresql:... (PostgreSQL 18.6)` with no warnings.
+  **Real discovery during that same test:** Flyway refuses to migrate
+  against a non-empty schema with no history table by default — this
+  is exactly why the migration is scoped to `FLYWAY_SCHEMAS=reliability`
+  rather than the connection's default `public` schema (which holds
+  `phase_02_verification`); confirmed this scoping both avoids the
+  error and leaves `public` completely untouched.
+- New `database/migrations/V1__create_incident_schema.sql`: creates the
+  `reliability` schema and `reliability.incidents` — full column list,
+  constraints, deduplication index, and supporting indexes in
+  [Incident Domain Model](#incident-domain-model-phase-3a) above and
+  `docs/architecture/incident-domain-model.md`. `promtool`-equivalent
+  validation here is Flyway's own `check rules`-style validation via
+  real `migrate`/`info` runs against the real database — confirmed
+  clean.
+- **Deduplication — designed, then proven against the real constraint,
+  not just described:** a partial unique index
+  (`WHERE status NOT IN ('resolved', 'closed')`) on `(source,
+  source_fingerprint)`. Verified directly: a second INSERT with the
+  same fingerprint while the first incident is still active fails with
+  a real `unique_violation` (SQLSTATE 23505, naming
+  `incidents_active_fingerprint_uniq` specifically); resolving the
+  first incident and then inserting a third with the identical
+  fingerprint succeeds, leaving both the resolved original and the new
+  active incident in the table (2 rows for that fingerprint, neither
+  deleted nor overwritten). This is a **sequential** check, not an
+  empirical two-session/two-connection race test — the actual
+  protection under real concurrent writers is a property of PostgreSQL's
+  own unique-index enforcement, not something separately stress-tested
+  here.
+- `docker-compose.yml` extended (not replaced): new `flyway` service
+  (pinned `flyway/flyway:13.9.0`), gated behind `profiles: ["tools"]`
+  so it is **never** started by a normal `docker compose up -d` — only
+  via `make db-migrate` or an explicit `docker compose run`. New
+  `database/migrations` read-only mount. Every existing service,
+  volume, and port left untouched.
+- New `scripts/verify-persistence.sh`: bash + `psql` (matching the
+  project's existing SQL-smoke-test convention), runs against the real
+  pinned images only. Covers all 15 required checks — health, migration
+  apply, schema/index existence, valid-incident insert/read-back with
+  UUID/timestamp/default-status verification, invalid
+  severity/status/blank-identifier rejection, duplicate-active
+  rejection (and the resolved-then-recurred success case), index
+  existence, migration rerun safety, PostgreSQL restart persistence,
+  and cleanup scoped to exactly this run's own marker — safe to run
+  repeatedly against a nonempty database, confirmed by running it twice
+  in a row (second run also exits 0, against an already-migrated,
+  previously-exercised database). **Real bug caught and fixed during
+  implementation:** an early version captured `INSERT ... RETURNING
+  id` output with `psql -t -A`, which still appends an `INSERT 0 1`
+  command-completion line after the returned value even with `-t`
+  (confirmed by direct inspection, not assumed) — corrupting the
+  captured UUID; fixed by piping through `head -1`, re-verified
+  working.
+- **Post-review corrections (same phase, before commit):** independent
+  review of the first version found three real problems, all fixed and
+  re-verified against the real database, not just described:
+  1. **Fresh-database handling.** The original script hard-*required*
+     `public.phase_02_verification` to exist, which only holds true on
+     this machine's own long-running local database — a brand new
+     GitHub Actions `postgres_data` volume has no such table, so the
+     check would have failed CI outright. Fixed to detect the fixture's
+     presence, record and re-verify its value across the restart only
+     if present, and proceed normally if absent. Verified both paths
+     for real: the existing local database (fixture present, value
+     unchanged after restart) and a **genuinely fresh** PostgreSQL
+     instance — a throwaway Compose project with its own brand-new,
+     empty volume, confirmed via `\dt public.*` to have zero tables
+     before the run — exercising the "absent" branch, not merely
+     inspected in the code. The throwaway project was deleted afterward
+     (`docker compose -p ... down -v`); the real project's
+     `postgres_data` volume was never touched.
+  2. **Cleanup was broader than one run.** The original cleanup deleted
+     every row with `source = 'verify-persistence-test'`, which would
+     also remove a *different* run's still-present test rows (e.g. one
+     left behind by an earlier failed execution), not just this
+     execution's own. Fixed by generating a run-unique UUID
+     (`python3 -c 'import uuid; print(uuid.uuid4())'`) and embedding it
+     in every fingerprint this run creates, so cleanup can scope to
+     `source = 'verify-persistence-test' AND source_fingerprint LIKE
+     '<this run's UUID>%'` — provably exact, since the final cleanup
+     step asserts the removed row count equals exactly 2 (the number
+     this run itself created), not "however many happened to match a
+     shared string". The happy-path cleanup (section 15) is
+     unsuppressed — if it fails, the script fails; a separate
+     best-effort-only cleanup (an `EXIT` trap, same run-scoped marker)
+     still attempts cleanup when an earlier check fails first, without
+     masking that original failure.
+  3. **Rejection checks didn't verify the actual error.** The original
+     `expect_rejected()` treated *any* nonzero exit as a passing
+     "rejected" result — a connection failure, a SQL syntax typo, or a
+     missing table would have been indistinguishable from a genuine
+     constraint violation. Fixed to parse PostgreSQL's own verbose
+     error output (`psql -v VERBOSITY=verbose`) for the real SQLSTATE
+     and require an exact match: `23514` (`check_violation`) for
+     invalid severity/status and each blank-identifier case, `23505`
+     (`unique_violation`) for the duplicate-active case — and, for that
+     duplicate case specifically, also require the error to name
+     `incidents_active_fingerprint_uniq`. **A real bug was caught
+     immediately by this fix during testing:** an initial regex
+     (`[0-9A-Z]{5}` applied to the whole `ERROR:  23514: ...` line)
+     matched the literal word `ERROR` itself (also 5 uppercase
+     letters) before reaching the real SQLSTATE digits, corrupting the
+     captured value — fixed with a precise `sed` capture group
+     targeting only the text between `ERROR:  ` and the following
+     `:`, reverified against real `23514`, `23505`, and (manually, as a
+     negative control) `42601` (syntax error) and `42P01` (undefined
+     table) cases, confirming a non-constraint failure is correctly
+     treated as a verifier failure, not a false pass.
+- `Makefile` extended: `make db-migrate` (`docker compose run --rm
+  flyway migrate`) and `make verify-persistence`
+  (`./scripts/verify-persistence.sh`), both added to `help` text and
+  `.PHONY`; every existing target unchanged.
+- `.github/workflows/ci.yml` extended, not duplicated: a new "Verify
+  persistence (Phase 3A)" step runs the identical
+  `scripts/verify-persistence.sh` used locally, placed immediately
+  after "Wait for PostgreSQL to become healthy" — no migration or test
+  logic duplicated in the workflow YAML. `scripts/verify-persistence.sh`
+  also added to the existing shell-syntax-check step. All Phase 0-2
+  checks (four application services, Prometheus metrics, distributed
+  traces, Tempo, Loki + Alloy, Grafana dashboards, Prometheus alert
+  rules, Alertmanager's real firing/recovery lifecycle) left completely
+  unchanged. Not yet verified running on GitHub Actions in this updated
+  form.
+- Local verifier results: `make verify-persistence` run **twice** from
+  a real `docker compose up -d postgres` state (plus once more against
+  a genuinely fresh database, per the post-review corrections above) —
+  all runs exit 0, every one of the 15 checks passing, including the
+  restart-persistence step (`docker compose restart postgres`, not
+  `-v`) and, on the existing local database, the explicit before/after
+  confirmation that `public.phase_02_verification` is untouched.
+  `make verify-observability` was **not** re-run for this
+  phase: Phase 3A's `docker-compose.yml` changes (the new `flyway`
+  service) are additive and gated behind `profiles: ["tools"]`, so they
+  cannot affect the Phase 2 stack's normal `docker compose up -d`
+  behavior — confirmed by inspection, not assumed, since `flyway` has
+  no `restart:` policy, no healthcheck, and is excluded from the
+  default Compose profile entirely.
+- New `docs/architecture/incident-domain-model.md`: the authoritative,
+  detailed reference for the schema, constraints, deduplication policy,
+  migration strategy, and verification — distinguishes what Phase 3A
+  implements from what Phases 3C/3D will add.
+- **Limitations, honestly reported, not worked around:** no API
+  ingestion, no Alertmanager-to-incident ingestion, and no application
+  code of any kind reads or writes this table yet — Phase 3A is
+  data-foundation only, per its own explicit scope. No incident
+  lifecycle transition validation (which status may follow which) —
+  deferred to Phase 3D by design, not an oversight; only the status
+  vocabulary itself and the resolved_at/status data-integrity pairing
+  are enforced today. No additional tables (signal history,
+  investigations, approvals, audit trail) — explicitly deferred to
+  later migrations. No FastAPI service, AI/LLM agent, LangGraph, RAG,
+  frontend, Kafka, Redis, Kubernetes, or Terraform/AWS were added, per
+  this phase's explicit scope.
