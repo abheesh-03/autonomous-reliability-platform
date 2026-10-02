@@ -18,10 +18,13 @@ production-style system.
 
 **Actively under early development.** Phase 2 (observability — metrics,
 traces, logs, dashboards, alerting) is **closed**. Phase 3A (incident
-domain model + PostgreSQL persistence) is also **closed**. The project
-is currently in **Phase 3B — FastAPI Control Plane** (a read-only HTTP
-API over `reliability.incidents`; see
-[Control Plane](#control-plane-phase-3b) below). An OpenTelemetry
+domain model + PostgreSQL persistence) and Phase 3B (read-only FastAPI
+control plane) are also **closed**. The project is currently in
+**Phase 3C — Real Alertmanager Incident Ingestion** (a genuine
+Prometheus alert, delivered through Alertmanager's own authenticated
+webhook, now automatically creates or updates a persistent incident;
+see [Alert Ingestion](#alert-ingestion-phase-3c) below). An
+OpenTelemetry
 Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
 services are instrumented, each its own idiomatic way: `checkout-service`
@@ -82,19 +85,30 @@ verified lifecycle test stopped `otel-collector`, watched
 `TelemetryPipelineUnavailable` transition `inactive → pending → firing`
 in Prometheus, confirmed the same alert active in Alertmanager,
 restarted the Collector, and confirmed both systems returned to
-`inactive`/resolved and that application telemetry resumed. There is
-deliberately **no outbound notification integration** yet (email,
-Slack, PagerDuty, or any webhook) — Alertmanager's single receiver is
-a no-op local sink, so this phase builds the alert pipeline itself, not
-a notification channel. As of Phase 3A, PostgreSQL's existing
-`postgres` service also holds a real, durable `reliability.incidents`
-schema (applied via versioned Flyway migrations), with no application
-code reading or writing it yet. As of Phase 3B, there is now a **fifth
-backend application**, a read-only FastAPI control plane
-(`services/control-plane`) exposing `GET /api/v1/incidents` and
-`GET /api/v1/incidents/{id}` over that schema — no incident-creation
-API, no lifecycle mutation, and no authentication exist yet, and no
-automatic remediation or AI functionality of any kind.
+`inactive`/resolved and that application telemetry resumed. At that
+point there was deliberately **no outbound notification integration**
+(email, Slack, PagerDuty, or any webhook) — Alertmanager's single
+receiver was a no-op local sink, so that phase built the alert pipeline
+itself, not a notification channel. As of Phase 3A, PostgreSQL's
+existing `postgres` service also gained a real, durable
+`reliability.incidents` schema (applied via versioned Flyway
+migrations), with no application code reading or writing it yet. As of
+Phase 3B, there was a **fifth backend application**, a read-only
+FastAPI control plane (`services/control-plane`) exposing
+`GET /api/v1/incidents` and `GET /api/v1/incidents/{id}` over that
+schema — no incident-creation path and no authentication existed yet.
+As of **Phase 3C**, that no longer fully holds: Alertmanager's single
+receiver is now a **real, authenticated webhook** to that same control
+plane (`POST /internal/v1/alertmanager/webhook`, Bearer token,
+reachable only over the internal Docker network), and a genuine firing
+alert is atomically upserted into `reliability.incidents` —
+deduplicated per-fingerprint against the exact same real database
+constraint Phase 3A defined, empirically re-proven using the identical
+real `otel-collector` outage described above. Resolved notifications
+are accepted and acknowledged but do not change any incident's
+lifecycle yet (Phase 3D). There is still no lifecycle-mutation API, no
+authentication on the read endpoints, and no automatic remediation or
+AI functionality of any kind.
 
 ## Problem this project will eventually solve
 
@@ -112,16 +126,18 @@ The following components are **planned** and do not exist yet:
 
 - A Next.js operations console for human oversight and approvals
 - A FastAPI control plane coordinating investigation and remediation
-  workflows (as of Phase 3B, a **read-only** version of this exists —
-  `services/control-plane` exposes `GET /api/v1/incidents` and
-  `GET /api/v1/incidents/{id}` over `reliability.incidents` — but
-  ingesting alerts, coordinating investigation, lifecycle mutation, and
-  authentication are all still planned; see
-  [Control Plane](#control-plane-phase-3b) below)
+  workflows (as of Phase 3B, a read-only `GET` API exists over
+  `reliability.incidents`; as of Phase 3C, `services/control-plane`
+  also **receives real incident signals** — a genuine firing
+  Alertmanager alert, delivered through an authenticated internal
+  webhook, is atomically persisted — but coordinating investigation,
+  lifecycle mutation, and authentication on the read API are all still
+  planned; see [Control Plane](#control-plane-phase-3b) and
+  [Alert Ingestion](#alert-ingestion-phase-3c) below)
 - PostgreSQL for durable state (incidents, decisions, audit trail —
-  as of Phase 3A, the `reliability.incidents` table exists and is read
-  by the Phase 3B control plane above; decisions/audit-trail tables are
-  still planned)
+  as of Phase 3A, the `reliability.incidents` table exists; as of
+  Phase 3C it is both read by and written to by the control plane
+  above; decisions/audit-trail tables are still planned)
 - Redis for ephemeral/coordination state
 - A LangGraph-based agent runtime for investigation and hypothesis formation
 - A Go infrastructure tool gateway for safely executing remediation actions
@@ -141,10 +157,14 @@ The following components are **planned** and do not exist yet:
   routes firing alerts into Prometheus Alertmanager, with an
   empirically verified full inactive→firing→resolved lifecycle — see
   [Observability Infrastructure](#observability-infrastructure) below —
-  but Alertmanager's only receiver is a no-op local sink today, with no
-  email/Slack/PagerDuty/webhook integration and no control plane to
-  consume these incident signals yet, no automatic remediation, and
-  logs are not yet correlated with traces)
+  and, as of Phase 3C, Alertmanager's one receiver is a real,
+  authenticated webhook into this repository's own control plane (not
+  an external notification channel — there is still no email/Slack/
+  PagerDuty/webhook integration reaching outside this repository), with
+  a genuine firing alert now automatically becoming a persistent
+  incident — see [Alert Ingestion](#alert-ingestion-phase-3c) below —
+  but still no automatic remediation, and logs are not yet correlated
+  with traces)
 - Kafka or Redpanda for event streaming
 - Kubernetes as the deployment target, provisioned via Terraform on AWS
 
@@ -243,9 +263,10 @@ alert state through its own real API; a genuine controlled failure
 (stopping `otel-collector`) was used to empirically prove a real rule's
 full `inactive → pending → firing → (Alertmanager) → resolved →
 inactive` lifecycle, and that application telemetry resumes afterward.
-Alertmanager's only receiver is a no-op local sink — no outbound
-notification integration exists yet, and no control plane consumes
-these incident signals yet. As of Phase 3A, **Phase 2 is closed** and
+At that point Alertmanager's only receiver was still a no-op local sink
+— no outbound notification integration existed, and no control plane
+consumed these incident signals yet (see Phase 3C below for how this
+changed). As of Phase 3A, **Phase 2 is closed** and
 PostgreSQL gained its first real schema: `reliability.incidents` (see
 [Incident Domain Model](#incident-domain-model-phase-3a) below and the
 dedicated
@@ -267,9 +288,21 @@ and `GET /health/ready`. It stays up and `/health/ready` correctly
 reports `503` even if PostgreSQL or the migration isn't ready yet, and
 recovers on its own — without a manual restart — once they are,
 verified empirically against both a real, unmigrated database and a
-real PostgreSQL restart. There is still no write path of any kind (no
-Alertmanager ingestion, no incident-creation API, no lifecycle
-mutation) and no authentication. No AI integration has been added yet.
+real PostgreSQL restart. At that point there was still no write path
+of any kind. As of Phase 3C, **Phase 3B is closed** and the control
+plane gained its first write path: `POST /internal/v1/alertmanager/webhook`
+(see [Alert Ingestion](#alert-ingestion-phase-3c) below and the
+dedicated
+[docs/architecture/phase-3c-alert-ingestion.md](docs/architecture/phase-3c-alert-ingestion.md)),
+authenticated with a Bearer token (constant-time comparison, fail-closed
+if unconfigured) and reachable only over the internal Docker network —
+Alertmanager's own real webhook delivery now atomically upserts a
+genuine firing alert into `reliability.incidents`, deduplicated
+per-fingerprint against the same real partial unique index Phase 3A
+defined, verified against a real, controlled `otel-collector` outage
+end to end. There is still no user-facing incident-creation/lifecycle-
+mutation API and no authentication on the read endpoints. No AI
+integration has been added yet.
 
 ## Local PostgreSQL
 
@@ -370,8 +403,11 @@ make verify-persistence
 `services/control-plane` is the fifth backend application in this
 repository (a Python 3.13 / FastAPI project, SQLAlchemy 2.x async +
 `asyncpg`) — and the first application code that reads
-`reliability.incidents`. It is **read-only**: there is no
-incident-creation, update, or delete endpoint anywhere in this API.
+`reliability.incidents`. Its `GET /api/v1/*` API is **read-only**:
+there is no user-facing incident-creation, update, or delete endpoint
+anywhere in it. As of Phase 3C it also exposes ONE authenticated
+internal write path — see
+[Alert Ingestion](#alert-ingestion-phase-3c) below.
 Full detail — endpoints, request/response shapes, DB configuration,
 startup/readiness behavior (including how it stays alive and recovers
 on its own when PostgreSQL or the Phase 3A migration isn't ready yet),
@@ -397,14 +433,94 @@ error handling, and security limitations — is in
 - **Runs via the existing `docker-compose.yml`**, published on
   `127.0.0.1:8000` only, depends on `postgres` being healthy but not on
   `flyway`, no new persistent volume.
-- **No authentication** — local development only.
+- **No authentication on the read API** — local development only.
 
 ```bash
-make db-up                # starts PostgreSQL *and* control-plane
+make db-up                # starts PostgreSQL *and* control-plane (and generates the Phase 3C webhook secret)
 make db-migrate            # apply Phase 3A migrations — control-plane serves 503 until this runs
 curl http://localhost:8000/api/v1/incidents
-make control-plane-test    # unit tests (mocked repository/engine), 20/20 passing
+make control-plane-test    # unit tests (mocked repository/engine), 40/40 passing
 make verify-control-plane  # real integration test against the running, PostgreSQL-backed service
+```
+
+## Alert Ingestion (Phase 3C)
+
+A genuine Prometheus alert now automatically creates or updates a
+persistent incident — no simulated demonstration, no test helper
+inserting rows directly into PostgreSQL:
+
+```
+Prometheus alert rule -> Alertmanager -> authenticated webhook ->
+  control-plane ingestion endpoint -> validation + deduplication ->
+  PostgreSQL reliability.incidents -> existing GET /api/v1/incidents API
+```
+
+Full detail — Alertmanager configuration, secret setup, payload
+validation, the atomic deduplication/upsert design, transaction
+behavior, firing/resolved notification semantics, and the real
+end-to-end acceptance proof — is in
+[docs/architecture/phase-3c-alert-ingestion.md](docs/architecture/phase-3c-alert-ingestion.md);
+summary here:
+
+- **Alertmanager** (`observability/alertmanager/alertmanager.yml`):
+  its single receiver is now a real webhook
+  (`http://control-plane:8000/internal/v1/alertmanager/webhook`, the
+  internal Docker network only, never a published host port) with
+  `send_resolved: true` and Bearer authentication via
+  `http_config.authorization.credentials_file` — never a literal token
+  in the config file. Grouping/timing (`group_by`, `group_wait: 10s`,
+  `group_interval: 30s`, `repeat_interval: 1h`) are unchanged from
+  Phase 2B.4.
+- **`POST /internal/v1/alertmanager/webhook`** — the one authenticated
+  write path in this service; every `GET /api/v1/*`/`/health/*` route
+  remains exactly as read-only and unauthenticated as Phase 3B left it.
+  Requires `Authorization: Bearer <token>` (constant-time comparison,
+  fails closed if the server-side secret is unconfigured, checked
+  before any incident write). Validates Alertmanager's real
+  webhook_configs v4 payload with Pydantic v2, using each alert's own
+  `status` (not the group-level status — one delivery can mix firing
+  and resolved alerts).
+- **Mapping:** `source="alertmanager"`, `source_fingerprint=<the
+  alert's real fingerprint>` (never Alertmanager's `groupKey`),
+  `title=annotations.summary` with a safe non-blank fallback to
+  `labels.alertname`, `description=annotations.description`,
+  `severity=labels.severity` (validated against the real vocabulary),
+  `first_seen_at=startsAt`, `last_seen_at=`the time of ingestion,
+  `status="open"`/`resolved_at=NULL` on first creation only.
+- **Deduplication:** a real, atomic PostgreSQL
+  `INSERT ... ON CONFLICT ... DO UPDATE`, targeting the exact same
+  partial unique index Phase 3A defined
+  (`incidents_active_fingerprint_uniq`) — not an application-level
+  SELECT-then-INSERT race. A duplicate firing delivery preserves the
+  incident's `id`/`first_seen_at`/`status` and only ever advances
+  `last_seen_at`; a resolved historical row for the same fingerprint is
+  never touched, and a new active incident is created alongside it.
+- **Transactions:** a whole webhook batch is validated and persisted
+  (or not) as one transaction — a real database outage returns `503`
+  (so Alertmanager retries) with zero partial writes, confirmed against
+  a real, fully-stopped PostgreSQL container.
+- **Body size limit:** a real, aggregate 1 MiB request-body ceiling
+  enforced by ASGI middleware (not a FastAPI dependency — those run
+  only after the body is already fully buffered), genuinely bounded
+  even when `Content-Length` is missing or dishonest; oversized
+  requests get `413` and never reach the application at all.
+- **Resolved notifications** are accepted and acknowledged (counted in
+  the response) but deliberately do **not** create an incident, change
+  any incident's status, set `resolved_at`, or reopen anything —
+  Phase 3D owns real lifecycle/resolution semantics.
+- **Secret setup** (`scripts/init-webhook-secret.sh`): generates one
+  cryptographically random Bearer token; `.env` is authoritative and
+  mirrored into a gitignored file bind-mounted, as a single file (not
+  its parent directory), read-only into Alertmanager — permissioned for
+  the pinned image's real non-root user (`nobody`, uid 65534), verified
+  by a real readability preflight on every run, and never silently
+  rotated once set. Local-development security, not a production
+  secrets framework.
+
+```bash
+make webhook-secret-init     # generate/reuse the local Bearer token (make db-up already does this)
+make verify-webhook-ingestion  # focused real-PostgreSQL ingestion test (auth, dedup/upsert, outage -> 503)
+make verify-alert-ingestion  # the real acceptance gate: Collector outage -> Alertmanager webhook -> persisted incident
 ```
 
 ## Developer Commands
@@ -415,16 +531,19 @@ The commands above are also available as `make` targets, for convenience:
 make help            # list available targets
 make check           # verify local prerequisites (scripts/check-env.sh)
 make compose-config  # validate docker-compose.yml
-make db-up           # start PostgreSQL
+make db-up           # start the Compose environment (also generates the Phase 3C webhook secret)
 make db-status       # check PostgreSQL status (wait for "healthy")
 make db-logs         # show recent PostgreSQL logs
-make db-down         # stop PostgreSQL — preserves the data volume
+make db-down         # stop the Compose environment — preserves the data volume
 make db-migrate      # apply versioned database migrations (Flyway; safe to rerun)
 make verify-persistence  # Phase 3A persistence verification (migrations, schema, constraints, restart persistence)
 make control-plane-build   # build the control-plane Docker image
 make control-plane-test    # run control-plane unit tests on Python 3.13 (via Docker)
 make control-plane-logs    # show recent control-plane logs
 make verify-control-plane  # Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)
+make webhook-secret-init     # generate/reuse the local Alertmanager -> control-plane webhook Bearer token
+make verify-webhook-ingestion  # Phase 3C focused webhook ingestion verification (auth, dedup/upsert, real PostgreSQL)
+make verify-alert-ingestion  # Phase 3C full acceptance: real Collector outage -> Alertmanager webhook -> persisted incident
 make verify-observability  # Phase 2A.1-2B.4 observability verification
 ```
 
@@ -952,19 +1071,20 @@ now persisted in and independently re-verified from Tempo's own HTTP query API:
   shell but no curl/wget, so — like loki — readiness is checked
   externally, via its own `GET /api/v0/web/components` API (all 4
   pipeline components must report `health.state: healthy`).
-- **`alertmanager`** (`prom/alertmanager:v0.34.1`, Phase 2B.4) —
-  receives alerts Prometheus fires from
+- **`alertmanager`** (`prom/alertmanager:v0.34.1`, Phase 2B.4, extended
+  Phase 3C) — receives alerts Prometheus fires from
   `observability/prometheus/rules/alerts.yml`, groups them
   (`group_by: [alertname, severity]`), and tracks their firing/resolved
   state through its own real HTTP API (`GET /api/v2/alerts`,
   `GET /api/v2/status`). Single-instance, persistent local storage
-  (`alertmanager_data`, `--storage.path=/alertmanager`). Its single
-  receiver (`observability/alertmanager/alertmanager.yml`) is a no-op
-  local sink with no integration configured at all — a normal, fully
-  valid Alertmanager receiver that still receives/groups/tracks every
-  alert routed to it, it just never sends anything anywhere; see
+  (`alertmanager_data`, `--storage.path=/alertmanager`). As of Phase
+  3C, its single receiver (`observability/alertmanager/alertmanager.yml`)
+  is a **real, authenticated webhook** to control-plane's internal
+  ingestion endpoint — no longer the Phase 2B.4 no-op local sink; see
   [alertmanager configuration](#alertmanager-configuration-phase-2b4)
-  below. Has both a shell and `wget` (confirmed via `docker run
+  below and
+  [docs/architecture/phase-3c-alert-ingestion.md](docs/architecture/phase-3c-alert-ingestion.md).
+  Has both a shell and `wget` (confirmed via `docker run
   --entrypoint /bin/sh ... -c "which wget"`), so — unlike loki/alloy —
   it has a real Docker-level healthcheck.
 - **`grafana`** — Prometheus (default), Tempo (Phase 2B.1), Loki
@@ -1251,7 +1371,7 @@ correctly in a browser — only that Grafana served the expected
 provisioned structure and that its actual queries are valid and return
 real data.
 
-### alertmanager configuration (Phase 2B.4)
+### alertmanager configuration (Phase 2B.4, receiver replaced Phase 3C)
 
 `observability/alertmanager/alertmanager.yml` was validated against the
 actual pinned `prom/alertmanager:v0.34.1` image's own `amtool
@@ -1259,23 +1379,35 @@ check-config`, not just YAML-parsed. Version selection: the Alertmanager
 image was pulled and its own `--version` output inspected directly
 (not assumed) across every tag from `v0.28.1` up through `v0.34.1`,
 confirming `v0.35.0` and `v0.34.2` do not exist — `v0.34.1` (built
-2026-09-17, less than two weeks before this phase) is the genuine
+2026-09-17, less than two weeks before Phase 2B.4) is the genuine
 latest stable release. A simple local `route`/`receiver` pair:
 `group_by: [alertname, severity]`, `group_wait: 10s`,
-`group_interval: 30s`, `repeat_interval: 1h`, routing to a single
-receiver, `local-null`, with **no integration configured on it at
-all**. This is a normal, fully valid Alertmanager receiver — not a
-fake or invented notification service — confirmed empirically to still
+`group_interval: 30s`, `repeat_interval: 1h` — all **unchanged since
+Phase 2B.4**, including by Phase 3C below. In Phase 2B.4, the single
+receiver, `local-null`, had **no integration configured on it at
+all** — a normal, fully valid Alertmanager receiver, not a fake or
+invented notification service — confirmed empirically to still
 receive, group, and track the full firing/resolved lifecycle of every
 alert routed to it, visible through Alertmanager's own real
 `GET /api/v2/alerts` and `GET /api/v2/status` APIs; it simply never
-sends a notification anywhere. `observability/prometheus/prometheus.yml`
+sent a notification anywhere. `observability/prometheus/prometheus.yml`
 gained `rule_files: [/etc/prometheus/rules/*.yml]` and
 `alerting.alertmanagers` pointed at `alertmanager:9093` — confirmed via
 Prometheus's own `GET /api/v1/alertmanagers` that it discovered exactly
 that one target. Prometheus is the only rule evaluator in this stack;
 Alertmanager never evaluates a PromQL expression itself, only receives
 what Prometheus already decided is firing.
+
+**As of Phase 3C**, the `local-null` receiver was replaced with
+`control-plane-webhook`: a real `webhook_configs` entry
+(`url: http://control-plane:8000/internal/v1/alertmanager/webhook`,
+`send_resolved: true`, `http_config.authorization` set to `type: Bearer`
+with `credentials_file: /etc/alertmanager/secrets/webhook-token` — a
+file, never a literal token value in this YAML). Full detail,
+including the secret-distribution design and the real end-to-end proof
+that this receiver change actually works: see
+[Alert Ingestion](#alert-ingestion-phase-3c) above and
+[docs/architecture/phase-3c-alert-ingestion.md](docs/architecture/phase-3c-alert-ingestion.md).
 
 ### alert rules (Phase 2B.4)
 
@@ -1490,9 +1622,13 @@ its tests pass (Python 3.13 via `actions/setup-python`), that
 `inventory-service` is `gofmt`-clean and passes `go vet`/`go test`/build
 (Go 1.27 via `actions/setup-go`), that `notification-service` installs
 (`npm ci`), typechecks, tests, and builds (Node 24 via `actions/setup-node`),
-that `control-plane`'s dependencies install and its 20 unit tests pass
-(reusing the same Python 3.13 setup as `payment-service`, no second
-`setup-python` step), that Docker Compose config resolves, that
+that `control-plane`'s dependencies install and its 40 unit tests pass
+(20 from Phase 3B, 20 more from Phase 3C's webhook ingestion — reusing
+the same Python 3.13 setup as `payment-service`, no second
+`setup-python` step), that — as of Phase 3C, immediately before Docker
+Compose config validation — the local webhook Bearer secret is
+generated (`scripts/init-webhook-secret.sh`), that Docker Compose
+config resolves, that
 PostgreSQL and all four application services start and reach a healthy
 state (bounded retry loops, not assumed), a basic SQL smoke test, and —
 as of Phase 3A, immediately after PostgreSQL becomes healthy — the full
@@ -1570,7 +1706,22 @@ the same `flyway migrate` mechanism) that `verify-persistence.sh`
 already exercises moments earlier. `scripts/verify-control-plane.sh`
 was also added to the existing shell-syntax-check step, and
 `control-plane` logs were added to the existing "Show service logs"
-failure-diagnostics step.
+failure-diagnostics step. As of Phase 3C, the workflow also runs
+`scripts/init-webhook-secret.sh` right after creating the runtime
+`.env` and before Docker Compose config validation (so the webhook
+Bearer secret exists before any container starts), runs
+`scripts/verify-webhook-ingestion.sh` — the identical script the local
+verifier uses — immediately after the Phase 3B control-plane
+verification step, and the pre-existing final "alert lifecycle
+acceptance test" step now runs with `VERIFY_INGESTION=true`, so that
+same real, controlled `otel-collector` outage also proves the full
+Phase 3C chain (Alertmanager's real webhook delivery → a persisted,
+correctly-mapped incident) — no second, separate Collector-outage test
+was added. `scripts/init-webhook-secret.sh` and
+`scripts/verify-webhook-ingestion.sh` were also added to the existing
+shell-syntax-check step; `control-plane` and `alertmanager` logs were
+already present in the "Show service logs" step from Phase 3B/2B.4 and
+needed no change.
 
 The repository has a GitHub remote
 (`abheesh-03/autonomous-reliability-platform`). The workflow version
@@ -1619,13 +1770,23 @@ the full alert lifecycle — ground), but has **not yet run on GitHub
 Actions** — that will only be true once it runs there after a push.
 Phase 3B's version of the workflow (adding the control-plane
 dependency install/test, build-on-`up`, and
-`scripts/verify-control-plane.sh` integration steps above) has been
-locally validated by running `scripts/verify-control-plane.sh` directly
-against the real Compose stack (all 14 sections passed) and by
-separately proving the pre-migration/restart-recovery startup ordering
-against a disposable Compose project (see
+`scripts/verify-control-plane.sh` integration steps above) was locally
+validated by running `scripts/verify-control-plane.sh` directly against
+the real Compose stack (all 14 sections passed) and by separately
+proving the pre-migration/restart-recovery startup ordering against a
+disposable Compose project (see
 [docs/api/control-plane.md](docs/api/control-plane.md#startup-and-migration-ordering)),
-but has likewise **not yet run on GitHub Actions**.
+and subsequently **ran successfully on GitHub Actions (run #23)**, with
+the working tree confirmed clean afterward. Phase 3C's version of the
+workflow (adding the webhook-secret-initialization step, the focused
+`scripts/verify-webhook-ingestion.sh` step, and
+`VERIFY_INGESTION=true` on the final alert-lifecycle step) has been
+locally validated the same way: `scripts/verify-webhook-ingestion.sh`
+run directly against the real Compose stack (all 10 sections passed)
+and `VERIFY_INGESTION=true bash scripts/verify-alert-lifecycle.sh` run
+directly against the real Compose stack (the full real
+Collector-outage → Alertmanager webhook → persisted-incident chain
+confirmed end to end) — but has **not yet run on GitHub Actions**.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -3445,3 +3606,381 @@ problem today.
   was explicitly out of scope and was not added; no operations console,
   agent, LangGraph, RAG, Kafka, Redis, Kubernetes, or Terraform/AWS were
   added, per this phase's explicit scope.
+
+### Phase 3C — Real Alertmanager Incident Ingestion
+
+- **Webhook endpoint:** new `POST /internal/v1/alertmanager/webhook`
+  (`services/control-plane/src/control_plane/api/webhook.py`) — the
+  one authenticated write path in this service; every existing
+  `GET /api/v1/*`/`/health/*` route is untouched, still read-only and
+  unauthenticated. Router-level `Depends(require_webhook_token)`
+  guarantees authentication runs before the handler body, and
+  therefore before any incident write.
+- **Authentication** (`api/webhook_auth.py`): `Authorization: Bearer
+  <token>`, compared via `hmac.compare_digest` (constant-time); fails
+  closed if `CONTROL_PLANE_WEBHOOK_TOKEN` was never configured
+  (`app.state.webhook_token` is `None` — no supplied value can ever
+  equal it, rather than auth being silently bypassed); missing/wrong
+  token → `401`, confirmed via both unit tests and a real integration
+  run that zero rows are ever written.
+- **Secret generation and initialization:** new
+  `scripts/init-webhook-secret.sh` — generates one cryptographically
+  random token (`secrets.token_hex(32)`, stdlib `secrets`, 256 bits)
+  and writes it to `.env` (`CONTROL_PLANE_WEBHOOK_TOKEN`) and a new
+  gitignored `observability/alertmanager/secrets/webhook-token` file
+  (chmod 600 on both), bind-mounted read-only into the `alertmanager`
+  container. Idempotent — confirmed by running it twice in a row, the
+  second run leaving both files byte-for-byte unchanged; never touches
+  any other `.env` variable (confirmed: `POSTGRES_*`/`GRAFANA_*` lines
+  unchanged after a real run); never prints the secret. Works on a
+  fresh checkout (creates `.env` from `.env.example` and the
+  `observability/alertmanager/secrets/` directory if either is
+  missing — the real GitHub Actions runner path) and on an existing
+  local `.env` alike. Wired into `make db-up` (so a plain `docker
+  compose up -d` via Make always has a working webhook) and exposed
+  standalone as `make webhook-secret-init`; also invoked at the start
+  of `scripts/verify-webhook-ingestion.sh` and, when
+  `VERIFY_INGESTION=true`, `scripts/verify-alert-lifecycle.sh`.
+  `docker-compose.yml` defaults `CONTROL_PLANE_WEBHOOK_TOKEN` to an
+  empty string so `docker compose config`/startup never hard-fail on a
+  missing secret — an empty token just means the webhook fails closed.
+- **Alertmanager configuration**
+  (`observability/alertmanager/alertmanager.yml`): the `local-null`
+  receiver (Phase 2B.4) replaced with `control-plane-webhook` — a real
+  `webhook_configs` entry, `url:
+  http://control-plane:8000/internal/v1/alertmanager/webhook`
+  (Compose's internal service DNS, never the loopback-only host port),
+  `send_resolved: true`, `http_config.authorization: {type: Bearer,
+  credentials_file: /etc/alertmanager/secrets/webhook-token}` — never a
+  literal token in this file. `group_by`/`group_wait`/`group_interval`/
+  `repeat_interval` left unchanged from Phase 2B.4; nothing in the real
+  end-to-end test (below) indicated a need to adjust them.
+  `docker-compose.yml`'s `alertmanager` service gained a new read-only
+  bind mount (`./observability/alertmanager/secrets:/etc/alertmanager/secrets:ro`);
+  `control-plane` gained `CONTROL_PLANE_WEBHOOK_TOKEN` in its
+  environment block. Every other existing service, volume, and port
+  left untouched.
+- **Payload validation** (new
+  `src/control_plane/domain/alertmanager_webhook.py`): Pydantic v2
+  models for Alertmanager's real webhook_configs v4 payload
+  (`extra="ignore"` throughout, so fields this service doesn't need are
+  tolerated, not rejected). Validates, per alert: `status`
+  (`firing`/`resolved`), `labels.alertname` (required, non-blank, for
+  every alert regardless of status), `labels.severity` (required,
+  validated against the real DB vocabulary — but **only for a firing
+  alert**, since a resolved-only alert is never mapped onto an
+  incident), `startsAt` (must parse as a **timezone-aware** datetime —
+  a naive timestamp is rejected), `fingerprint` (required, non-blank),
+  and bounded `labels`/`annotations` maps (≤50 entries, ≤2000 chars per
+  value). Up to 100 alerts per batch (`Field(min_length=1,
+  max_length=100)`) — an empty batch is `422`. Critically, **per-alert
+  `status` drives all ingestion behavior, never the group-level
+  `status`** — a single delivery's `alerts` array can and does mix
+  firing and resolved entries. Any violation returns `422`, and (per
+  the transaction design below) writes nothing, even for other,
+  otherwise-valid alerts in the same batch.
+- **Alert-to-incident mapping** (new `src/control_plane/ingestion/mapping.py`):
+  `source="alertmanager"` (literal); `source_fingerprint=`the alert's
+  own real `fingerprint` (never Alertmanager's `groupKey`, which would
+  incorrectly collapse an entire notification group into one
+  fingerprint); `title=annotations.summary`, stripped, with a safe
+  non-blank fallback to `labels.alertname` (already validated
+  non-blank) — guaranteeing `title` always satisfies `incidents`' own
+  `CHECK (btrim(title) <> '')`; `description=annotations.description`
+  or `NULL`; `severity=labels.severity`; `first_seen_at=startsAt`;
+  `last_seen_at=`one ingestion timestamp captured per batch (`the time
+  of accepted firing ingestion`, not each alert's own `startsAt`);
+  `status="open"`/`resolved_at=NULL` only on first creation. No
+  fabricated column (e.g. an "Alertmanager event ID") was added
+  anywhere.
+- **Atomic deduplication/upsert — the core correctness requirement of
+  this phase, proven against the real database, not just designed:**
+  new `IncidentRepository.upsert_firing_incident`
+  (`src/control_plane/repositories/incident_repository.py`) issues a
+  single real `INSERT ... ON CONFLICT ... DO UPDATE`
+  (`sqlalchemy.dialects.postgresql.insert().on_conflict_do_update()`),
+  with `index_elements=[source, source_fingerprint]` and
+  `index_where=sa.text("status NOT IN ('resolved', 'closed')")` —
+  deliberately expressed as literal SQL text, not a bound parameter,
+  because PostgreSQL's `ON CONFLICT ... WHERE` inference only matches
+  an existing partial index (Phase 3A's
+  `incidents_active_fingerprint_uniq`) against a textually equivalent
+  predicate; confirmed empirically against the real database, not
+  assumed. On conflict: `id`/`first_seen_at`/`status` are never
+  touched (a human/future agent's `acknowledged`/`investigating`/
+  `remediating` state survives a re-delivery, and `status` is never
+  reset to `"open"`); `title`/`description`/`severity` are refreshed;
+  `last_seen_at` only ever advances (`GREATEST`). A resolved/closed
+  historical row for the same fingerprint is invisible to this
+  predicate — a brand-new active row is inserted instead, by the exact
+  same statement, preserving history. Whether a delivery created vs.
+  updated a row is determined via Postgres's own `xmax = 0`
+  tuple-visibility idiom in the `RETURNING` clause, not an
+  application-level flag. **Manually verified against the real stack
+  before any script was written:** a first firing delivery created an
+  incident; a duplicate delivery updated the same row (same id, same
+  `first_seen_at`, `last_seen_at` advanced); manually resolving that
+  row and sending a third delivery with the same fingerprint created a
+  **second**, distinct active row while leaving the resolved row
+  untouched (2 rows, confirmed via direct `psql` queries) — then
+  re-proven identically by the automated verifier below.
+- **Transaction boundaries:** `ingestion/service.py` processes every
+  firing alert in a batch sequentially within the ONE implicit
+  transaction SQLAlchemy's `AsyncSession` opens on first use, and
+  commits exactly once, after the loop — if anything raises mid-batch,
+  `commit()` is never reached and the session's rollback-on-close means
+  none of that batch's upserts persist. Confirmed directly: a batch
+  with one valid alert and one invalid alert (missing `alertname`)
+  returns `422`, and the valid alert's fingerprint is confirmed absent
+  from the database afterward. A real, fully-stopped PostgreSQL
+  container returns `503` with zero writes, and normal ingestion
+  resumes automatically on recovery, with no manual control-plane
+  restart.
+- **Real bug found and fixed during implementation:** the real
+  PostgreSQL-outage test above initially returned an unhandled `500`,
+  not `503` — inspecting the real container traceback showed
+  `docker compose stop postgres` (as opposed to `restart`) made the
+  `postgres` hostname itself stop resolving inside the Compose network,
+  and SQLAlchemy's asyncpg dialect re-raises that `socket.gaierror`
+  unchanged rather than wrapping it into a `SQLAlchemyError` — so the
+  existing `@app.exception_handler(SQLAlchemyError)` never caught it.
+  Fixed in `main.py` by also registering
+  `app.add_exception_handler(OSError, ...)` on the same handler
+  function — safe because PostgreSQL is this service's only external
+  I/O dependency. Re-verified: the exact same real-outage test now
+  returns `503` as required; a matching unit test
+  (`test_dns_resolution_failure_also_produces_503`) reproduces this at
+  the mock level so a regression would be caught by
+  `make control-plane-test` alone.
+- **Firing vs. resolved notification behavior:** a resolved alert's
+  envelope is validated and it is counted in the response
+  (`resolved_ignored`), but it **never** creates an incident, changes
+  an existing incident's status, sets `resolved_at`, deletes anything,
+  or auto-reopens a historical incident — a deliberate, temporary Phase
+  3C/3D boundary, documented as such (not an oversight) in
+  `ingestion/service.py`'s own docstring and in the new design doc.
+- **Unit tests:** `services/control-plane/tests/test_webhook.py`, 20
+  new tests (40 total in the suite with Phase 3B's existing 20) —
+  valid authenticated firing payload, missing/incorrect Bearer token,
+  an unconfigured server secret (fail-closed), malformed payload,
+  missing required label, unsupported severity, invalid fingerprint,
+  invalid timestamp, empty batch, multi-alert batch, mixed
+  firing/resolved batch, resolved-only (no incident), summary/
+  description mapping, safe title fallback, duplicate firing preserves
+  identity, a forced database error not reported as success, the real
+  DNS-resolution-failure regression test above, and no secret value in
+  any error response. `make control-plane-test`: **40 passed** on the
+  first run after the fix above.
+- New `scripts/verify-webhook-ingestion.sh` (bash + `curl` + `psql`,
+  modeled on `scripts/verify-control-plane.sh`'s pattern; cleanup
+  scoped by a run-unique `source_fingerprint` prefix, since `source` is
+  always the fixed literal `"alertmanager"` — the same pattern
+  `scripts/verify-persistence.sh` established for the same reason): 10
+  real-integration sections — authentication; payload validation
+  (including an invalid batch's otherwise-valid sibling alert writing
+  nothing); a first firing webhook creates an incident; a repeated
+  firing webhook updates the same incident (id/first_seen_at/status
+  preserved, last_seen_at advanced, exactly one active row); a
+  resolved historical incident preserved alongside a new active one;
+  multiple distinct fingerprints produce distinct rows; a mixed
+  firing/resolved batch only writes the firing alert; a resolved-only
+  notification writes nothing; the existing `GET /api/v1/incidents/{id}`
+  exposes the result; a real PostgreSQL outage returns `503` with zero
+  writes and ingestion resumes on recovery; and exact-count-verified
+  cleanup. **All 10 sections passed** on the first real run after the
+  OSError-handler fix above.
+- New `scripts/verify-ingestion.py` (stdlib only, matching
+  `scripts/verify-alerting.py`'s convention): read-only — it posts
+  nothing to Alertmanager or control-plane, only cross-checks both
+  systems' real HTTP APIs. Derives the expected active-alert-instance
+  count dynamically from Alertmanager's own `GET /api/v2/alerts`
+  response (never hard-coded to a specific number), so it correctly
+  requires one distinct, correctly-mapped incident per active alert
+  instance — proving a single notification group never collapses
+  multiple alerts into one incident, whether one or several instances
+  are actually active at verification time. Tolerates a pre-existing
+  incident from an earlier genuine outage via a `--since` freshness
+  check on `last_seen_at`, so a stale incident can never be mistaken
+  for fresh proof.
+- **`scripts/verify-alert-lifecycle.sh` extended, not duplicated:** a
+  new `VERIFY_INGESTION` flag (default `false`, preserving the original
+  Phase 2B.4-only behavior exactly, including when called from
+  `scripts/verify-observability.sh`) gates two new sections using the
+  SAME real, controlled `otel-collector` outage this script already
+  performs — no second Collector-outage test was added anywhere. When
+  enabled: prepares the webhook secret and confirms control-plane
+  readiness before the outage begins; then, after Prometheus/
+  Alertmanager confirm real firing but **before** the Collector is
+  restarted, polls `scripts/verify-ingestion.py` (bounded retries,
+  accounting for Alertmanager's real `group_wait: 10s`) until the
+  genuine webhook delivery is confirmed persisted. **Real end-to-end
+  run, `VERIFY_INGESTION=true bash scripts/verify-alert-lifecycle.sh`,
+  against the live stack:** `TelemetryPipelineUnavailable` went
+  inactive → firing (`active_series=2`, both scrape-target instances,
+  confirmed in Prometheus) → Alertmanager confirmed the alert active →
+  its real webhook delivery was confirmed persisted as a
+  correctly-mapped incident (`severity=critical`, title matching the
+  rule's real `summary` annotation, `status=open`) **before**
+  `otel-collector` was restarted → Collector restarted → recovery to
+  inactive confirmed in both Prometheus and Alertmanager → a fresh real
+  checkout confirmed telemetry resumed. The real incident this test
+  created was deliberately **not deleted** afterward — genuine state
+  from a genuine event, and the `--since` freshness check specifically
+  exists so future runs tolerate finding it already there rather than
+  requiring a clean slate.
+- `Makefile` extended: `webhook-secret-init`, `verify-webhook-ingestion`,
+  and `verify-alert-ingestion` (`VERIFY_INGESTION=true
+  ./scripts/verify-alert-lifecycle.sh` — the expensive real acceptance
+  gate, reusing the existing lifecycle script rather than a second
+  Collector-outage test), all added to `.PHONY` and `help`; `db-up` now
+  also runs `scripts/init-webhook-secret.sh` first. Every existing
+  target unchanged.
+- `.github/workflows/ci.yml` extended, not duplicated: a new
+  "Initialize webhook secret (Phase 3C)" step runs right after creating
+  the runtime `.env` and before Docker Compose config validation; a new
+  "Verify webhook ingestion (Phase 3C)" step runs the identical
+  `scripts/verify-webhook-ingestion.sh` used locally, placed immediately
+  after the existing Phase 3B control-plane verification step and well
+  before the expensive real-fault lifecycle gate; the pre-existing final
+  "Run alert lifecycle acceptance test" step was renamed and now runs
+  with `VERIFY_INGESTION=true` — one real Collector outage proves both
+  Phase 2B.4 and Phase 3C, never two. `scripts/init-webhook-secret.sh`
+  and `scripts/verify-webhook-ingestion.sh` were also added to the
+  existing shell-syntax-check step (which, in passing, also gained
+  `scripts/verify-alert-lifecycle.sh`, previously missing from that
+  check). `control-plane`/`alertmanager` logs were already present in
+  the "Show service logs" failure-diagnostics step from Phase 3B/2B.4
+  and needed no change. CI YAML validity reconfirmed via
+  `python3 -c "import yaml; yaml.safe_load(...)"` after all edits. The
+  job's `timeout-minutes: 20` was left unchanged — no real CI execution
+  measurement existed to justify adjusting it. Not yet run on GitHub
+  Actions in this updated form.
+- New `docs/architecture/phase-3c-alert-ingestion.md`: the
+  authoritative, detailed reference for the Alertmanager configuration,
+  secret setup, payload validation, field mapping, atomic dedup/upsert
+  design (including the real bug found and fixed), transaction/retry
+  behavior, firing/resolved semantics, and the full verification
+  story. `docs/api/control-plane.md`,
+  `docs/architecture/system-overview.md`, and `README.md` updated to
+  summarize and link to it — including fixing several now-stale
+  present-tense claims elsewhere in those documents (e.g. "Alertmanager's
+  only receiver is a no-op local sink", "no control plane to consume
+  these incident signals") that Phase 3C made no longer true, without
+  rewriting the historical narrative of the phases that originally made
+  those claims.
+- **Limitations, honestly reported, not worked around:** resolved
+  Alertmanager notifications are validated and acknowledged but
+  deliberately do nothing else — no incident lifecycle transition
+  engine exists (Phase 3D); no `POST`/`PATCH`/`DELETE` incident API for
+  direct human/agent use; no authentication on the existing read-only
+  `GET /api/v1/*` API; this is local-development security (a single
+  shared Bearer token in a plaintext file), not a production secrets
+  framework or authentication system; no investigation agent,
+  root-cause analysis, RAG, LangGraph, automated remediation, human
+  approval workflow, audit trail, frontend, Redis, Kafka, Kubernetes,
+  or Terraform/AWS were added, per this phase's explicit scope; the V1
+  migration was never modified.
+- **Post-review corrections (same phase, before commit):** independent
+  review of the first version found four real problems, all fixed and
+  re-verified against the real stack, not just described:
+  1. **Secret portability/permissions.** The pinned
+     `prom/alertmanager:v0.34.1` image runs as a real non-root user
+     (`nobody`, uid/gid `65534`, confirmed via `docker inspect`); the
+     original `chmod 600` token file plus a bind-mounted *directory*
+     risked that uid being unable to read it on a host where ownership
+     doesn't line up (e.g. a fresh GitHub Actions runner). Fixed:
+     `docker-compose.yml` now bind-mounts the single `webhook-token`
+     FILE (not its parent directory) at
+     `/etc/alertmanager/secrets/webhook-token`; the host-side
+     `observability/alertmanager/secrets/` directory stays owner-only
+     (`0700`, blocking any other host user), while the file itself is
+     `0644` (the minimum needed for an arbitrary non-root container uid
+     to read it without the script knowing or matching that uid).
+     `scripts/init-webhook-secret.sh` also gained a real **readability
+     preflight** — it runs the actual pinned Alertmanager image, as its
+     actual user, against the freshly-written file and fails closed if
+     it can't read it, never printing the content. **Synchronization**
+     was also fixed: the script now reads the Alertmanager-side file's
+     actual content and compares it to `.env`'s (authoritative) value
+     on every run, repairing a stale/missing copy in place (same inode,
+     so an already-running container sees the fix without a restart)
+     rather than just checking both files are merely nonempty. Verified
+     directly: (a) a real `docker compose exec alertmanager sh -c
+     'id; test -r ...'` confirmed `uid=65534(nobody)` can read the file
+     through the new mount; (b) a simulated stale-copy test confirmed
+     the file is repaired to match `.env` and `.env` itself is left
+     byte-for-byte unchanged; (c) a simulated fresh-checkout (no `.env`,
+     no `secrets/` directory) completed correctly end to end, including
+     the preflight.
+  2. **`scripts/verify-ingestion.py` completeness.** It previously
+     fetched only the first 100 incidents and built its
+     fingerprint-to-incident map naively (a resolved historical row
+     could overwrite an active one depending on item order), and its
+     "two scrape-target instances" check only required *at least one*
+     of Alertmanager's active alerts to match — meaning it could pass
+     on partial delivery. Fixed: `GET /api/v1/incidents` is now fully
+     paginated via the API's own `limit`/`offset` contract; only the
+     currently **active** row per fingerprint is considered (a
+     resolved/closed row is explicitly skipped, and more than one
+     active row for the same fingerprint now fails closed as the real
+     bug it would be); and the expected instance set is now derived
+     from **Prometheus's own `GET /api/v1/rules`** (the real source of
+     truth for what's actually firing) and matched by exact label-set
+     equality against Alertmanager's active alerts — every
+     Prometheus-reported instance must have a matching active
+     Alertmanager alert, or the check fails closed and the existing
+     bounded poll simply retries. The expected count is never
+     hard-coded. Verified directly by the real end-to-end run below,
+     which exercised exactly this: it failed closed for several poll
+     attempts while only one of Prometheus's two real firing instances
+     had an active Alertmanager alert, and separately failed closed
+     again on a genuinely pre-existing stale incident from an earlier
+     session, before correctly confirming both instances fresh.
+  3. **Request body size limit.** Added a real, aggregate 1 MiB
+     ceiling on the webhook's request body
+     (`services/control-plane/src/control_plane/api/webhook_limits.py`),
+     returning `413` when exceeded. A first implementation as a FastAPI
+     `Depends()` was found, empirically, to never actually trigger —
+     reading FastAPI's own `get_request_handler` source confirmed it
+     reads and fully buffers the entire body via `await request.body()`
+     *before any dependency runs at all*. Rebuilt as ASGI middleware
+     (`WebhookBodySizeLimitMiddleware`, registered in `main.py`,
+     internally scoped to only the webhook path) that wraps the raw
+     ASGI `receive()` callable, counting real bytes as they arrive and
+     rejecting before Starlette/FastAPI ever buffers them — genuinely
+     enforced even with a missing or dishonest `Content-Length`, not
+     merely a header check. Never touches the `Authorization` header or
+     logs any content. Three new unit tests (oversized body, oversized
+     body with an understated `Content-Length`, and a body at the limit
+     correctly NOT rejected for size) all pass.
+  4. **Postgres-outage test cleanup safety.**
+     `scripts/verify-webhook-ingestion.sh`'s section 9 deliberately
+     stops PostgreSQL; if an assertion failed between that stop and the
+     section's own restart, PostgreSQL could be left stopped forever
+     (the cleanup trap couldn't reach a stopped database either). Fixed
+     by tracking `POSTGRES_STOPPED_BY_THIS_SCRIPT` and extending the
+     `EXIT` trap to restart PostgreSQL (bounded wait for `healthy`)
+     *before* attempting cleanup, while explicitly capturing and
+     re-asserting the original failure's exit status so this recovery
+     can never mask or change what the script reports. Verified with a
+     standalone harness: stopped PostgreSQL, forced a failure while
+     still stopped, and confirmed both that PostgreSQL ended up healthy
+     again and that the script's own exit code was still the original
+     `1`.
+  - **Documentation** (`docs/architecture/phase-3c-alert-ingestion.md`,
+    `docs/api/control-plane.md`, this file) updated to describe all
+    four corrections and their real verification evidence, replacing
+    now-inaccurate claims from the original description (e.g. "chmod
+    600" on the Alertmanager-side file, "no request size limits beyond
+    FastAPI/Pydantic's own defaults").
+  - **Final validation, run after all four fixes:** targeted shell/
+    Python syntax checks and `docker compose config` all clean;
+    `make control-plane-test` — **43 passed**; `make
+    verify-webhook-ingestion` — **all 10 sections passed** against the
+    real stack, including the real outage-trap recovery path; `make
+    verify-alert-ingestion` — **passed** (exit 0) against the real
+    stack, using the single existing Collector-outage lifecycle path
+    (no second outage test), and in doing so genuinely exercised the
+    strengthened partial-delivery and stale-incident rejection logic
+    described above rather than merely the easy case. `make
+    verify-observability` was **not** rerun, per instructions.

@@ -52,3 +52,25 @@ class DatabaseSettings:
             connect_timeout_seconds=float(os.environ.get("CONTROL_PLANE_DB_CONNECT_TIMEOUT_SECONDS", "5")),
             command_timeout_seconds=float(os.environ.get("CONTROL_PLANE_DB_COMMAND_TIMEOUT_SECONDS", "10")),
         )
+
+
+@dataclass(frozen=True)
+class WebhookSettings:
+    """Phase 3C: the shared secret the Alertmanager -> control-plane
+    webhook (api/webhook_auth.py) checks incoming Bearer tokens
+    against. Deliberately NOT required at startup the way the database
+    settings are: an unconfigured token must not crash this
+    service's read-only API (see docs/api/control-plane.md) — instead
+    it makes every webhook request fail closed (401), since
+    `token` is None and no supplied value can ever equal it. The same
+    value is generated and mirrored into
+    observability/alertmanager/secrets/webhook-token by
+    scripts/init-webhook-secret.sh.
+    """
+
+    token: str | None
+
+    @classmethod
+    def from_env(cls) -> "WebhookSettings":
+        raw = os.environ.get("CONTROL_PLANE_WEBHOOK_TOKEN", "")
+        return cls(token=raw if raw.strip() else None)

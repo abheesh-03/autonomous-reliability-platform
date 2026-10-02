@@ -29,6 +29,17 @@ os.environ.setdefault("POSTGRES_HOST", "postgres.invalid")
 os.environ.setdefault("POSTGRES_USER", "test_user")
 os.environ.setdefault("POSTGRES_PASSWORD", "test_password")
 os.environ.setdefault("POSTGRES_DB", "test_db")
+# Phase 3C: a deterministic, known-in-tests Bearer token so
+# test_webhook.py can exercise both the "correct token" and "incorrect
+# token" paths without depending on whatever a real local .env happens
+# to contain.
+os.environ.setdefault("CONTROL_PLANE_WEBHOOK_TOKEN", "test-webhook-token")
+
+# Exported so test_webhook.py can build a correct `Authorization:
+# Bearer <token>` header without hard-coding the literal value in two
+# places; always reflects whatever is actually in the environment
+# (the setdefault() above, or a real value if one was already set).
+WEBHOOK_TOKEN = os.environ["CONTROL_PLANE_WEBHOOK_TOKEN"]
 
 import pytest
 from fastapi.testclient import TestClient
@@ -43,7 +54,17 @@ class FakeIncidentRepository:
     expects `list_incidents` to apply filters/pagination over (tests
     construct them pre-sorted by last_seen_at DESC, id DESC, matching
     production ordering, so filtering/pagination logic here mirrors
-    what a real SQL query would do)."""
+    what a real SQL query would do).
+
+    `upsert_firing_incident`/`commit` exist so the same fixture can
+    back Phase 3C's webhook route in unit tests too — the in-memory
+    dedup logic here is a reasonable approximation of the real
+    PostgreSQL partial-unique-index upsert
+    (repositories/incident_repository.py), useful for exercising
+    ingestion/service.py's and api/webhook.py's own logic in isolation,
+    but it is NOT proof of real atomic/concurrent database behavior;
+    that proof is scripts/verify-webhook-ingestion.sh against the real
+    database (see that script's and this module's own docstrings)."""
 
     def __init__(self, rows: list[dict]) -> None:
         self.rows = rows
@@ -65,6 +86,46 @@ class FakeIncidentRepository:
             if row["id"] == incident_id:
                 return row
         return None
+
+    async def upsert_firing_incident(
+        self, *, source, source_fingerprint, title, description, severity, first_seen_at, last_seen_at
+    ):
+        for row in self.rows:
+            if (
+                row["source"] == source
+                and row["source_fingerprint"] == source_fingerprint
+                and row["status"] not in ("resolved", "closed")
+            ):
+                row["title"] = title
+                row["description"] = description
+                row["severity"] = severity
+                row["last_seen_at"] = max(row["last_seen_at"], last_seen_at)
+                row["updated_at"] = datetime.now(UTC)
+                return row["id"], False
+
+        new_id = uuid.uuid4()
+        now = datetime.now(UTC)
+        self.rows.append(
+            {
+                "id": new_id,
+                "source": source,
+                "source_fingerprint": source_fingerprint,
+                "title": title,
+                "description": description,
+                "severity": severity,
+                "status": "open",
+                "first_seen_at": first_seen_at,
+                "last_seen_at": last_seen_at,
+                "resolved_at": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        return new_id, True
+
+    async def commit(self) -> None:
+        # No real session/transaction behind this fake — nothing to do.
+        pass
 
 
 def make_incident_row(**overrides) -> dict:

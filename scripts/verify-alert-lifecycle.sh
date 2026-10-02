@@ -12,9 +12,21 @@
 # responsible for all HTTP API validation against Prometheus and
 # Alertmanager — no validation logic is duplicated here.
 #
-# Safe to source ALERT_NAME/PROMETHEUS_URL/ALERTMANAGER_URL from the
-# environment; otherwise defaults to the deterministic
-# TelemetryPipelineUnavailable rule against the standard local ports.
+# As of Phase 3C, setting VERIFY_INGESTION=true additionally proves —
+# using this SAME real, controlled Collector outage, not a second one
+# — that Alertmanager's real webhook delivery (not a synthetic POST
+# from this script) persisted the firing alert as a genuine
+# reliability.incidents row, correctly mapped, with one distinct
+# incident per active alert instance. Default (unset/false) preserves
+# the original Phase 2B.4-only behavior exactly, including when called
+# from scripts/verify-observability.sh. See scripts/verify-ingestion.py
+# for the HTTP-API cross-checking logic (also not duplicated here) and
+# `make verify-alert-ingestion` for the wrapped invocation.
+#
+# Safe to source ALERT_NAME/PROMETHEUS_URL/ALERTMANAGER_URL/
+# CONTROL_PLANE_URL/VERIFY_INGESTION from the environment; otherwise
+# defaults to the deterministic TelemetryPipelineUnavailable rule
+# against the standard local ports, with ingestion assertions off.
 #
 # On any failure (or success), the EXIT trap restores otel-collector if
 # this script is the one that stopped it — the environment is never
@@ -28,7 +40,9 @@ cd "$REPO_ROOT"
 
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://127.0.0.1:9090}"
 ALERTMANAGER_URL="${ALERTMANAGER_URL:-http://127.0.0.1:9093}"
+CONTROL_PLANE_URL="${CONTROL_PLANE_URL:-http://127.0.0.1:8000}"
 ALERT_NAME="${ALERT_NAME:-TelemetryPipelineUnavailable}"
+VERIFY_INGESTION="${VERIFY_INGESTION:-false}"
 
 section() {
   echo ""
@@ -69,6 +83,34 @@ done
 [ "$targets_up" = true ] || fail "Collector scrape targets (otel-collector, otel-collector-app-metrics) were not both UP before the test even started"
 echo "  both Collector scrape targets UP"
 
+if [ "$VERIFY_INGESTION" = "true" ]; then
+  section "1b. (Phase 3C) Prepare webhook secret; confirm control-plane ready"
+
+  ./scripts/init-webhook-secret.sh
+  # Recreates control-plane only if CONTROL_PLANE_WEBHOOK_TOKEN changed
+  # since it last started (Compose's own config-diff detection) — a
+  # freshly-generated secret always actually reaches a running
+  # process, with no manual restart needed.
+  docker compose up -d control-plane
+
+  cp_ready=false
+  for i in $(seq 1 20); do
+    status="$(curl -s --connect-timeout 2 --max-time 10 -o /dev/null -w '%{http_code}' "$CONTROL_PLANE_URL/health/ready" || echo 000)"
+    [ "$status" = "200" ] && cp_ready=true && break
+    echo "  attempt $i/20: control-plane GET /health/ready -> $status"
+    sleep 3
+  done
+  [ "$cp_ready" = true ] || fail "control-plane readiness never reached 200 before the ingestion-enabled lifecycle test began"
+  echo "  control-plane ready to receive the real Alertmanager webhook"
+
+  # Captured now, before the controlled failure begins — passed to
+  # scripts/verify-ingestion.py as the freshness floor an incident's
+  # last_seen_at must meet, so a PRE-EXISTING incident from an earlier
+  # genuine outage (tolerated, never deleted) cannot be mistaken for
+  # proof that THIS run's webhook delivery actually happened.
+  ingestion_since="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())')"
+fi
+
 section "2. Confirm $ALERT_NAME is initially inactive"
 python3 scripts/verify-alerting.py state --prometheus-url "$PROMETHEUS_URL" --alert "$ALERT_NAME" --expect-state inactive
 
@@ -90,6 +132,33 @@ for i in $(seq 1 40); do
   sleep 5
 done
 [ "$firing_ok" = true ] || fail "$ALERT_NAME never reached firing in Prometheus and a matching active alert in Alertmanager"
+
+if [ "$VERIFY_INGESTION" = "true" ]; then
+  section "7b. (Phase 3C) Confirm the real Alertmanager webhook created/updated a persistent incident"
+
+  echo "-- waiting for genuine webhook delivery: Alertmanager's own group_wait"
+  echo "   (10s, see observability/alertmanager/alertmanager.yml) plus real HTTP"
+  echo "   delivery and ingestion time — polling scripts/verify-ingestion.py,"
+  echo "   which only reads Alertmanager's and control-plane's own HTTP APIs and"
+  echo "   never posts anything itself, so this is proof of the real"
+  echo "   Prometheus -> Alertmanager -> webhook -> PostgreSQL chain, not a test"
+  echo "   helper inserting rows directly --"
+
+  ingestion_ok=false
+  for i in $(seq 1 30); do
+    if python3 scripts/verify-ingestion.py incident-from-alert \
+         --alert "$ALERT_NAME" --prometheus-url "$PROMETHEUS_URL" \
+         --alertmanager-url "$ALERTMANAGER_URL" \
+         --control-plane-url "$CONTROL_PLANE_URL" --since "$ingestion_since"
+    then
+      ingestion_ok=true
+      break
+    fi
+    echo "  attempt $i/30: incident not yet confirmed for $ALERT_NAME via the real webhook path"
+    sleep 3
+  done
+  [ "$ingestion_ok" = true ] || fail "the real Alertmanager webhook never resulted in a confirmed, correctly-mapped reliability.incidents row for $ALERT_NAME"
+fi
 
 section "8. Restart otel-collector"
 docker compose start otel-collector >/dev/null
@@ -157,4 +226,8 @@ done
 echo "  telemetry resumed normally: checkout-service /checkouts request count $before_count -> $after_count"
 
 echo ""
-echo "ALERT LIFECYCLE VERIFIED: $ALERT_NAME went inactive -> firing (real Collector outage) -> observed in Alertmanager -> recovered -> inactive, and telemetry resumed."
+if [ "$VERIFY_INGESTION" = "true" ]; then
+  echo "ALERT LIFECYCLE + INGESTION VERIFIED: $ALERT_NAME went inactive -> firing (real Collector outage) -> observed in Alertmanager -> delivered via its real webhook -> persisted as reliability.incidents row(s), correctly mapped -> recovered -> inactive, and telemetry resumed."
+else
+  echo "ALERT LIFECYCLE VERIFIED: $ALERT_NAME went inactive -> firing (real Collector outage) -> observed in Alertmanager -> recovered -> inactive, and telemetry resumed."
+fi

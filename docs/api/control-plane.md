@@ -1,4 +1,4 @@
-# Control Plane API (Phase 3B)
+# Control Plane API (Phase 3B, extended Phase 3C)
 
 This document describes the FastAPI control plane service
 (`services/control-plane`) and its HTTP API. It is the authoritative
@@ -6,30 +6,46 @@ reference for endpoints, request/response shapes, DB configuration,
 readiness behavior, and scope — summarized in
 [README.md](../../README.md#control-plane-phase-3b) and
 [docs/architecture/system-overview.md](../architecture/system-overview.md#control-plane-phase-3b).
+Phase 3C's webhook ingestion endpoint is summarized below; full detail
+(Alertmanager configuration, secret setup, field mapping, atomic
+dedup/upsert design, transaction behavior, and the real end-to-end
+acceptance proof) is in
+[docs/architecture/phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md).
 
 ## Where this fits
 
 ```
-HTTP client --> FastAPI control plane (:8000) --> IncidentRepository --> PostgreSQL reliability.incidents
+HTTP client (read-only) --> FastAPI control plane (:8000) --> IncidentRepository --> PostgreSQL reliability.incidents
+Alertmanager (internal Docker network, authenticated) --> POST /internal/v1/alertmanager/webhook --^
 ```
 
 `reliability.incidents` is the Phase 3A schema
 (`database/migrations/V1__create_incident_schema.sql` — see
 [docs/architecture/incident-domain-model.md](../architecture/incident-domain-model.md)).
-The control plane is a **pure reader** of that table: it never creates,
-alters, or writes to it. Flyway remains the only thing that owns the
-schema.
+The control plane never creates, alters, or drops this table — Flyway
+remains the only thing that owns the schema. As of Phase 3C it is no
+longer a *pure reader* of it, though: ONE route,
+`POST /internal/v1/alertmanager/webhook`, writes to it — see
+[Webhook ingestion (Phase 3C)](#webhook-ingestion-phase-3c) below.
+Every other route remains exactly as read-only as Phase 3B left it.
 
 **Scope, explicitly:**
 
 - **Implemented (Phase 3B):** a read-only HTTP API — list incidents
   with filtering/pagination, fetch one incident by id — plus liveness
   and readiness probes.
-- **Not implemented, by design:** any endpoint that creates, updates,
-  or deletes an incident (no `POST`/`PATCH`/`DELETE` exists anywhere in
-  this API); ingestion of real alerts from Alertmanager (Phase 3C);
-  incident lifecycle transition rules (Phase 3D); authentication of any
-  kind; consumption by an operations console or agent.
+- **Implemented (Phase 3C):** one authenticated, internal write
+  endpoint that ingests real firing Alertmanager alerts as
+  `reliability.incidents` rows, deduplicated per-fingerprint via a real
+  atomic PostgreSQL upsert. Resolved notifications are accepted and
+  acknowledged but do not change any incident's lifecycle.
+- **Not implemented, by design:** any user-facing endpoint that
+  creates, updates, or deletes an incident (no `POST`/`PATCH`/`DELETE`
+  exists for incidents themselves — the webhook above is an internal
+  ingestion path, not an incident CRUD API); incident lifecycle
+  transition rules (Phase 3D); authentication on the `GET /api/v1/*`
+  read API (still none — local development only); consumption by an
+  operations console or agent.
 
 ## Running it
 
@@ -219,6 +235,65 @@ malformed value returns `422` with no extra code needed). Returns the
 same incident object shown above on `200`, or `404`
 (`{"detail": "incident not found"}`) if no row matches.
 
+## Webhook ingestion (Phase 3C)
+
+### `POST /internal/v1/alertmanager/webhook`
+
+The one authenticated write path in this service. Requires
+`Authorization: Bearer <token>` (constant-time comparison against
+`CONTROL_PLANE_WEBHOOK_TOKEN`; missing/incorrect token, or an
+unconfigured server-side secret, → `401`, before any incident write).
+Accepts Alertmanager's real webhook_configs version-4 JSON payload.
+
+Request (abbreviated — see
+[phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md#payload-validation)
+for the full validated field list):
+
+```json
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"TelemetryPipelineUnavailable\"}",
+  "status": "firing",
+  "receiver": "control-plane-webhook",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {"alertname": "TelemetryPipelineUnavailable", "severity": "critical"},
+      "annotations": {"summary": "OTel Collector scrape target otel-collector is down"},
+      "startsAt": "2026-09-30T12:00:00Z",
+      "fingerprint": "8d2b83b6bbca23c7"
+    }
+  ]
+}
+```
+
+Response (`200`):
+
+```json
+{"firing_processed": 1, "resolved_ignored": 0, "incidents_created": 1, "incidents_updated": 0}
+```
+
+Only `status == "firing"` alerts are ever mapped to an incident
+(per-alert status, never the group-level `status` — a batch can mix
+firing and resolved entries). A firing alert is upserted atomically,
+keyed on `(source="alertmanager", source_fingerprint=<the alert's real
+fingerprint>)`, using the exact same partial unique index Phase 3A
+defined (`incidents_active_fingerprint_uniq`) as the database-level
+deduplication mechanism — a duplicate delivery updates the existing
+active incident (id/first_seen_at/status preserved, last_seen_at
+advanced) rather than creating a second row or erroring; a resolved
+historical row for the same fingerprint is never touched. A
+resolved-status alert is validated and counted in
+`resolved_ignored` but never creates or modifies anything — see
+[Phase 3C resolved-alert limitations](../architecture/phase-3c-alert-ingestion.md#phase-3c-resolved-alert-limitations).
+The whole batch is one transaction: either every valid firing alert is
+persisted, or (on any failure, including a real database outage, which
+returns `503`) none are.
+
+Full design, the Alertmanager-side configuration, secret setup, and the
+real end-to-end acceptance proof:
+[docs/architecture/phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md).
+
 ## Error handling
 
 | Condition | Status | Body |
@@ -227,17 +302,27 @@ same incident object shown above on `200`, or `404`
 | Malformed UUID path param | `422` | FastAPI's standard validation error |
 | Invalid `status`/`severity` filter | `422` | `{"detail": "invalid status filter: '...'"}` (or `severity`) |
 | `limit`/`offset` out of range | `422` | FastAPI's standard validation error (`Query(ge=..., le=...)`) |
+| Missing/incorrect webhook Bearer token | `401` | `{"detail": "unauthorized"}` (webhook endpoint only) |
+| Malformed/unsupported webhook payload | `422` | FastAPI's standard validation error (webhook endpoint only) |
 | PostgreSQL/schema temporarily unavailable | `503` | `{"detail": "database temporarily unavailable"}` |
 
-The `503` case is handled by a single global
-`@app.exception_handler(SQLAlchemyError)` in `main.py`, so every route
-gets identical, consistent behavior rather than duplicated try/except
-blocks. In every case, the HTTP response **never** contains a
-password, connection string, raw SQL, or a stack trace — those are
-logged server-side only (`make control-plane-logs`). An unexpected
-programming error (anything not a `SQLAlchemyError`) is not silently
-converted into a misleading `404` or `200` — it propagates as FastAPI's
-normal unhandled-exception `500`.
+The `503` case is handled by two global handlers in `main.py`:
+`@app.exception_handler(SQLAlchemyError)` (the large majority of real
+failures) and, as of Phase 3C, `add_exception_handler(OSError, ...)` —
+added after a real integration test found that a fully-stopped
+PostgreSQL can surface as a raw `socket.gaierror` that SQLAlchemy's
+asyncpg dialect never wraps into a `SQLAlchemyError` at all (see
+[phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md#real-bug-found-and-fixed-during-implementation)
+for the full story); safe because PostgreSQL is this service's only
+external I/O dependency. Every route gets identical, consistent
+behavior rather than duplicated try/except blocks. In every case, the
+HTTP response **never** contains a password, connection string, raw
+SQL, a stack trace, or (for the webhook's own 401s) the configured or
+supplied Bearer token — those are logged server-side only
+(`make control-plane-logs`). An unexpected programming error (anything
+not a `SQLAlchemyError`/`OSError`) is not silently converted into a
+misleading `404` or `200` — it propagates as FastAPI's normal
+unhandled-exception `500`.
 
 ## Architecture notes
 
@@ -262,6 +347,14 @@ normal unhandled-exception `500`.
 - **No large SQL in route handlers** (`src/control_plane/api/incidents.py`):
   handlers validate query params and delegate entirely to the
   repository.
+- **Webhook ingestion (Phase 3C)** is split the same way: route
+  (`api/webhook.py`, thin), authentication dependency
+  (`api/webhook_auth.py`), request/response schemas
+  (`domain/alertmanager_webhook.py`), alert-to-incident field
+  derivation (`ingestion/mapping.py`, a pure function), and the actual
+  atomic upsert SQL (`repositories/incident_repository.py`'s
+  `upsert_firing_incident`) — see
+  [docs/architecture/phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md#application-design).
 
 ## Docker / Compose
 
@@ -280,22 +373,37 @@ normal unhandled-exception `500`.
   container orchestration healthcheck should reflect.
 - No new persistent volume; no `profiles:` restriction (unlike
   `flyway`, it **does** start on a plain `docker compose up -d`).
+- As of Phase 3C, also receives `CONTROL_PLANE_WEBHOOK_TOKEN` (default
+  empty string) — see
+  [phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md#secret-initialization).
 
 ## Testing
 
 **Unit tests** (`services/control-plane/tests/`, `make
-control-plane-test`, 20 tests): dependency-injected fakes — an
+control-plane-test`, 40 tests): dependency-injected fakes — an
 in-memory `FakeIncidentRepository` (installed via
 `app.dependency_overrides[get_incident_repository]`) for the incidents
-endpoints, and fake engine/connection doubles for the health endpoints.
-No real database involved. Covers: valid serialization, empty
-collection, pagination, status/severity/source filtering, deterministic
-ordering, UUID lookup, 404, malformed UUID (422), out-of-range
-pagination (422 × 3), invalid status/severity filters (422 × 2), and
-two explicit 503-with-no-leaked-secret tests.
+and webhook endpoints, and fake engine/connection doubles for the
+health endpoints. No real database involved. Covers: valid
+serialization, empty collection, pagination, status/severity/source
+filtering, deterministic ordering, UUID lookup, 404, malformed UUID
+(422), out-of-range pagination (422 × 3), invalid status/severity
+filters (422 × 2), two explicit 503-with-no-leaked-secret tests, and
+(Phase 3C, `test_webhook.py`, 20 tests) valid authenticated firing
+payload, missing/incorrect Bearer token, an unconfigured server secret
+(fail-closed), malformed payload, missing required label, unsupported
+severity, invalid fingerprint, invalid timestamp, empty batch,
+multi-alert batch, mixed firing/resolved batch, resolved-only (no
+incident), summary/description mapping, safe title fallback, duplicate
+firing preserves identity, a forced database error not reported as
+success, a simulated DNS-resolution failure also returning 503, and no
+secret value in any error response.
 
 **Mocked tests are not sufficient for acceptance on their own** — see
-below.
+below. In particular, the mocked `FakeIncidentRepository`'s
+`upsert_firing_incident` approximates the real atomic-upsert dedup
+behavior in Python for route-level testing only; it is explicitly not
+proof of PostgreSQL's own real partial-unique-index upsert semantics.
 
 ## Integration verification
 
@@ -337,29 +445,58 @@ Summary of what it proves, end to end, against the real stack:
     separate best-effort `EXIT` trap for cleanup on an earlier failure
     that never masks the original failure.
 
+**Phase 3C** adds two further real-integration layers, both detailed in
+[phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md#verification):
+`scripts/verify-webhook-ingestion.sh` (`make verify-webhook-ingestion`)
+— a focused, fast acceptance test POSTing directly to this webhook
+endpoint (auth, payload validation, the real atomic upsert/dedup
+behavior, transaction boundaries, and a real PostgreSQL outage) — and
+`scripts/verify-alert-lifecycle.sh` with `VERIFY_INGESTION=true`
+(`make verify-alert-ingestion`) — the genuine end-to-end proof that a
+real Prometheus alert, delivered through Alertmanager's own real
+webhook (never a synthetic POST), becomes a persisted, correctly-mapped
+incident.
+
 All 14 sections passed on the first real run against the live stack.
 
 ## Security limitations (local development only)
 
-- **No authentication or authorization** of any kind — anyone who can
-  reach `127.0.0.1:8000` on the host can read every incident.
-  Acceptable for local development only; a prerequisite for any
-  non-local deployment.
-- Read-only today, but this is an API-level restriction (no
-  `POST`/`PATCH`/`DELETE` routes exist), not a database-level one — the
+- **The read-only `GET /api/v1/*` API has no authentication or
+  authorization at all** — anyone who can reach `127.0.0.1:8000` on the
+  host can read every incident. Acceptable for local development only;
+  a prerequisite for any non-local deployment.
+- **The one write path, `POST /internal/v1/alertmanager/webhook`, is
+  authenticated** (Bearer token, fail-closed, constant-time comparison
+  — see [Webhook ingestion](#webhook-ingestion-phase-3c) above) but
+  this is explicitly **local-development security, not a production
+  authentication framework**: a single shared secret in a plaintext
+  file (`observability/alertmanager/secrets/webhook-token`), no token
+  rotation automation, no per-client credentials, no external secrets
+  service. See
+  [phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md#secret-initialization)
+  for the full reasoning.
+- Read-only-at-the-API-level is not a database-level restriction — the
   `POSTGRES_USER` credential used has whatever privileges the existing
   local PostgreSQL setup grants it.
-- No rate limiting, no request size limits beyond FastAPI/Pydantic's
-  own defaults, no TLS (plain HTTP, loopback-only).
+- No rate limiting, no TLS (plain HTTP). The webhook does enforce a
+  real, aggregate request-body size limit (1 MiB, via ASGI middleware —
+  see
+  [phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md#request-body-size-limit)),
+  on top of Pydantic's own structural batch/label limits; the read API
+  has no size limit beyond FastAPI/Pydantic's own defaults. The read
+  API is loopback-only; the webhook is reachable only over the internal
+  Docker network, never published on a host port.
 
-## Planned (Phase 3C / 3D, not yet implemented)
+## Planned (Phase 3D, not yet implemented)
 
-- **Phase 3C:** ingesting real Alertmanager alerts into
-  `reliability.incidents` (the write path this phase deliberately does
-  not build).
-- **Phase 3D:** lifecycle transition endpoints
+- Lifecycle transition endpoints
   (acknowledge/investigate/remediate/resolve/close) with real
   transition-validity rules, superseding the data-integrity-only
   `resolved_at`/`status` constraint Phase 3A already enforces.
-- Authentication, an operations console, and any agent consumption of
-  this API all remain future work.
+- Making a resolved Alertmanager notification (already delivered and
+  acknowledged as of Phase 3C, but currently a no-op) actually change
+  an incident's status.
+- Any `POST`/`PATCH`/`DELETE` incident API for direct human/agent use
+  (distinct from Phase 3C's internal Alertmanager ingestion path).
+- Authentication on the read API, an operations console, and any agent
+  consumption of this API all remain future work.

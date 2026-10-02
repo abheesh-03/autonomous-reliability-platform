@@ -1,28 +1,54 @@
-# Alertmanager configuration for local development (Phase 2B.4).
+# Alertmanager configuration for local development.
 #
 # Receives, groups, and tracks the lifecycle of alerts fired by
 # Prometheus (see ../prometheus/rules/alerts.yml) — Alertmanager itself
 # never evaluates a PromQL expression; that happens in Prometheus.
 #
-# Deliberately no outbound notification integration (no email, Slack,
-# PagerDuty, or webhook to any external/local service) — this phase
-# builds the alert pipeline itself, not a notification channel. The
-# single receiver below has no integration configured at all ("null"
-# receiver), which is a normal, fully valid Alertmanager receiver: it
-# still receives every alert routed to it, groups them per `route`, and
-# is visible through Alertmanager's real API (GET /api/v2/alerts) with
-# real firing/resolved state — it just never sends anything anywhere.
-# A future control plane can later add a real receiver (e.g. a webhook
-# it owns) without changing this routing structure.
+# As of Phase 3C, the single receiver below is a REAL webhook pointed
+# at the FastAPI control plane's internal ingestion endpoint
+# (POST /internal/v1/alertmanager/webhook, see
+# services/control-plane/src/control_plane/api/webhook.py and
+# docs/api/control-plane.md), reached over the Compose network's own
+# internal DNS ("control-plane", never a published host port) and
+# authenticated with a Bearer token Alertmanager reads from a
+# gitignored, locally-generated file (see
+# scripts/init-webhook-secret.sh) — never a literal value in this
+# file. Before Phase 3C this receiver was a no-op "null" sink with no
+# integration configured at all; now a genuine firing alert
+# automatically creates or updates a persistent
+# reliability.incidents row.
+#
+# send_resolved is enabled so Alertmanager also delivers resolved
+# notifications — but Phase 3C's ingestion endpoint deliberately does
+# NOT act on them yet (no incident is created from a resolved-only
+# delivery, and no existing incident's status/resolved_at is touched);
+# it only validates the envelope and acknowledges receipt. Real
+# incident resolution semantics are Phase 3D's job — see
+# docs/api/control-plane.md's "Phase 3C resolved-alert limitations"
+# section.
 global:
   resolve_timeout: 5m
 
 route:
-  receiver: local-null
+  receiver: control-plane-webhook
   group_by: ["alertname", "severity"]
   group_wait: 10s
   group_interval: 30s
   repeat_interval: 1h
 
 receivers:
-  - name: local-null
+  - name: control-plane-webhook
+    webhook_configs:
+      - url: http://control-plane:8000/internal/v1/alertmanager/webhook
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            # Alertmanager re-reads this file on every delivery attempt
+            # (it is not a startup-only read), so a future secret
+            # rotation would take effect without restarting
+            # Alertmanager — not exercised by scripts/init-webhook-secret.sh
+            # today (which deliberately never rotates an existing
+            # secret; see that script's own docstring), but the
+            # mechanism supports it.
+            credentials_file: /etc/alertmanager/secrets/webhook-token

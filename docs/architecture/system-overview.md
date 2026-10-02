@@ -55,22 +55,26 @@ otel-collector --OTLP (traces)--> tempo --> grafana
   (a separate path: Alloy reads container logs directly from the Docker
    API, not via otel-collector or any OTEL_* setting above)
 
-prometheus --alert rules (rules/alerts.yml)--> alertmanager --> (future control plane / notification integration)
+prometheus --alert rules (rules/alerts.yml)--> alertmanager --webhook (internal, Bearer auth)--> control-plane :8000
   (Prometheus is the only rule evaluator; Alertmanager only receives,
    groups, and tracks alert state — it never evaluates a PromQL
-   expression itself. Alertmanager's only receiver today is a no-op
-   local sink: no email/Slack/PagerDuty/webhook exists yet.)
+   expression itself. As of Phase 3C, Alertmanager's one receiver is a
+   REAL webhook to control-plane's internal ingestion endpoint — no
+   longer a no-op local sink. Still no email/Slack/PagerDuty.)
 
-(future Phase 3C) alertmanager --> incident --> postgres (reliability.incidents)
-  (Phase 3A builds only the destination: a dedicated "reliability"
-   schema in the existing postgres service, applied via versioned
-   Flyway migrations. No code exists yet that turns a real Alertmanager
-   alert into a row here — that ingestion step is Phase 3C.)
+alertmanager --POST /internal/v1/alertmanager/webhook--> control-plane --atomic upsert--> postgres (reliability.incidents)
+  (Phase 3C: a real firing alert automatically creates or updates a
+   persistent incident, deduplicated per-fingerprint via the real
+   partial unique index Phase 3A defined
+   (incidents_active_fingerprint_uniq). Resolved notifications are
+   accepted/acknowledged but do not change any incident's lifecycle —
+   see docs/architecture/phase-3c-alert-ingestion.md.)
 
-postgres (reliability.incidents) --SQLAlchemy async / asyncpg (read-only)--> control-plane :8000 --> (future) operations console
-  (Phase 3B: control-plane only reads reliability.incidents via
-   GET /api/v1/incidents and GET /api/v1/incidents/{id}. Nothing writes
-   to the table through this API yet — no POST/PATCH/DELETE exists.)
+postgres (reliability.incidents) --SQLAlchemy async / asyncpg--> control-plane :8000 --> (future) operations console
+  (GET /api/v1/incidents and GET /api/v1/incidents/{id} remain
+   read-only and unauthenticated, exactly as Phase 3B left them. The
+   only write path is the Alertmanager webhook above — there is still
+   no user-facing POST/PATCH/DELETE incident API.)
 
 Complete distributed trace (one real POST /checkouts, now persisted in Tempo):
                     +-> checkout payment CLIENT      -> payment SERVER
@@ -146,32 +150,73 @@ Full inventory:
   This phase builds the data foundation only: no Alertmanager ingestion
   (Phase 3C) and no lifecycle transition validation (Phase 3D) exist
   yet.
-- **Control plane** (Phase 3B, `services/control-plane`): a **FastAPI**
-  service, the fifth backend application in this repository (but
-  explicitly not one of the four demo commerce services above, and not
-  yet instrumented with OpenTelemetry). It is **read-only**: it exposes
-  `GET /api/v1/incidents` (status/severity/source filters, pagination,
-  deterministic `last_seen_at DESC, id DESC` ordering) and
-  `GET /api/v1/incidents/{id}` over `reliability.incidents`, plus
-  `GET /health/live` and `GET /health/ready`. It connects via SQLAlchemy
-  2.x async + `asyncpg`, credentials from environment variables only,
-  and never calls `metadata.create_all()` — Flyway remains the sole
-  schema owner. Engine construction is non-blocking, so the service
-  stays up and `/health/ready` correctly reports `503` if PostgreSQL or
-  the `reliability` schema is temporarily unavailable (e.g. migrations
-  not yet applied, or PostgreSQL mid-restart), recovering on its own
-  once they become available — verified empirically against a real,
+- **Control plane** (Phase 3B, extended Phase 3C,
+  `services/control-plane`): a **FastAPI** service, the fifth backend
+  application in this repository (but explicitly not one of the four
+  demo commerce services above, and not yet instrumented with
+  OpenTelemetry). Its `GET /api/v1/incidents` (status/severity/source
+  filters, pagination, deterministic `last_seen_at DESC, id DESC`
+  ordering), `GET /api/v1/incidents/{id}`, `GET /health/live`, and
+  `GET /health/ready` endpoints remain exactly as read-only and
+  unauthenticated as Phase 3B left them. It connects via SQLAlchemy 2.x
+  async + `asyncpg`, credentials from environment variables only, and
+  never calls `metadata.create_all()` — Flyway remains the sole schema
+  owner. Engine construction is non-blocking, so the service stays up
+  and `/health/ready` correctly reports `503` if PostgreSQL or the
+  `reliability` schema is temporarily unavailable (e.g. migrations not
+  yet applied, or PostgreSQL mid-restart), recovering on its own once
+  they become available — verified empirically against a real,
   unmigrated database and a real PostgreSQL restart, with no manual
   container restart. Runs via the existing `docker-compose.yml`
   (`control-plane` service, `127.0.0.1:8000`), does not depend on the
   `flyway` service automatically, and has no new persistent volume.
-  Full detail: [docs/api/control-plane.md](../api/control-plane.md).
+  As of **Phase 3C**, it also exposes ONE authenticated write path,
+  `POST /internal/v1/alertmanager/webhook` (Bearer token, constant-time
+  comparison, fail-closed if unconfigured), reachable only over the
+  internal Compose network — Alertmanager's own real webhook delivery
+  now automatically creates or updates a `reliability.incidents` row
+  for a genuine firing alert, deduplicated per-fingerprint via a real
+  atomic PostgreSQL upsert against the same partial unique index Phase
+  3A defined. Resolved notifications are accepted and acknowledged but
+  do not change any incident's lifecycle yet — see
+  [Alert ingestion](#alert-ingestion-phase-3c) below. Full detail:
+  [docs/api/control-plane.md](../api/control-plane.md) and
+  [docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md).
   Verified by `scripts/verify-control-plane.sh`
-  (`make verify-control-plane`, also run in CI) against the real,
-  running, PostgreSQL-backed service — not mocked. **Still planned:**
-  any write path (incident creation/mutation is Phase 3C/3D), any
-  authentication, and any consumption by an agent or operations
-  console.
+  (`make verify-control-plane`), `scripts/verify-webhook-ingestion.sh`
+  (`make verify-webhook-ingestion`), and
+  `scripts/verify-alert-lifecycle.sh` with `VERIFY_INGESTION=true`
+  (`make verify-alert-ingestion`) — all run in CI — against the real,
+  running, PostgreSQL-backed service, including a genuine Prometheus
+  alert delivered through Alertmanager's own real webhook. **Still
+  planned:** any lifecycle-transition write path (Phase 3D),
+  authentication on the read API, and any consumption by an agent or
+  operations console.
+- **Alert ingestion** (Phase 3C, `observability/alertmanager/alertmanager.yml`
+  + `scripts/init-webhook-secret.sh`): Alertmanager's single receiver
+  was changed from a no-op `local-null` sink to a real webhook
+  (`control-plane-webhook`), reached over Compose's internal DNS
+  (`http://control-plane:8000/internal/v1/alertmanager/webhook`, never
+  a published host port) and authenticated via
+  `http_config.authorization.credentials_file`, pointed at a
+  locally-generated, gitignored secret file — never a literal token in
+  the config. `send_resolved: true` is enabled; `group_by`/
+  `group_wait`/`group_interval`/`repeat_interval` are unchanged from
+  Phase 2B.4. `scripts/init-webhook-secret.sh` generates one
+  cryptographically random Bearer token and mirrors it into both `.env`
+  (`CONTROL_PLANE_WEBHOOK_TOKEN`, read by control-plane) and that secret
+  file — idempotent, never silently rotates an already-distributed
+  secret, wired into `make db-up` so a normal `docker compose up -d`
+  has a working webhook by default. **Empirically proven end to end**,
+  not merely configured: a real, controlled `otel-collector` outage
+  (the same one Phase 2B.4's `scripts/verify-alert-lifecycle.sh` was
+  already using) was independently confirmed, via
+  `scripts/verify-ingestion.py` (which only reads Alertmanager's and
+  control-plane's own HTTP APIs — it posts nothing itself), to result
+  in a real `TelemetryPipelineUnavailable` firing alert being delivered
+  by Alertmanager's own webhook and persisted as a correctly-mapped,
+  currently-active incident. Full detail:
+  [docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md).
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.
@@ -552,10 +597,11 @@ Full inventory:
   interfaces.
 
   **Not implemented:**
-  - Outbound alert notification of any kind (email, Slack, PagerDuty,
-    or any webhook) — Alertmanager's only receiver is a no-op local
-    sink
-  - A control plane to consume these incident signals
+  - Outbound alert notification to a human/external system (email,
+    Slack, PagerDuty) — as of Phase 3C, Alertmanager's one receiver IS
+    a real webhook, but its destination is this repository's own
+    control plane, not an external notification channel; see
+    [Alert ingestion](#alert-ingestion-phase-3c) above
   - Grafana-managed alert rules (Prometheus remains the only rule
     evaluator)
   - Automatic remediation of any kind
@@ -626,15 +672,18 @@ proposed remediation actions.
 ### Control plane
 A **FastAPI** service coordinating the overall workflow: receiving
 incident signals, orchestrating investigation, storing state, and exposing
-APIs consumed by the operations console. As of Phase 3B, this component
-**partially exists**: `services/control-plane` is a real, running
-FastAPI service with a read-only HTTP API over `reliability.incidents`
-— see [Control plane](#control-plane-phase-3b) above and
-[docs/api/control-plane.md](../api/control-plane.md). **Still planned:**
-receiving incident signals (Alertmanager ingestion, Phase 3C),
-orchestrating investigation, any write/lifecycle-transition API
-(Phase 3D), authentication, and consumption by the operations console
-or an agent.
+APIs consumed by the operations console. As of Phase 3B, a read-only
+HTTP API over `reliability.incidents` exists; as of Phase 3C, it also
+**receives real incident signals**: a real, running FastAPI service
+with a read-only `GET` API plus one authenticated internal write
+endpoint that ingests genuine firing Alertmanager alerts — see
+[Control plane](#control-plane-phase-3b) and
+[Alert ingestion](#alert-ingestion-phase-3c) above,
+[docs/api/control-plane.md](../api/control-plane.md), and
+[docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md).
+**Still planned:** orchestrating investigation, any
+lifecycle-transition API (Phase 3D), authentication on the read API,
+and consumption by the operations console or an agent.
 
 ### Durable state
 **PostgreSQL** for persisting incidents, investigation history, decisions,
@@ -646,11 +695,16 @@ applied through versioned Flyway migrations — see
 [docs/architecture/incident-domain-model.md](incident-domain-model.md).
 As of Phase 3B, a read-only FastAPI control plane
 (`services/control-plane`) reads this table over a real HTTP API — see
-[Control plane](#control-plane-phase-3b) above.
-**Still planned:** any application code *writing* to this table (no
-ingestion from Alertmanager — Phase 3C — and no agent exists yet);
-incident lifecycle transition validation (Phase 3D); additional tables
-for investigation history, decisions, approvals, and the audit trail
+[Control plane](#control-plane-phase-3b) above. As of Phase 3C, that
+same control plane also **writes** to it: a real Alertmanager alert,
+delivered through its own authenticated webhook, is atomically
+upserted into `reliability.incidents` — see
+[Alert ingestion](#alert-ingestion-phase-3c) above. **Still planned:**
+incident lifecycle transition validation and a real state machine
+(Phase 3D, including what a *resolved* Alertmanager notification should
+do — accepted/acknowledged today, but not yet acted on); any agent
+reading from or writing to this table; additional tables for
+investigation history, decisions, approvals, and the audit trail
 (future migrations, not yet written).
 
 ### Coordination / ephemeral state
@@ -742,14 +796,23 @@ genuine controlled failure (stopping `otel-collector`) empirically
 proved `TelemetryPipelineUnavailable`'s full `inactive → pending →
 firing → (Alertmanager, active) → resolved → inactive` lifecycle, and
 that application telemetry resumes afterward — not merely that the
-rule and receiver are configured. Alertmanager's only receiver is a
-no-op local sink: there is no outbound notification integration of any
-kind yet, no control plane to consume these incident signals, and none
-of this telemetry is consumed by an agent.
+rule and receiver are configured. At that point, Alertmanager's only
+receiver was still a no-op local sink: there was no outbound
+notification integration of any kind, no control plane to consume
+these incident signals, and none of this telemetry was consumed by
+anything. As of **Phase 3C**, that changed: Alertmanager's one receiver
+is now a real, authenticated webhook to this repository's own control
+plane (not an external notification channel), and the same real
+Collector-outage failure was independently re-proven to result in a
+persisted, correctly-mapped `reliability.incidents` row — see
+[Alert ingestion](#alert-ingestion-phase-3c) above and
+[docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md).
+This telemetry is still not consumed by any agent.
 
 **FUTURE (not yet implemented):**
-- Outbound alert notification (email, Slack, PagerDuty, or any
-  webhook) and a control plane to consume these incident signals
+- Outbound alert notification to an external system (email, Slack,
+  PagerDuty, or any webhook reaching outside this repository's own
+  services)
 - Automatic remediation of any kind
 - A dedicated Tempo/traces dashboard panel
 - Log/trace correlation (emitting trace and span IDs into application
@@ -757,7 +820,8 @@ of this telemetry is consumed by an agent.
 - Per-request access logging in `checkout-service` and
   `inventory-service` (both currently log only at container startup)
 - Consumption of this telemetry (metrics, traces, logs, and now
-  alerts) by an agent for incident detection
+  persisted incidents) by an agent for investigation/root-cause
+  analysis
 
 ### Event streaming
 **Kafka or Redpanda** for propagating incident signals and telemetry

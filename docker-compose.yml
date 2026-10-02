@@ -14,14 +14,19 @@
 #     table). Never started by `docker compose up -d` (profiles:
 #     [tools]) — only via `make db-migrate` or an explicit
 #     `docker compose run`.
-#   - control-plane (Phase 3B): a read-only FastAPI service over
-#     reliability.incidents — the first real backend application built
-#     on the Phase 3A incident model. Not one of the four demo commerce
-#     services; does not call or get called by any of them. Depends
-#     only on postgres being healthy, never on flyway (migrations are
-#     an explicit, separate step — see above); its own readiness
-#     endpoint, not container startup, is what reports whether the
-#     incidents table actually exists yet.
+#   - control-plane (Phase 3B, extended Phase 3C): a FastAPI service
+#     over reliability.incidents — the first real backend application
+#     built on the Phase 3A incident model. Not one of the four demo
+#     commerce services; does not call or get called by any of them.
+#     Depends only on postgres being healthy, never on flyway
+#     (migrations are an explicit, separate step — see above); its own
+#     readiness endpoint, not container startup, is what reports
+#     whether the incidents table actually exists yet. Its GET API
+#     remains read-only and unauthenticated (local dev only); as of
+#     Phase 3C it also exposes ONE authenticated write path,
+#     POST /internal/v1/alertmanager/webhook (Bearer token, see
+#     CONTROL_PLANE_WEBHOOK_TOKEN below), which Alertmanager calls to
+#     turn a real firing alert into a reliability.incidents row.
 #   - checkout-service: orchestrates payment authorization, inventory
 #     reservation, and notification triggering via POST /checkouts
 #     (Phase 1B.4) — the first service-to-service workflow in this
@@ -60,12 +65,13 @@
 #     Centralized Logging (Loki), and Observability Infrastructure
 #     (Prometheus/Collector self-telemetry). No new services; only
 #     Grafana's own provisioning config changed.
-#   - alertmanager (Phase 2B.4): Prometheus evaluates the alert rules
-#     in observability/prometheus/rules/ and routes any firing alert to
-#     Alertmanager, which receives, groups, and tracks alert state
-#     through its own real API. No outbound notification integration
-#     yet (a single no-op "null" receiver) — this phase builds the
-#     alert pipeline itself, not a notification channel.
+#   - alertmanager (Phase 2B.4, extended Phase 3C): Prometheus evaluates
+#     the alert rules in observability/prometheus/rules/ and routes any
+#     firing alert to Alertmanager, which receives, groups, and tracks
+#     alert state through its own real API. As of Phase 3C its single
+#     receiver is a real, authenticated webhook to control-plane's
+#     internal ingestion endpoint (see above) — no longer a no-op
+#     "null" sink. Still no email/Slack/PagerDuty integration.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -139,6 +145,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      # Phase 3C: shared secret for POST /internal/v1/alertmanager/webhook
+      # (see services/control-plane/src/control_plane/api/webhook_auth.py).
+      # Generated locally by scripts/init-webhook-secret.sh, never
+      # committed. Defaults to empty so `docker compose config` and a
+      # clean startup both still work before that script has ever run
+      # — an empty/unset token just means every webhook request fails
+      # closed (401); it does not affect the read-only API at all.
+      CONTROL_PLANE_WEBHOOK_TOKEN: ${CONTROL_PLANE_WEBHOOK_TOKEN:-}
     # Bound to loopback only, like every other observability/infra port
     # in this stack. No authentication exists yet — see
     # docs/api/control-plane.md's security-limitations section; this is
@@ -442,6 +456,25 @@ services:
     restart: unless-stopped
     volumes:
       - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Phase 3C: the Bearer token alertmanager.yml's webhook receiver
+      # authenticates with (http_config.authorization.credentials_file).
+      # Generated locally by scripts/init-webhook-secret.sh; gitignored
+      # (the repo's blanket "secrets/" rule). Mounts the single FILE,
+      # not its parent directory: this image runs as a real non-root
+      # user ("nobody", uid 65534, confirmed via `docker inspect`), and
+      # the host-side secrets/ directory is kept owner-only (0700, see
+      # the init script) so no other host user can browse into it —
+      # mounting the whole directory would make the container inherit
+      # that same 0700-from-a-different-owner barrier and be unable to
+      # even traverse into it. Mounting just the file sidesteps that:
+      # the container's own (root-owned, normal-permission) directory
+      # structure is used for traversal, and only the file's own mode
+      # bits (0644 — see the init script) govern whether "nobody" can
+      # read its content. The init script truncates-and-rewrites this
+      # file in place (never replaces its inode), so a repaired/updated
+      # token is visible to this bind mount without a container
+      # restart.
+      - ./observability/alertmanager/secrets/webhook-token:/etc/alertmanager/secrets/webhook-token:ro
       - alertmanager_data:/alertmanager
     command:
       - --config.file=/etc/alertmanager/alertmanager.yml

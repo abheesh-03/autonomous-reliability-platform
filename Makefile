@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs verify-observability verify-persistence verify-control-plane
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -32,6 +32,9 @@ help: ## Show available targets
 	@echo "  verify-observability Bundled Phase 2A.1-2B.4 verification (starts Compose, checks everything, tears down)"
 	@echo "  verify-persistence  Phase 3A persistence verification (migrations, schema, constraints, restart persistence)"
 	@echo "  verify-control-plane Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)"
+	@echo "  webhook-secret-init  Generate/reuse the local Alertmanager -> control-plane webhook Bearer token"
+	@echo "  verify-webhook-ingestion Phase 3C focused webhook ingestion verification (auth, dedup/upsert, real PostgreSQL)"
+	@echo "  verify-alert-ingestion Phase 3C full acceptance: real Collector outage -> Alertmanager webhook -> persisted incident"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -39,9 +42,10 @@ check: ## Verify local developer prerequisites
 compose-config: ## Validate docker-compose.yml
 	docker compose config
 
-db-up: ## Start PostgreSQL (does not wait for health)
+db-up: ## Start the Compose environment (docker compose up -d)
+	./scripts/init-webhook-secret.sh
 	docker compose up -d
-	@echo "PostgreSQL container started. Run 'make db-status' to check health before using it."
+	@echo "Compose environment started. Run 'make db-status' to check health before using it."
 
 db-down: ## Stop PostgreSQL, preserving the named data volume
 	docker compose down
@@ -145,3 +149,23 @@ verify-persistence: ## Phase 3A persistence verification (migrations, schema, co
 
 verify-control-plane: ## Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)
 	./scripts/verify-control-plane.sh
+
+# Phase 3C: generates (or reuses, idempotently — see the script's own
+# docstring) the local Bearer token Alertmanager uses to authenticate
+# to control-plane's webhook. `make db-up` already calls this
+# automatically; exposed standalone for rerunning it on its own (e.g.
+# after deleting observability/alertmanager/secrets/ to inspect a
+# fresh-checkout path) without bringing the whole stack up again.
+webhook-secret-init: ## Generate/reuse the local Alertmanager -> control-plane webhook Bearer token
+	./scripts/init-webhook-secret.sh
+
+verify-webhook-ingestion: ## Phase 3C focused webhook ingestion verification (auth, dedup/upsert, real PostgreSQL)
+	./scripts/verify-webhook-ingestion.sh
+
+# The expensive real acceptance gate (section 12 of Phase 3C): reuses
+# the existing Phase 2B.4 Collector-outage lifecycle test
+# (scripts/verify-alert-lifecycle.sh) with its Phase 3C ingestion
+# assertions enabled, rather than running a second, separate
+# Collector-outage test — see that script's own docstring.
+verify-alert-ingestion: ## Phase 3C full acceptance: real Collector outage -> Alertmanager webhook -> persisted incident
+	VERIFY_INGESTION=true ./scripts/verify-alert-lifecycle.sh
