@@ -42,10 +42,24 @@ considered — a resolved historical row for the same fingerprint (an
 expected, legitimate artifact of the dedup design) is never mistaken
 for current state.
 
+Phase 3D adds a second subcommand, `confirm-resolved`, used after
+otel-collector has been restarted and Prometheus/Alertmanager have
+both recovered: it takes the exact incident ids `incident-from-alert`
+already confirmed (via `--ids-out`, below) and confirms each one has
+genuinely transitioned to status="resolved" with a populated
+resolved_at — proving Alertmanager's own real resolved webhook
+delivery drove that transition, not merely that the incident still
+exists.
+
 Usage:
     python3 scripts/verify-ingestion.py incident-from-alert \\
         --alert NAME --since ISO8601 \\
-        [--prometheus-url URL] [--alertmanager-url URL] [--control-plane-url URL]
+        [--prometheus-url URL] [--alertmanager-url URL] [--control-plane-url URL] \\
+        [--ids-out FILE]
+
+    python3 scripts/verify-ingestion.py confirm-resolved \\
+        --ids-file FILE --since ISO8601 \\
+        [--control-plane-url URL]
 """
 
 import argparse
@@ -255,6 +269,52 @@ def cmd_incident_from_alert(args):
         "BOTH Prometheus and Alertmanager, each have a correctly-mapped, currently-active reliability.incidents "
         "row, visible via GET /api/v1/incidents."
     )
+
+    if args.ids_out:
+        with open(args.ids_out, "w") as f:
+            for alert in matches:
+                f.write(f"{incidents_by_fp[alert['fingerprint']]['id']}\n")
+        print(f"wrote {len(matches)} confirmed incident id(s) to {args.ids_out}")
+
+    sys.exit(0)
+
+
+def cmd_confirm_resolved(args):
+    """Phase 3D: confirms each incident id in --ids-file has genuinely
+    transitioned to status="resolved" with a populated resolved_at —
+    proving Alertmanager's own real resolved webhook delivery drove the
+    transition (not merely that the row still exists). Read-only, like
+    incident-from-alert: never POSTs anything."""
+    with open(args.ids_file) as f:
+        incident_ids = [line.strip() for line in f if line.strip()]
+    if not incident_ids:
+        fail(f"--ids-file {args.ids_file!r} contained no incident ids")
+
+    since = datetime.fromisoformat(args.since)
+    base = args.control_plane_url.rstrip("/")
+    for incident_id in incident_ids:
+        incident = http_get_json(f"{base}/api/v1/incidents/{incident_id}")
+
+        if incident["status"] != "resolved":
+            fail(f"incident {incident_id}: status={incident['status']!r}, expected 'resolved'")
+
+        if incident["resolved_at"] is None:
+            fail(f"incident {incident_id}: status is 'resolved' but resolved_at is null")
+
+        resolved_at = datetime.fromisoformat(incident["resolved_at"])
+        if resolved_at < since:
+            fail(
+                f"incident {incident_id}: resolved_at={resolved_at.isoformat()} predates this test run's own "
+                f"outage (since={since.isoformat()}) — not genuinely resolved by this run's real webhook delivery"
+            )
+
+        print(f"  incident OK: id={incident_id} status=resolved resolved_at={incident['resolved_at']}")
+
+    print(
+        f"Resolution verified: all {len(incident_ids)} incident(s) confirmed in incident-from-alert have "
+        "genuinely transitioned to status='resolved' with a populated resolved_at, via Alertmanager's own real "
+        "resolved webhook delivery."
+    )
     sys.exit(0)
 
 
@@ -273,9 +333,25 @@ def main():
         help="ISO 8601 timestamp; an incident's last_seen_at must be >= this to count as genuinely "
         "(re)ingested by this run, tolerating a pre-existing incident from an earlier genuine outage",
     )
+    p.add_argument(
+        "--ids-out",
+        default=None,
+        help="optional: write each confirmed incident's id, one per line, to this file — consumed by the "
+        "confirm-resolved subcommand after Alertmanager's resolved webhook has had a chance to arrive",
+    )
+
+    pr = sub.add_parser("confirm-resolved")
+    pr.add_argument("--ids-file", required=True, help="file written by incident-from-alert's --ids-out")
+    pr.add_argument("--control-plane-url", default="http://127.0.0.1:8000")
+    pr.add_argument(
+        "--since",
+        required=True,
+        help="ISO 8601 timestamp; each incident's resolved_at must be >= this to count as genuinely "
+        "resolved by this run's real webhook delivery, not a stale prior resolution",
+    )
 
     args = parser.parse_args()
-    {"incident-from-alert": cmd_incident_from_alert}[args.mode](args)
+    {"incident-from-alert": cmd_incident_from_alert, "confirm-resolved": cmd_confirm_resolved}[args.mode](args)
 
 
 if __name__ == "__main__":

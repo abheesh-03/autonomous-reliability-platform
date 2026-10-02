@@ -62,19 +62,29 @@ prometheus --alert rules (rules/alerts.yml)--> alertmanager --webhook (internal,
    REAL webhook to control-plane's internal ingestion endpoint — no
    longer a no-op local sink. Still no email/Slack/PagerDuty.)
 
-alertmanager --POST /internal/v1/alertmanager/webhook--> control-plane --atomic upsert--> postgres (reliability.incidents)
+alertmanager --POST /internal/v1/alertmanager/webhook--> control-plane --atomic upsert/resolve--> postgres (reliability.incidents)
   (Phase 3C: a real firing alert automatically creates or updates a
    persistent incident, deduplicated per-fingerprint via the real
    partial unique index Phase 3A defined
-   (incidents_active_fingerprint_uniq). Resolved notifications are
-   accepted/acknowledged but do not change any incident's lifecycle —
-   see docs/architecture/phase-3c-alert-ingestion.md.)
+   (incidents_active_fingerprint_uniq). As of Phase 3D, a real resolved
+   notification whose fingerprint matches a currently-active incident
+   genuinely resolves it (occurrence-identity/stale-replay safe, never
+   auto-closing) — see docs/architecture/phase-3c-alert-ingestion.md
+   and docs/architecture/phase-3d-incident-lifecycle.md.)
+
+human/operator (authenticated, distinct token) --PATCH /api/v1/incidents/{id}/status--> control-plane --atomic compare-and-swap--> postgres (reliability.incidents)
+  (Phase 3D: a centralized, validated state machine governs every
+   transition; expected_status is a mandatory optimistic-concurrency
+   guard, enforced via a real atomic conditional UPDATE, proven
+   race-free under 10 genuinely concurrent real requests — see
+   docs/architecture/phase-3d-incident-lifecycle.md.)
 
 postgres (reliability.incidents) --SQLAlchemy async / asyncpg--> control-plane :8000 --> (future) operations console
   (GET /api/v1/incidents and GET /api/v1/incidents/{id} remain
    read-only and unauthenticated, exactly as Phase 3B left them. The
-   only write path is the Alertmanager webhook above — there is still
-   no user-facing POST/PATCH/DELETE incident API.)
+   two write paths are the Alertmanager webhook and the Phase 3D
+   lifecycle PATCH above — there is still no generic incident-editing
+   API.)
 
 Complete distributed trace (one real POST /checkouts, now persisted in Tempo):
                     +-> checkout payment CLIENT      -> payment SERVER
@@ -147,9 +157,9 @@ Full inventory:
   [docs/architecture/incident-domain-model.md](incident-domain-model.md).
   Verified by `scripts/verify-persistence.sh` (`make verify-persistence`,
   also run in CI) against the real database — not SQLite, not mocked.
-  This phase builds the data foundation only: no Alertmanager ingestion
-  (Phase 3C) and no lifecycle transition validation (Phase 3D) exist
-  yet.
+  This phase built the data foundation only; Alertmanager ingestion
+  (Phase 3C) and lifecycle transition validation (Phase 3D) were both
+  added later, as application code against this unchanged schema.
 - **Control plane** (Phase 3B, extended Phase 3C,
   `services/control-plane`): a **FastAPI** service, the fifth backend
   application in this repository (but explicitly not one of the four
@@ -170,28 +180,38 @@ Full inventory:
   container restart. Runs via the existing `docker-compose.yml`
   (`control-plane` service, `127.0.0.1:8000`), does not depend on the
   `flyway` service automatically, and has no new persistent volume.
-  As of **Phase 3C**, it also exposes ONE authenticated write path,
+  As of **Phase 3C**, it also exposes an authenticated write path,
   `POST /internal/v1/alertmanager/webhook` (Bearer token, constant-time
   comparison, fail-closed if unconfigured), reachable only over the
   internal Compose network — Alertmanager's own real webhook delivery
   now automatically creates or updates a `reliability.incidents` row
   for a genuine firing alert, deduplicated per-fingerprint via a real
   atomic PostgreSQL upsert against the same partial unique index Phase
-  3A defined. Resolved notifications are accepted and acknowledged but
-  do not change any incident's lifecycle yet — see
-  [Alert ingestion](#alert-ingestion-phase-3c) below. Full detail:
-  [docs/api/control-plane.md](../api/control-plane.md) and
-  [docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md).
+  3A defined. As of **Phase 3D**, a resolved Alertmanager notification
+  now genuinely resolves the matching active incident (occurrence-
+  identity/stale-replay safe, real `resolved_at`, never auto-closing),
+  and a second authenticated write path,
+  `PATCH /api/v1/incidents/{id}/status` (a distinct Bearer token from
+  the webhook's), lets a human/operator drive the rest of a
+  centralized, validated state machine under real optimistic
+  concurrency — see [Alert ingestion](#alert-ingestion-phase-3c) and
+  [Incident lifecycle](#incident-lifecycle-phase-3d) below. Full
+  detail: [docs/api/control-plane.md](../api/control-plane.md),
+  [docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md),
+  and
+  [docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md).
   Verified by `scripts/verify-control-plane.sh`
   (`make verify-control-plane`), `scripts/verify-webhook-ingestion.sh`
-  (`make verify-webhook-ingestion`), and
+  (`make verify-webhook-ingestion`),
+  `scripts/verify-incident-lifecycle.sh`
+  (`make verify-incident-lifecycle`), and
   `scripts/verify-alert-lifecycle.sh` with `VERIFY_INGESTION=true`
   (`make verify-alert-ingestion`) — all run in CI — against the real,
   running, PostgreSQL-backed service, including a genuine Prometheus
-  alert delivered through Alertmanager's own real webhook. **Still
-  planned:** any lifecycle-transition write path (Phase 3D),
-  authentication on the read API, and any consumption by an agent or
-  operations console.
+  alert delivered through Alertmanager's own real webhook, now proven
+  all the way through to real resolution. **Still planned:**
+  authentication on the read API, an incident audit-history table, and
+  any consumption by an agent or operations console.
 - **Alert ingestion** (Phase 3C, `observability/alertmanager/alertmanager.yml`
   + `scripts/init-webhook-secret.sh`): Alertmanager's single receiver
   was changed from a no-op `local-null` sink to a real webhook
@@ -217,6 +237,35 @@ Full inventory:
   by Alertmanager's own webhook and persisted as a correctly-mapped,
   currently-active incident. Full detail:
   [docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md).
+- **Incident lifecycle** (Phase 3D,
+  `src/control_plane/domain/lifecycle.py` +
+  `src/control_plane/api/incidents.py`'s PATCH route +
+  `src/control_plane/ingestion/service.py`'s resolution logic): a
+  centralized state machine (`open -> {acknowledged, investigating,
+  resolved}`, `acknowledged -> {investigating, resolved}`,
+  `investigating -> {remediating, resolved}`, `remediating ->
+  {investigating, resolved}`, `resolved -> {closed}`, `closed ->
+  {}`) is the single source of truth for every transition — no
+  transition logic duplicated in routes, SQL, or the webhook handler.
+  A new authenticated `PATCH /api/v1/incidents/{id}/status` endpoint
+  (a second, independently random Bearer token,
+  `CONTROL_PLANE_LIFECYCLE_TOKEN`, distinct from the webhook's) lets a
+  human/operator drive it, with `expected_status` as a mandatory
+  optimistic-concurrency guard enforced by a real atomic conditional
+  `UPDATE` — proven race-free under 10 genuinely concurrent real
+  requests (exactly 1 success, 9 correctly rejected). The same
+  Alertmanager webhook endpoint from Phase 3C now also genuinely
+  resolves a matching active incident from a real resolved
+  notification, using `(source, fingerprint, startsAt)` occurrence
+  identity compared against the incident's own `first_seen_at` to
+  safely distinguish a repeat delivery, a stale/delayed replay, and a
+  genuine recurrence — real PostgreSQL testing against accumulated
+  state (not a clean slate) found and fixed two bugs in this exact
+  area, documented in full. No new Flyway migration — this phase is
+  pure application code against the unchanged Phase 3A schema; this
+  transition matrix is enforced at the application layer only, not a
+  database `CHECK` constraint. Full detail:
+  [docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md).
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.
@@ -676,14 +725,22 @@ APIs consumed by the operations console. As of Phase 3B, a read-only
 HTTP API over `reliability.incidents` exists; as of Phase 3C, it also
 **receives real incident signals**: a real, running FastAPI service
 with a read-only `GET` API plus one authenticated internal write
-endpoint that ingests genuine firing Alertmanager alerts — see
-[Control plane](#control-plane-phase-3b) and
-[Alert ingestion](#alert-ingestion-phase-3c) above,
-[docs/api/control-plane.md](../api/control-plane.md), and
-[docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md).
-**Still planned:** orchestrating investigation, any
-lifecycle-transition API (Phase 3D), authentication on the read API,
-and consumption by the operations console or an agent.
+endpoint that ingests genuine firing Alertmanager alerts. As of
+**Phase 3D**, it also **manages the incident lifecycle**: a
+centralized, validated state machine; an authenticated
+`PATCH /api/v1/incidents/{id}/status` endpoint (optimistic concurrency
+via a real atomic compare-and-swap `UPDATE`) for a human/operator; and
+real, source-driven automatic resolution from the same Alertmanager
+webhook — see [Control plane](#control-plane-phase-3b),
+[Alert ingestion](#alert-ingestion-phase-3c), and
+[Incident lifecycle](#incident-lifecycle-phase-3d) above,
+[docs/api/control-plane.md](../api/control-plane.md),
+[docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md),
+and
+[docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md).
+**Still planned:** orchestrating investigation, an incident
+audit-history table, authentication on the read API, and consumption
+by the operations console or an agent.
 
 ### Durable state
 **PostgreSQL** for persisting incidents, investigation history, decisions,
@@ -699,13 +756,17 @@ As of Phase 3B, a read-only FastAPI control plane
 same control plane also **writes** to it: a real Alertmanager alert,
 delivered through its own authenticated webhook, is atomically
 upserted into `reliability.incidents` — see
-[Alert ingestion](#alert-ingestion-phase-3c) above. **Still planned:**
-incident lifecycle transition validation and a real state machine
-(Phase 3D, including what a *resolved* Alertmanager notification should
-do — accepted/acknowledged today, but not yet acted on); any agent
-reading from or writing to this table; additional tables for
-investigation history, decisions, approvals, and the audit trail
-(future migrations, not yet written).
+[Alert ingestion](#alert-ingestion-phase-3c) above. As of **Phase 3D**,
+a real incident **lifecycle** governs this table: a centralized,
+validated state machine, an authenticated management endpoint with
+real optimistic concurrency, and genuine automatic resolution from a
+resolved Alertmanager notification (occurrence-identity/stale-replay
+safe) — see [Incident lifecycle](#incident-lifecycle-phase-3d) above.
+This phase added no new migration; `V1__create_incident_schema.sql` is
+unchanged. **Still planned:** any agent reading from or writing to
+this table; additional tables for investigation history, decisions,
+approvals, and an incident audit trail (future migrations, not yet
+written).
 
 ### Coordination / ephemeral state
 **Redis** for short-lived state such as in-flight workflow coordination.

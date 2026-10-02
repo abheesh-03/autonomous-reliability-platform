@@ -165,27 +165,31 @@ echo "   Phase 3B exposes no incident-creation endpoint), with"
 echo "   deliberately staggered last_seen_at values so ordering and"
 echo "   pagination are independently checkable --"
 
+# occurrence_starts_at (Phase 3D V2, NOT NULL, no column default — same
+# convention as first_seen_at/last_seen_at) is set equal to
+# first_seen_at for each of these directly-inserted rows: none of them
+# have ever accepted a newer firing observation since creation.
 id_a="$(psql_exec -t -A -c "
-  INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at)
-  VALUES ('$TEST_SOURCE', '${TEST_SOURCE}-a', 'Checkout latency high', 'critical', 'open', now() - interval '3 minutes', now())
+  INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at, occurrence_starts_at)
+  VALUES ('$TEST_SOURCE', '${TEST_SOURCE}-a', 'Checkout latency high', 'critical', 'open', now() - interval '3 minutes', now(), now() - interval '3 minutes')
   RETURNING id;
 " | head -1)"
 
 id_b="$(psql_exec -t -A -c "
-  INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at)
-  VALUES ('$TEST_SOURCE', '${TEST_SOURCE}-b', 'Payment errors elevated', 'warning', 'investigating', now() - interval '4 minutes', now() - interval '1 minute')
+  INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at, occurrence_starts_at)
+  VALUES ('$TEST_SOURCE', '${TEST_SOURCE}-b', 'Payment errors elevated', 'warning', 'investigating', now() - interval '4 minutes', now() - interval '1 minute', now() - interval '4 minutes')
   RETURNING id;
 " | head -1)"
 
 id_c="$(psql_exec -t -A -c "
-  INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at, resolved_at)
-  VALUES ('$TEST_SOURCE', '${TEST_SOURCE}-c', 'Synthetic check flaky', 'info', 'resolved', now() - interval '10 minutes', now() - interval '2 minutes', now() - interval '2 minutes')
+  INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at, resolved_at, occurrence_starts_at)
+  VALUES ('$TEST_SOURCE', '${TEST_SOURCE}-c', 'Synthetic check flaky', 'info', 'resolved', now() - interval '10 minutes', now() - interval '2 minutes', now() - interval '2 minutes', now() - interval '10 minutes')
   RETURNING id;
 " | head -1)"
 
 id_d="$(psql_exec -t -A -c "
-  INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at)
-  VALUES ('$TEST_SOURCE', '${TEST_SOURCE}-d', 'Queue backlog growing', 'critical', 'acknowledged', now() - interval '8 minutes', now() - interval '3 minutes')
+  INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at, occurrence_starts_at)
+  VALUES ('$TEST_SOURCE', '${TEST_SOURCE}-d', 'Queue backlog growing', 'critical', 'acknowledged', now() - interval '8 minutes', now() - interval '3 minutes', now() - interval '8 minutes')
   RETURNING id;
 " | head -1)"
 

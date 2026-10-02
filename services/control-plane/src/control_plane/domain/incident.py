@@ -43,3 +43,21 @@ class IncidentListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class IncidentStatusTransitionRequest(BaseModel):
+    """Phase 3D: PATCH /api/v1/incidents/{id}/status request body.
+
+    `expected_status` is mandatory, not optional — it is this
+    endpoint's optimistic-concurrency guard: the request is only
+    applied if the incident's actual current status still matches what
+    the caller believes it to be at the moment of the attempt (enforced
+    atomically by a single conditional UPDATE in the repository, never
+    a separate read-then-write). See
+    docs/architecture/phase-3d-incident-lifecycle.md.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_status: Status
+    target_status: Status

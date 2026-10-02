@@ -17,11 +17,16 @@
 # — that Alertmanager's real webhook delivery (not a synthetic POST
 # from this script) persisted the firing alert as a genuine
 # reliability.incidents row, correctly mapped, with one distinct
-# incident per active alert instance. Default (unset/false) preserves
-# the original Phase 2B.4-only behavior exactly, including when called
-# from scripts/verify-observability.sh. See scripts/verify-ingestion.py
-# for the HTTP-API cross-checking logic (also not duplicated here) and
-# `make verify-alert-ingestion` for the wrapped invocation.
+# incident per active alert instance. As of Phase 3D, the SAME flag
+# additionally proves that once the Collector recovers and Alertmanager
+# resolves, its real resolved webhook delivery (send_resolved: true)
+# actually transitions that exact incident to status=resolved with
+# resolved_at populated — never a simulated resolution. Default
+# (unset/false) preserves the original Phase 2B.4-only behavior
+# exactly, including when called from scripts/verify-observability.sh.
+# See scripts/verify-ingestion.py for the HTTP-API cross-checking logic
+# (also not duplicated here) and `make verify-alert-ingestion` for the
+# wrapped invocation.
 #
 # Safe to source ALERT_NAME/PROMETHEUS_URL/ALERTMANAGER_URL/
 # CONTROL_PLANE_URL/VERIFY_INGESTION from the environment; otherwise
@@ -144,12 +149,18 @@ if [ "$VERIFY_INGESTION" = "true" ]; then
   echo "   Prometheus -> Alertmanager -> webhook -> PostgreSQL chain, not a test"
   echo "   helper inserting rows directly --"
 
+  # Captured so section 12b below (Phase 3D) can confirm these EXACT
+  # incidents — not merely "some incident" — genuinely transition to
+  # resolved once Alertmanager delivers its own real resolved webhook.
+  ingestion_ids_file="$(mktemp)"
+
   ingestion_ok=false
   for i in $(seq 1 30); do
     if python3 scripts/verify-ingestion.py incident-from-alert \
          --alert "$ALERT_NAME" --prometheus-url "$PROMETHEUS_URL" \
          --alertmanager-url "$ALERTMANAGER_URL" \
-         --control-plane-url "$CONTROL_PLANE_URL" --since "$ingestion_since"
+         --control-plane-url "$CONTROL_PLANE_URL" --since "$ingestion_since" \
+         --ids-out "$ingestion_ids_file"
     then
       ingestion_ok=true
       break
@@ -192,6 +203,32 @@ for i in $(seq 1 40); do
 done
 [ "$recovered_ok" = true ] || fail "$ALERT_NAME never recovered to inactive in Prometheus / resolved in Alertmanager"
 
+if [ "$VERIFY_INGESTION" = "true" ]; then
+  section "12b. (Phase 3D) Confirm the real Alertmanager resolved webhook actually resolved the matching incident(s)"
+
+  echo "-- Alertmanager has already delivered its own real resolved webhook"
+  echo "   as part of reaching the 'recovered' state confirmed above (send_resolved:"
+  echo "   true, see observability/alertmanager/alertmanager.yml) — polling"
+  echo "   scripts/verify-ingestion.py confirm-resolved, which only reads"
+  echo "   control-plane's own HTTP API, so this is proof of the real"
+  echo "   Collector recovery -> Prometheus resolves -> Alertmanager resolved"
+  echo "   webhook -> incident resolved chain, not a simulated resolution --"
+
+  resolution_ok=false
+  for i in $(seq 1 20); do
+    if python3 scripts/verify-ingestion.py confirm-resolved \
+         --ids-file "$ingestion_ids_file" --control-plane-url "$CONTROL_PLANE_URL" --since "$ingestion_since"
+    then
+      resolution_ok=true
+      break
+    fi
+    echo "  attempt $i/20: incident(s) not yet confirmed resolved via the real webhook path"
+    sleep 3
+  done
+  rm -f "$ingestion_ids_file"
+  [ "$resolution_ok" = true ] || fail "the real Alertmanager resolved webhook never resulted in the matching incident(s) transitioning to resolved"
+fi
+
 section "13. Trigger a fresh real checkout and confirm telemetry resumes normally"
 before_count="$(curl -fsS -G "$PROMETHEUS_URL/api/v1/query" \
   --data-urlencode 'query=http_server_request_duration_seconds_count{service_name="checkout-service",http_route="/checkouts"}' \
@@ -227,7 +264,7 @@ echo "  telemetry resumed normally: checkout-service /checkouts request count $b
 
 echo ""
 if [ "$VERIFY_INGESTION" = "true" ]; then
-  echo "ALERT LIFECYCLE + INGESTION VERIFIED: $ALERT_NAME went inactive -> firing (real Collector outage) -> observed in Alertmanager -> delivered via its real webhook -> persisted as reliability.incidents row(s), correctly mapped -> recovered -> inactive, and telemetry resumed."
+  echo "ALERT LIFECYCLE + INGESTION + RESOLUTION VERIFIED: $ALERT_NAME went inactive -> firing (real Collector outage) -> observed in Alertmanager -> delivered via its real webhook -> persisted as reliability.incidents row(s), correctly mapped -> recovered -> inactive -> Alertmanager's real resolved webhook delivered -> matching incident(s) transitioned to resolved with resolved_at populated, and telemetry resumed."
 else
   echo "ALERT LIFECYCLE VERIFIED: $ALERT_NAME went inactive -> firing (real Collector outage) -> observed in Alertmanager -> recovered -> inactive, and telemetry resumed."
 fi

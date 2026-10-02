@@ -11,7 +11,14 @@ schema itself (Phase 3A — see
 [incident-domain-model.md](incident-domain-model.md)) or the read-only
 `GET /api/v1/incidents` API (Phase 3B — see
 [docs/api/control-plane.md](../api/control-plane.md)), both unchanged
-by this phase except as noted below.
+by this phase except as noted below. It also does **not** describe
+incident lifecycle transitions or automatic resolution from a resolved
+Alertmanager notification — those were a deliberate, temporary scope
+boundary when this document was first written (see
+[Phase 3C resolved-alert limitations](#phase-3c-resolved-alert-limitations)
+below) and are now implemented in
+[Phase 3D](phase-3d-incident-lifecycle.md), without changing anything
+described here about firing-alert ingestion itself.
 
 ## Where this fits
 
@@ -26,7 +33,7 @@ Alertmanager (receives, groups, tracks state)
     v
 FastAPI control plane: POST /internal/v1/alertmanager/webhook
     |
-    | 1. Bearer-token auth (api/webhook_auth.py)
+    | 1. Bearer-token auth (api/auth.py)
     | 2. Pydantic payload validation (domain/alertmanager_webhook.py)
     | 3. Alert -> incident field mapping (ingestion/mapping.py)
     | 4. Atomic upsert, one transaction (repositories/incident_repository.py)
@@ -192,7 +199,11 @@ left it: read-only, unauthenticated, local-dev-only.
 
 ### Authentication
 
-`api/webhook_auth.py`'s `require_webhook_token` is a router-level
+`api/auth.py`'s `require_webhook_token` (as of Phase 3D, built from a
+shared `_require_token` factory it now shares with
+`require_lifecycle_token` — see
+[phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md)) is a
+router-level
 FastAPI dependency (`APIRouter(..., dependencies=[Depends(require_webhook_token)])`),
 so it runs — and can reject the request — before the handler body, and
 therefore before any incident write, regardless of payload content:
@@ -393,9 +404,11 @@ transaction SQLAlchemy's `AsyncSession` opens on first use, and commits
   ingestion resumes automatically once PostgreSQL is healthy again —
   with no manual control-plane restart.
 - The response is a small acknowledgement — `firing_processed`,
-  `resolved_ignored`, `incidents_created`, `incidents_updated` — never
-  an incident's full representation, and never anything resembling a
-  lifecycle transition result (this endpoint does not implement any).
+  `resolved_processed`, `incidents_created`, `incidents_updated`,
+  `incidents_resolved`, `incidents_ignored` (the last two added by
+  Phase 3D's resolution logic — see
+  [phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md)) —
+  never an incident's full representation.
 
 ### Real bug found and fixed during implementation
 
@@ -419,31 +432,41 @@ alone, without needing a real outage.
 
 ## Firing vs. resolved notification behavior
 
-| | Firing | Resolved |
-|---|---|---|
-| Envelope validated | yes | yes |
-| Counted in response | `firing_processed` | `resolved_ignored` |
-| Incident created | yes, if none active for this fingerprint | **never** |
-| Existing incident updated | yes (see upsert behavior above) | **never** |
-| Incident `status` changed | no (preserved, except `"open"` on first creation) | **no, by design** |
-| `resolved_at` set | no (only `NULL` on first creation) | **no, by design** |
-| Incident deleted | never | **never** |
-| A historical incident auto-reopened | never | **never** |
+**As originally built in Phase 3C** (resolved alerts were validated
+and acknowledged but never acted on — see
+[Phase 3C resolved-alert limitations](#phase-3c-resolved-alert-limitations)
+below for why, and [Phase 3D](phase-3d-incident-lifecycle.md) for how
+this changed):
+
+| | Firing | Resolved (Phase 3C) | Resolved (as of Phase 3D) |
+|---|---|---|---|
+| Envelope validated | yes | yes | yes |
+| Counted in response | `firing_processed` | `resolved_processed` | `resolved_processed` |
+| Incident created | yes, if none active for this fingerprint | never | never |
+| Existing incident updated | yes (see upsert behavior above) | never | — |
+| Incident `status` changed | no (preserved, except `"open"` on first creation) | no | **yes — the matching active incident resolves, if occurrence identity matches** |
+| `resolved_at` set | no (only `NULL` on first creation) | no | **yes, from the alert's real `endsAt`** |
+| Incident deleted | never | never | never |
+| A historical incident auto-reopened | never | never | never |
+| Incident auto-closed | — | — | **never — `closed` remains an explicit human action** |
 
 ## Phase 3C resolved-alert limitations
 
-This is a deliberate, temporary scope boundary, not an oversight.
-Alertmanager delivers real resolved notifications
-(`send_resolved: true`), and this service validates and acknowledges
-them — but **does nothing else with them**. An incident that
-Alertmanager now considers resolved stays exactly as it was in
-`reliability.incidents` (likely still `"open"` or whatever a human/
-future agent last set it to) until Phase 3D introduces the real
-incident lifecycle state machine, including what a resolved
-Alertmanager notification should actually do to an incident's status
-(and under what conditions — e.g. should it require a human
-acknowledgement first?). Building that now would mean guessing at
-transition rules Phase 3D is explicitly responsible for designing.
+This was a deliberate, temporary scope boundary when this phase was
+first built, not an oversight: Alertmanager delivers real resolved
+notifications (`send_resolved: true`), and this service validated and
+acknowledged them — but did nothing else with them, since designing
+real transition/resolution rules was explicitly deferred to a later
+phase responsible for the incident lifecycle state machine as a whole.
+
+**As of Phase 3D, this limitation no longer holds.** A resolved alert
+whose fingerprint matches a currently-active incident now genuinely
+resolves it (real `resolved_at`, occurrence-identity and stale-replay
+safe, never auto-closing) — see
+[docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md)
+for the full design, including the real bug this exact transition
+found and fixed (an initial equality check that could permanently
+strand an active-but-never-resolved incident).
 
 ## Application design
 
@@ -451,9 +474,9 @@ transition rules Phase 3D is explicitly responsible for designing.
 services/control-plane/src/control_plane/
 ├── api/
 │   ├── webhook.py          # route — thin, wires the pieces below together
-│   ├── webhook_auth.py      # Bearer-token authentication dependency
+│   ├── auth.py              # Bearer-token auth (webhook + Phase 3D lifecycle tokens)
 │   ├── webhook_limits.py    # ASGI request-body size guard (registered in main.py)
-│   ├── incidents.py         # unchanged (Phase 3B)
+│   ├── incidents.py         # Phase 3B reads; Phase 3D adds the PATCH status route
 │   └── health.py            # unchanged (Phase 3B)
 ├── domain/
 │   ├── alertmanager_webhook.py  # Pydantic request/response schemas
@@ -602,13 +625,21 @@ never collapsed into one. Recovery, Collector restart, and resumed
 checkout telemetry all followed normally; `make verify-alert-ingestion`
 exited `0`.
 
-## Features reserved for Phase 3D
+## Features implemented in Phase 3D (reserved at the time this document was written)
 
 - Any incident-lifecycle transition (acknowledge, investigate,
   remediate, resolve, close) and the transition-validity rules
-  governing which status may follow which.
-- Making a resolved Alertmanager notification actually do something to
-  an incident's status.
-- Any `POST`/`PATCH`/`DELETE` incident API.
+  governing which status may follow which — see
+  [docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md).
+- Making a resolved Alertmanager notification actually resolve the
+  matching incident.
+- An authenticated `PATCH /api/v1/incidents/{id}/status` endpoint for
+  direct human/operator use.
+
+## Still reserved for Phase 3E+
+
+- An incident audit-history table.
+- Agent-generated remediation, human approval workflows, automated
+  remediation.
 - Authentication for the read-only `GET /api/v1/*` API (still none —
   local development only).

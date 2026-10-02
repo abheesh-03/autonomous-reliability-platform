@@ -4,10 +4,16 @@ This document describes the durable incident-data foundation built in
 Phase 3A: the `reliability.incidents` table, its constraints, its
 deduplication policy, and how migrations and persistence are verified.
 It does **not** describe incident *ingestion* (turning a real
-Alertmanager alert into a row here — Phase 3C) or incident *lifecycle
-transitions* (Phase 3D). Those are explicitly out of scope for this
-phase; see [Planned functionality](#planned-functionality-not-yet-implemented)
-below.
+Alertmanager alert into a row here —
+[Phase 3C](phase-3c-alert-ingestion.md)) or incident *lifecycle
+transitions* (the application-level state machine, management API, and
+automatic resolution built on top of this schema —
+[Phase 3D](phase-3d-incident-lifecycle.md)). Those were explicitly out
+of scope for this phase and are now implemented elsewhere, unchanged
+from this document's perspective — this schema, its constraints, and
+its deduplication policy remain exactly as Phase 3A defined them; see
+[Planned functionality](#planned-functionality-not-yet-implemented)
+below for what is still genuinely unbuilt.
 
 ## Where this fits
 
@@ -97,12 +103,17 @@ status (`incidents_resolved_at_matches_status`, a data-integrity rule,
 not a transition rule — see below). It does **not** enforce which
 status transitions are legal (e.g. that `open` cannot jump directly to
 `closed`, that `resolved` cannot regress to `open`, or that every
-incident must in fact start life as `open`) — **that is explicitly
-deferred to Phase 3D**, which will implement real lifecycle/creation
-transition logic (most likely a trigger or an application-layer state
-machine, to be decided then). Implementing that now would mean
-designing transition rules before there is any real caller to validate
-them against, which this phase's scope explicitly avoids.
+incident must in fact start life as `open`) — that was explicitly
+deferred to Phase 3D at the time this document was written, and is now
+implemented there as an application-layer state machine (not a
+database trigger — see
+[docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md)
+for the full transition matrix, the management API, and the
+concurrency/locking design). This table's own constraints are
+unchanged by that phase: the database still does not itself prevent an
+illegal transition via a direct SQL client — only the authenticated
+HTTP API enforces the matrix, a deliberate, documented application-
+layer boundary, not an oversight.
 
 ### Constraints
 
@@ -199,16 +210,28 @@ compatibility warnings.
 database/
   migrations/
     V1__create_incident_schema.sql
+    V2__add_occurrence_watermark.sql
 ```
 
 Standard Flyway versioned-migration naming (`V<version>__<description>.sql`).
-Future migrations will be added as `V2__...`, `V3__...`, etc. — never
-editing an already-applied migration file (Flyway's checksum
-validation makes that a hard failure, confirmed directly: editing
+Future migrations will be added as `V3__...`, etc. — never editing an
+already-applied migration file (Flyway's checksum validation makes
+that a hard failure, confirmed directly: editing
 `V1__create_incident_schema.sql` after it had been applied and
 re-running `migrate` produced `ERROR: Validate failed: Migrations have
 failed validation — Migration checksum mismatch for migration version 1`,
-a real, reproduced failure, not an assumed one).
+a real, reproduced failure, not an assumed one). `V2__add_occurrence_watermark.sql`
+is the first real instance of this pattern: a Phase 3D post-review
+correction added a single new column
+(`reliability.incidents.occurrence_starts_at`, the occurrence-identity
+watermark — see
+[docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md#post-review-correction-the-occurrence-watermark))
+via `ALTER TABLE`, backfilling it from each existing row's own
+`first_seen_at`, without touching `V1` at all — confirmed directly
+against both a fresh database and the existing, non-empty development
+database (which already held real historical incidents from earlier
+sessions), in both cases applying cleanly and preserving every
+existing row.
 
 **How migrations run:** via a dedicated `flyway` Docker Compose service
 (pinned image, `FLYWAY_SCHEMAS=reliability`, mounts
@@ -302,19 +325,24 @@ Run manually via `make verify-persistence`.
 
 Explicitly out of scope for Phase 3A, per its own instructions:
 
-- **Alertmanager ingestion** (turning a real firing alert into a
-  database row) — Phase 3C.
-- **Incident lifecycle transition validation** (which status changes
-  are legal) — Phase 3D.
-- Any FastAPI control-plane service, HTTP API, or endpoint reading or
-  writing this table.
+- An incident audit-history table (who/when/from what/to what for
+  every transition) — Phase 3E.
 - Any AI/LLM agent, LangGraph, or RAG component.
 - Investigation workflows, remediation actions, or human-approval
   records.
 - A frontend of any kind.
-- Additional tables (signal history, investigations, approval records,
-  audit trails) — future phases will add these through subsequent
-  versioned migrations (`V2__...`, etc.), not retrofitted into `V1`.
+- Additional tables (investigations, approval records, audit trails)
+  — future phases will add these through subsequent versioned
+  migrations (`V3__...`, etc. — `V2` is already taken, see above), not
+  retrofitted into `V1`.
+
+Implemented since this document was first written, by later phases,
+without changing anything described above: Alertmanager ingestion
+(turning a real firing alert into a database row —
+[Phase 3C](phase-3c-alert-ingestion.md)) and incident lifecycle
+transition validation (which status changes are legal, an
+application-layer state machine —
+[Phase 3D](phase-3d-incident-lifecycle.md)).
 
 This document will be extended (not rewritten) as those phases land, in
 the same way `V1__create_incident_schema.sql` is the first of a growing

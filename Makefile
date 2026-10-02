@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -32,9 +32,10 @@ help: ## Show available targets
 	@echo "  verify-observability Bundled Phase 2A.1-2B.4 verification (starts Compose, checks everything, tears down)"
 	@echo "  verify-persistence  Phase 3A persistence verification (migrations, schema, constraints, restart persistence)"
 	@echo "  verify-control-plane Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)"
-	@echo "  webhook-secret-init  Generate/reuse the local Alertmanager -> control-plane webhook Bearer token"
-	@echo "  verify-webhook-ingestion Phase 3C focused webhook ingestion verification (auth, dedup/upsert, real PostgreSQL)"
-	@echo "  verify-alert-ingestion Phase 3C full acceptance: real Collector outage -> Alertmanager webhook -> persisted incident"
+	@echo "  webhook-secret-init  Generate/reuse the local webhook + lifecycle Bearer tokens"
+	@echo "  verify-webhook-ingestion Phase 3C/3D focused webhook ingestion verification (auth, dedup/upsert, resolution, real PostgreSQL)"
+	@echo "  verify-alert-ingestion Phase 3C/3D full acceptance: real Collector outage -> Alertmanager webhook -> persisted + resolved incident"
+	@echo "  verify-incident-lifecycle Phase 3D real PostgreSQL lifecycle verification (state machine, concurrency, restart durability)"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -150,22 +151,34 @@ verify-persistence: ## Phase 3A persistence verification (migrations, schema, co
 verify-control-plane: ## Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)
 	./scripts/verify-control-plane.sh
 
-# Phase 3C: generates (or reuses, idempotently — see the script's own
-# docstring) the local Bearer token Alertmanager uses to authenticate
-# to control-plane's webhook. `make db-up` already calls this
-# automatically; exposed standalone for rerunning it on its own (e.g.
-# after deleting observability/alertmanager/secrets/ to inspect a
-# fresh-checkout path) without bringing the whole stack up again.
-webhook-secret-init: ## Generate/reuse the local Alertmanager -> control-plane webhook Bearer token
+# Phase 3C/3D: generates (or reuses, idempotently — see the script's
+# own docstring) the local Bearer tokens Alertmanager (webhook) and a
+# human/operator (lifecycle) use to authenticate to control-plane —
+# two separate, non-interchangeable secrets. `make db-up` already
+# calls this automatically; exposed standalone for rerunning it on its
+# own (e.g. after deleting observability/alertmanager/secrets/ to
+# inspect a fresh-checkout path) without bringing the whole stack up
+# again.
+webhook-secret-init: ## Generate/reuse the local webhook + lifecycle Bearer tokens
 	./scripts/init-webhook-secret.sh
 
-verify-webhook-ingestion: ## Phase 3C focused webhook ingestion verification (auth, dedup/upsert, real PostgreSQL)
+verify-webhook-ingestion: ## Phase 3C/3D focused webhook ingestion verification (auth, dedup/upsert, resolution, real PostgreSQL)
 	./scripts/verify-webhook-ingestion.sh
 
-# The expensive real acceptance gate (section 12 of Phase 3C): reuses
-# the existing Phase 2B.4 Collector-outage lifecycle test
-# (scripts/verify-alert-lifecycle.sh) with its Phase 3C ingestion
-# assertions enabled, rather than running a second, separate
-# Collector-outage test — see that script's own docstring.
-verify-alert-ingestion: ## Phase 3C full acceptance: real Collector outage -> Alertmanager webhook -> persisted incident
+# Phase 3D: focused real PostgreSQL lifecycle verification — the full
+# state machine via the real PATCH endpoint, optimistic concurrency
+# (including a genuine concurrent-request race), real restart
+# durability, and real occurrence-identity/stale-replay handling via
+# the real webhook endpoint. Does not touch otel-collector — no
+# Collector outage here at all.
+verify-incident-lifecycle: ## Phase 3D real PostgreSQL lifecycle verification (state machine, concurrency, restart durability)
+	./scripts/verify-incident-lifecycle.sh
+
+# The expensive real acceptance gate (section 12 of Phase 3C, extended
+# Phase 3D with automatic resolution): reuses the existing Phase 2B.4
+# Collector-outage lifecycle test (scripts/verify-alert-lifecycle.sh)
+# with its Phase 3C/3D ingestion assertions enabled, rather than
+# running a second, separate Collector-outage test — see that script's
+# own docstring.
+verify-alert-ingestion: ## Phase 3C/3D full acceptance: real Collector outage -> Alertmanager webhook -> persisted + resolved incident
 	VERIFY_INGESTION=true ./scripts/verify-alert-lifecycle.sh

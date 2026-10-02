@@ -171,8 +171,8 @@ echo "  reliability.incidents exists"
 section "4-7. Insert, read back, and verify a valid incident"
 
 incident_id="$(psql_exec -t -A -c "
-  INSERT INTO reliability.incidents (source, source_fingerprint, title, description, severity, first_seen_at, last_seen_at)
-  VALUES ('$TEST_SOURCE', '$TEST_FINGERPRINT', 'Verification incident', 'Created by scripts/verify-persistence.sh', 'critical', now(), now())
+  INSERT INTO reliability.incidents (source, source_fingerprint, title, description, severity, first_seen_at, last_seen_at, occurrence_starts_at)
+  VALUES ('$TEST_SOURCE', '$TEST_FINGERPRINT', 'Verification incident', 'Created by scripts/verify-persistence.sh', 'critical', now(), now(), now())
   RETURNING id;
 " | head -1)"
 [ -n "$incident_id" ] || fail "INSERT of a valid incident returned no id"
@@ -214,12 +214,18 @@ echo "  status defaults to 'open' when omitted on INSERT (not yet an enforced cr
 # --------------------------------------------------------------------
 section "8. Invalid severity/status rejected"
 
+# occurrence_starts_at (Phase 3D V2, NOT NULL, no column default — same
+# convention as first_seen_at/last_seen_at) is supplied in every INSERT
+# below, including the intentionally-invalid ones: omitting it would
+# make the INSERT fail with a NOT NULL violation (23502) instead of the
+# specific check_violation/unique_violation each test actually means to
+# exercise.
 expect_rejected "invalid severity" \
-  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at) VALUES ('$TEST_SOURCE', '${TEST_FINGERPRINT}-bad-severity', 'Bad severity', 'catastrophic', now(), now());" \
+  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at, occurrence_starts_at) VALUES ('$TEST_SOURCE', '${TEST_FINGERPRINT}-bad-severity', 'Bad severity', 'catastrophic', now(), now(), now());" \
   "23514"
 
 expect_rejected "invalid status" \
-  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at) VALUES ('$TEST_SOURCE', '${TEST_FINGERPRINT}-bad-status', 'Bad status', 'info', 'triaging', now(), now());" \
+  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at, occurrence_starts_at) VALUES ('$TEST_SOURCE', '${TEST_FINGERPRINT}-bad-status', 'Bad status', 'info', 'triaging', now(), now(), now());" \
   "23514"
 
 # --------------------------------------------------------------------
@@ -228,15 +234,15 @@ expect_rejected "invalid status" \
 section "9. Blank required identifiers rejected"
 
 expect_rejected "blank title" \
-  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at) VALUES ('$TEST_SOURCE', '${TEST_FINGERPRINT}-blank-title', '   ', 'info', now(), now());" \
+  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at, occurrence_starts_at) VALUES ('$TEST_SOURCE', '${TEST_FINGERPRINT}-blank-title', '   ', 'info', now(), now(), now());" \
   "23514"
 
 expect_rejected "blank source" \
-  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at) VALUES ('', '${TEST_FINGERPRINT}-blank-source', 'Blank source', 'info', now(), now());" \
+  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at, occurrence_starts_at) VALUES ('', '${TEST_FINGERPRINT}-blank-source', 'Blank source', 'info', now(), now(), now());" \
   "23514"
 
 expect_rejected "blank source_fingerprint" \
-  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at) VALUES ('$TEST_SOURCE', '  ', 'Blank fingerprint', 'info', now(), now());" \
+  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at, occurrence_starts_at) VALUES ('$TEST_SOURCE', '  ', 'Blank fingerprint', 'info', now(), now(), now());" \
   "23514"
 
 # --------------------------------------------------------------------
@@ -255,7 +261,7 @@ echo "   provides safety under real concurrent writers, not anything"
 echo "   this script does procedurally --"
 
 expect_rejected "duplicate active (source, source_fingerprint)" \
-  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at) VALUES ('$TEST_SOURCE', '$TEST_FINGERPRINT', 'Duplicate while active', 'warning', now(), now());" \
+  "INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at, occurrence_starts_at) VALUES ('$TEST_SOURCE', '$TEST_FINGERPRINT', 'Duplicate while active', 'warning', now(), now(), now());" \
   "23505" "incidents_active_fingerprint_uniq"
 
 echo ""
@@ -266,8 +272,8 @@ echo "   not overwritten --"
 psql_exec -c "UPDATE reliability.incidents SET status = 'resolved', resolved_at = now() WHERE id = '$incident_id';" >/dev/null
 
 recurred_id="$(psql_exec -t -A -c "
-  INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at)
-  VALUES ('$TEST_SOURCE', '$TEST_FINGERPRINT', 'Recurred after resolution', 'warning', now(), now())
+  INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at, occurrence_starts_at)
+  VALUES ('$TEST_SOURCE', '$TEST_FINGERPRINT', 'Recurred after resolution', 'warning', now(), now(), now())
   RETURNING id;
 " | head -1)"
 [ -n "$recurred_id" ] || fail "re-using (source, source_fingerprint) after the prior incident resolved was unexpectedly rejected"

@@ -34,12 +34,20 @@ os.environ.setdefault("POSTGRES_DB", "test_db")
 # token" paths without depending on whatever a real local .env happens
 # to contain.
 os.environ.setdefault("CONTROL_PLANE_WEBHOOK_TOKEN", "test-webhook-token")
+# Phase 3D: a SEPARATE deterministic, known-in-tests Bearer token for
+# the lifecycle endpoint — deliberately a different literal value from
+# the webhook token above, so test_lifecycle.py can assert the two are
+# not interchangeable (using one where the other is expected must
+# still 401).
+os.environ.setdefault("CONTROL_PLANE_LIFECYCLE_TOKEN", "test-lifecycle-token")
 
-# Exported so test_webhook.py can build a correct `Authorization:
-# Bearer <token>` header without hard-coding the literal value in two
-# places; always reflects whatever is actually in the environment
-# (the setdefault() above, or a real value if one was already set).
+# Exported so test_webhook.py/test_lifecycle.py can build a correct
+# `Authorization: Bearer <token>` header without hard-coding the
+# literal value in multiple places; always reflects whatever is
+# actually in the environment (the setdefault() calls above, or a real
+# value if one was already set).
 WEBHOOK_TOKEN = os.environ["CONTROL_PLANE_WEBHOOK_TOKEN"]
+LIFECYCLE_TOKEN = os.environ["CONTROL_PLANE_LIFECYCLE_TOKEN"]
 
 import pytest
 from fastapi.testclient import TestClient
@@ -68,6 +76,14 @@ class FakeIncidentRepository:
 
     def __init__(self, rows: list[dict]) -> None:
         self.rows = rows
+        # Tracked (not just a pass-through no-op) so a unit test can
+        # catch a regression of the real commit-after-successful-write
+        # bug a real-PostgreSQL smoke test found during Phase 3D
+        # development: a route that returns 200 without ever calling
+        # commit() looks correct against this fake (which has no real
+        # transaction to roll back) but silently discards the write
+        # against the real database once the session closes.
+        self.commit_count = 0
 
     async def list_incidents(self, *, status, severity, source, limit, offset):
         matched = [
@@ -88,7 +104,16 @@ class FakeIncidentRepository:
         return None
 
     async def upsert_firing_incident(
-        self, *, source, source_fingerprint, title, description, severity, first_seen_at, last_seen_at
+        self,
+        *,
+        source,
+        source_fingerprint,
+        title,
+        description,
+        severity,
+        first_seen_at,
+        last_seen_at,
+        occurrence_starts_at,
     ):
         for row in self.rows:
             if (
@@ -100,6 +125,11 @@ class FakeIncidentRepository:
                 row["description"] = description
                 row["severity"] = severity
                 row["last_seen_at"] = max(row["last_seen_at"], last_seen_at)
+                # Mirrors the real repository's GREATEST(...) — only
+                # ever advances, never regresses. See
+                # ingestion/service.py and
+                # database/migrations/V2__add_occurrence_watermark.sql.
+                row["occurrence_starts_at"] = max(row["occurrence_starts_at"], occurrence_starts_at)
                 row["updated_at"] = datetime.now(UTC)
                 return row["id"], False
 
@@ -119,13 +149,75 @@ class FakeIncidentRepository:
                 "resolved_at": None,
                 "created_at": now,
                 "updated_at": now,
+                "occurrence_starts_at": occurrence_starts_at,
             }
         )
         return new_id, True
 
     async def commit(self) -> None:
-        # No real session/transaction behind this fake — nothing to do.
+        # No real session/transaction behind this fake to actually
+        # commit — but see commit_count's own docstring above for why
+        # this call still needs to be counted, not simply a silent
+        # no-op.
+        self.commit_count += 1
+
+    # Phase 3D: in-memory approximations of the repository's lifecycle
+    # methods, for exercising api/incidents.py's and
+    # ingestion/service.py's own route/decision logic in isolation.
+    # They are NOT proof of real PostgreSQL atomicity/concurrency —
+    # that proof is scripts/verify-incident-lifecycle.sh and
+    # scripts/verify-webhook-ingestion.sh against the real database.
+
+    async def get_active_incident(self, *, source, source_fingerprint):
+        for row in self.rows:
+            if (
+                row["source"] == source
+                and row["source_fingerprint"] == source_fingerprint
+                and row["status"] not in ("resolved", "closed")
+            ):
+                return row
+        return None
+
+    async def get_most_recent_incident(self, *, source, source_fingerprint):
+        candidates = [
+            row
+            for row in self.rows
+            if row["source"] == source and row["source_fingerprint"] == source_fingerprint
+        ]
+        if not candidates:
+            return None
+        # Ordered by the occurrence watermark, not the immutable
+        # first_seen_at — mirrors the real repository's
+        # get_most_recent_incident (see its own docstring for why).
+        return max(candidates, key=lambda r: (r["occurrence_starts_at"], r["created_at"]))
+
+    async def acquire_fingerprint_lock(self, **kwargs) -> None:
+        # No real concurrency to serialize against in an in-memory
+        # single-threaded fake.
         pass
+
+    async def transition_incident_status(self, incident_id, *, expected_status, target_status, resolved_at):
+        for row in self.rows:
+            if row["id"] == incident_id:
+                if row["status"] != expected_status:
+                    return None
+                row["status"] = target_status
+                if resolved_at is not None:
+                    row["resolved_at"] = resolved_at
+                row["updated_at"] = datetime.now(UTC)
+                return row
+        return None
+
+    async def resolve_active_incident_for_fingerprint(self, incident_id, *, resolved_at):
+        for row in self.rows:
+            if row["id"] == incident_id:
+                if row["status"] in ("resolved", "closed"):
+                    return None
+                row["status"] = "resolved"
+                row["resolved_at"] = resolved_at
+                row["updated_at"] = datetime.now(UTC)
+                return row
+        return None
 
 
 def make_incident_row(**overrides) -> dict:
@@ -145,6 +237,12 @@ def make_incident_row(**overrides) -> dict:
         "updated_at": now,
     }
     row.update(overrides)
+    # Defaults to first_seen_at (after any override above has already
+    # been applied) — the correct value for a row that has never
+    # accepted a newer firing observation since creation. A caller
+    # testing watermark-advancement behavior passes
+    # occurrence_starts_at explicitly as one of **overrides.
+    row.setdefault("occurrence_starts_at", row["first_seen_at"])
     return row
 
 

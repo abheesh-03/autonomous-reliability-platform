@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 #
-# verify-webhook-ingestion.sh — Phase 3C focused webhook ingestion
+# verify-webhook-ingestion.sh — Phase 3C/3D focused webhook ingestion
 # verification.
 #
 # Proves the real POST /internal/v1/alertmanager/webhook endpoint,
 # backed by the real PostgreSQL reliability.incidents table, works
 # end-to-end — authentication, payload validation, atomic
 # create-or-update deduplication (the real partial unique index,
-# incidents_active_fingerprint_uniq), transaction boundaries, and a
-# real PostgreSQL outage returning 503. Payloads are POSTed directly to
-# control-plane's own webhook endpoint (never through Alertmanager
-# itself) — this is deliberate: it isolates and proves the ingestion
-# endpoint's own correctness in detail. The genuine
-# Prometheus -> Alertmanager -> webhook -> incident chain is proven
-# separately and exclusively by
+# incidents_active_fingerprint_uniq), transaction boundaries, a real
+# PostgreSQL outage returning 503, and, as of Phase 3D, genuine
+# source-driven resolution (a resolved alert actually transitions the
+# matching active incident, idempotently on redelivery). Payloads are
+# POSTed directly to control-plane's own webhook endpoint (never
+# through Alertmanager itself) — this is deliberate: it isolates and
+# proves the ingestion endpoint's own correctness in detail. Broader
+# occurrence-identity/recurrence/stale-replay scenarios are covered by
+# scripts/verify-incident-lifecycle.sh; the genuine
+# Prometheus -> Alertmanager -> webhook -> incident (-> resolution)
+# chain is proven separately and exclusively by
 # scripts/verify-alert-lifecycle.sh (VERIFY_INGESTION=true) /
 # `make verify-alert-ingestion` — see that script's own docstring.
 #
@@ -156,10 +160,13 @@ now_iso() {
 }
 
 # POSTs a one-alert webhook payload. Args: auth_header(or ""),
-# fingerprint, status(firing|resolved), severity, summary, startsAt.
+# fingerprint, status(firing|resolved), severity, summary, startsAt,
+# [endsAt — required for a resolved alert per Phase 3D validation].
 # Leaves HTTP status in $WH_STATUS and body in $WH_BODY.
 post_single_alert() {
-  local auth="$1" fp="$2" alert_status="$3" severity="$4" summary="$5" starts_at="$6"
+  local auth="$1" fp="$2" alert_status="$3" severity="$4" summary="$5" starts_at="$6" ends_at="${7:-}"
+  local ends_at_json="None"
+  [ -n "$ends_at" ] && ends_at_json="'$ends_at'"
   local body response curl_exit=0
   body="$(python3 -c "
 import json
@@ -170,6 +177,7 @@ print(json.dumps({
         'labels': {'alertname': 'VerifyWebhookIngestionTest', 'severity': '$severity'},
         'annotations': {'summary': '$summary'},
         'startsAt': '$starts_at',
+        'endsAt': $ends_at_json,
         'fingerprint': '$fp',
     }],
 }))
@@ -246,12 +254,19 @@ echo "  a batch containing one invalid alert -> 422, and its other, otherwise-va
 section "3. First firing webhook creates an incident"
 
 fp1="${FP_PREFIX}-a"
-post_single_alert "$WEBHOOK_TOKEN" "$fp1" firing critical "Verify webhook ingestion test A" "$(now_iso)"
+# Captured once and reused for every "repeat delivery of the SAME
+# occurrence" call below — Phase 3D matches a repeat firing delivery
+# to the active incident by comparing startsAt to its first_seen_at
+# (see ingestion/service.py), so a fresh timestamp per call would
+# incorrectly look like a different occurrence and be ignored instead
+# of updating it.
+fp1_occurrence_starts_at="$(now_iso)"
+post_single_alert "$WEBHOOK_TOKEN" "$fp1" firing critical "Verify webhook ingestion test A" "$fp1_occurrence_starts_at"
 [ "$WH_STATUS" = "200" ] || fail "valid firing webhook returned $WH_STATUS, expected 200: $WH_BODY"
 echo "$WH_BODY" | python3 -c "
 import json, sys
 body = json.load(sys.stdin)
-assert body == {'firing_processed': 1, 'resolved_ignored': 0, 'incidents_created': 1, 'incidents_updated': 0}, body
+assert body == {'firing_processed': 1, 'resolved_processed': 0, 'incidents_created': 1, 'incidents_updated': 0, 'incidents_resolved': 0, 'incidents_ignored': 0}, body
 print('  ack body OK:', body)
 "
 
@@ -272,12 +287,12 @@ first_seen_before="$(psql_exec -t -A -c "SELECT first_seen_at FROM reliability.i
 last_seen_before="$(psql_exec -t -A -c "SELECT last_seen_at FROM reliability.incidents WHERE id = '$id1';")"
 sleep 2
 
-post_single_alert "$WEBHOOK_TOKEN" "$fp1" firing critical "Verify webhook ingestion test A (updated)" "$(now_iso)"
+post_single_alert "$WEBHOOK_TOKEN" "$fp1" firing critical "Verify webhook ingestion test A (updated)" "$fp1_occurrence_starts_at"
 [ "$WH_STATUS" = "200" ] || fail "repeated firing webhook returned $WH_STATUS, expected 200: $WH_BODY"
 echo "$WH_BODY" | python3 -c "
 import json, sys
 body = json.load(sys.stdin)
-assert body == {'firing_processed': 1, 'resolved_ignored': 0, 'incidents_created': 0, 'incidents_updated': 1}, body
+assert body == {'firing_processed': 1, 'resolved_processed': 0, 'incidents_created': 0, 'incidents_updated': 1, 'incidents_resolved': 0, 'incidents_ignored': 0}, body
 print('  ack body OK (updated, not created):', body)
 "
 
@@ -345,7 +360,7 @@ status="$(curl -s --connect-timeout 2 --max-time 10 -o /tmp/verify-webhook-multi
 python3 -c "
 import json
 body = json.load(open('/tmp/verify-webhook-multi-resp.json'))
-assert body == {'firing_processed': 2, 'resolved_ignored': 0, 'incidents_created': 2, 'incidents_updated': 0}, body
+assert body == {'firing_processed': 2, 'resolved_processed': 0, 'incidents_created': 2, 'incidents_updated': 0, 'incidents_resolved': 0, 'incidents_ignored': 0}, body
 print('  ack body OK:', body)
 "
 rm -f /tmp/verify-webhook-multi-resp.json
@@ -362,14 +377,16 @@ fp_firing="${FP_PREFIX}-mixed-firing"
 fp_resolved="${FP_PREFIX}-mixed-resolved"
 mixed_fr_body="$(python3 -c "
 import json
+from datetime import datetime, timedelta, timezone
 now = '$(now_iso)'
+ends = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
 print(json.dumps({
     'version': '4', 'groupKey': 'x', 'status': 'firing', 'receiver': 'y',
     'alerts': [
         {'status': 'firing', 'labels': {'alertname': 'MixedFiring', 'severity': 'critical'},
          'annotations': {}, 'startsAt': now, 'fingerprint': '$fp_firing'},
         {'status': 'resolved', 'labels': {'alertname': 'MixedResolved'},
-         'annotations': {}, 'startsAt': now, 'fingerprint': '$fp_resolved'},
+         'annotations': {}, 'startsAt': now, 'endsAt': ends, 'fingerprint': '$fp_resolved'},
     ],
 }))
 ")"
@@ -379,7 +396,7 @@ status="$(curl -s --connect-timeout 2 --max-time 10 -o /tmp/verify-webhook-mixed
 python3 -c "
 import json
 body = json.load(open('/tmp/verify-webhook-mixed-resp.json'))
-assert body == {'firing_processed': 1, 'resolved_ignored': 1, 'incidents_created': 1, 'incidents_updated': 0}, body
+assert body == {'firing_processed': 1, 'resolved_processed': 1, 'incidents_created': 1, 'incidents_updated': 0, 'incidents_resolved': 0, 'incidents_ignored': 1}, body
 print('  ack body OK:', body)
 "
 rm -f /tmp/verify-webhook-mixed-resp.json
@@ -388,16 +405,59 @@ rm -f /tmp/verify-webhook-mixed-resp.json
 echo "  mixed batch: firing alert created an incident, resolved alert created none"
 
 fp_resolved_only="${FP_PREFIX}-resolved-only"
-post_single_alert "$WEBHOOK_TOKEN" "$fp_resolved_only" resolved critical "resolved only" "$(now_iso)"
+resolved_only_starts="$(now_iso)"
+resolved_only_ends="$(python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat())')"
+post_single_alert "$WEBHOOK_TOKEN" "$fp_resolved_only" resolved critical "resolved only" "$resolved_only_starts" "$resolved_only_ends"
 [ "$WH_STATUS" = "200" ] || fail "resolved-only webhook returned $WH_STATUS, expected 200: $WH_BODY"
 echo "$WH_BODY" | python3 -c "
 import json, sys
 body = json.load(sys.stdin)
-assert body == {'firing_processed': 0, 'resolved_ignored': 1, 'incidents_created': 0, 'incidents_updated': 0}, body
-print('  ack body OK (resolved-only):', body)
+assert body == {'firing_processed': 0, 'resolved_processed': 1, 'incidents_created': 0, 'incidents_updated': 0, 'incidents_resolved': 0, 'incidents_ignored': 1}, body
+print('  ack body OK (resolved-only, no matching active incident):', body)
 "
 [ "$(fingerprint_count "$fp_resolved_only")" = "0" ] || fail "a resolved-only notification created an incident"
-echo "  resolved-only notification: acknowledged, zero incidents created"
+echo "  resolved-only notification with no matching active incident: acknowledged, zero incidents created"
+
+# --------------------------------------------------------------------
+# 7b. Alertmanager genuinely resolves a real active incident;
+#     duplicate resolution is idempotent
+# --------------------------------------------------------------------
+section "7b. Alertmanager resolves a real active incident; duplicate resolution is idempotent"
+
+fp_resolve_me="${FP_PREFIX}-resolve-me"
+occurrence_starts="$(now_iso)"
+post_single_alert "$WEBHOOK_TOKEN" "$fp_resolve_me" firing critical "to be resolved" "$occurrence_starts"
+[ "$WH_STATUS" = "200" ] || fail "setup firing webhook for fp_resolve_me returned $WH_STATUS"
+
+occurrence_ends="$(python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat())')"
+post_single_alert "$WEBHOOK_TOKEN" "$fp_resolve_me" resolved critical "now resolved" "$occurrence_starts" "$occurrence_ends"
+[ "$WH_STATUS" = "200" ] || fail "resolving webhook for fp_resolve_me returned $WH_STATUS: $WH_BODY"
+echo "$WH_BODY" | python3 -c "
+import json, sys
+body = json.load(sys.stdin)
+assert body == {'firing_processed': 0, 'resolved_processed': 1, 'incidents_created': 0, 'incidents_updated': 0, 'incidents_resolved': 1, 'incidents_ignored': 0}, body
+print('  ack body OK (genuinely resolved):', body)
+"
+resolve_me_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source_fingerprint = '$fp_resolve_me';" | head -1)"
+resolve_me_status="$(psql_exec -t -A -c "SELECT status FROM reliability.incidents WHERE id = '$resolve_me_id';")"
+resolve_me_resolved_at="$(psql_exec -t -A -c "SELECT resolved_at FROM reliability.incidents WHERE id = '$resolve_me_id';")"
+[ "$resolve_me_status" = "resolved" ] || fail "fp_resolve_me's status is $resolve_me_status, expected resolved"
+[ -n "$resolve_me_resolved_at" ] || fail "fp_resolve_me's resolved_at is empty"
+echo "  real active incident genuinely transitioned to resolved via the webhook; resolved_at=$resolve_me_resolved_at"
+
+# A duplicate resolved delivery for the exact same occurrence must be
+# idempotent: no error, no further state change.
+post_single_alert "$WEBHOOK_TOKEN" "$fp_resolve_me" resolved critical "now resolved" "$occurrence_starts" "$occurrence_ends"
+[ "$WH_STATUS" = "200" ] || fail "duplicate resolving webhook returned $WH_STATUS: $WH_BODY"
+echo "$WH_BODY" | python3 -c "
+import json, sys
+body = json.load(sys.stdin)
+assert body['incidents_resolved'] == 0 and body['incidents_ignored'] == 1, body
+print('  ack body OK (duplicate resolution is idempotent):', body)
+"
+[ "$(psql_exec -t -A -c "SELECT status FROM reliability.incidents WHERE id = '$resolve_me_id';")" = "resolved" ] || fail "duplicate resolution changed the incident's status"
+[ "$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WHERE source_fingerprint = '$fp_resolve_me';")" = "1" ] || fail "duplicate resolution created an extra row"
+echo "  duplicate resolution confirmed idempotent: still exactly 1 row, still resolved"
 
 # --------------------------------------------------------------------
 # 8. The existing GET incidents API exposes the result
@@ -467,10 +527,11 @@ section "10. Clean up only this execution's test-created rows"
 before_count="$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WHERE source = 'alertmanager' AND source_fingerprint LIKE '${FP_PREFIX}-%';")"
 # 2 rows for fp1 (section 5's resolved-historical + new-active pair) +
 # 1 each for fp2, fp3 (section 6), the mixed-batch firing alert
-# (section 7), and the post-recovery outage alert (section 9) = 6.
-# auth failures, 422s, and resolved-only/resolved-in-a-mixed-batch
-# deliveries are all asserted to write zero rows above.
-[ "$before_count" = "6" ] || fail "expected exactly 6 rows for this run's fingerprint prefix before cleanup, found: $before_count"
+# (section 7), fp_resolve_me (section 7b, resolved — duplicate
+# resolution never adds a row), and the post-recovery outage alert
+# (section 9) = 7. Auth failures, 422s, and resolved-only/resolved-in-
+# a-mixed-batch deliveries are all asserted to write zero rows above.
+[ "$before_count" = "7" ] || fail "expected exactly 7 rows for this run's fingerprint prefix before cleanup, found: $before_count"
 # Not suppressed: a cleanup failure here fails the whole script.
 psql_exec -c "$CLEANUP_SQL"
 after_count="$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WHERE source = 'alertmanager' AND source_fingerprint LIKE '${FP_PREFIX}-%';")"
@@ -479,4 +540,4 @@ echo "  cleaned up: $before_count -> $after_count rows for fingerprint prefix '$
 trap - EXIT
 
 echo ""
-echo "SUCCESS: Phase 3C webhook ingestion verification passed (real PostgreSQL, real HTTP API, real atomic upsert/dedup, real outage recovery)."
+echo "SUCCESS: Phase 3C/3D webhook ingestion verification passed (real PostgreSQL, real HTTP API, real atomic upsert/dedup, real source-driven resolution, real outage recovery)."

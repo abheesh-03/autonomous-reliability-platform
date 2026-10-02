@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh
 
       - name: Verify Makefile is usable
         run: make help
@@ -112,15 +112,18 @@ jobs:
       - name: Create runtime .env from .env.example
         run: cp .env.example .env
 
-      # Phase 3C: generates the local Bearer token Alertmanager uses to
-      # authenticate to control-plane's webhook (CONTROL_PLANE_WEBHOOK_TOKEN
-      # in .env, and observability/alertmanager/secrets/webhook-token —
-      # see scripts/init-webhook-secret.sh). Must run before Compose
-      # config validation/startup below, since docker-compose.yml reads
-      # CONTROL_PLANE_WEBHOOK_TOKEN (with an empty-string default, so
-      # this step isn't strictly required for `docker compose config`
-      # to succeed, but IS required for the webhook to actually work
-      # once control-plane starts). This step is also the permission
+      # Phase 3C/3D: generates the local Bearer tokens control-plane's
+      # two trusted write endpoints require — CONTROL_PLANE_WEBHOOK_TOKEN
+      # (Alertmanager's webhook, also mirrored into
+      # observability/alertmanager/secrets/webhook-token) and
+      # CONTROL_PLANE_LIFECYCLE_TOKEN (the separate human/operator
+      # PATCH /api/v1/incidents/{id}/status credential, .env only — see
+      # scripts/init-webhook-secret.sh). Must run before Compose config
+      # validation/startup below, since docker-compose.yml reads both
+      # (each with an empty-string default, so this step isn't strictly
+      # required for `docker compose config` to succeed, but IS
+      # required for either endpoint to actually work once control-plane
+      # starts). This step is also the webhook token's permission
       # PREFLIGHT: the script's final action runs the real, pinned
       # prom/alertmanager:v0.34.1 image, as its real non-root user
       # ("nobody", uid/gid 65534), against the freshly-written token
@@ -128,9 +131,9 @@ jobs:
       # closed, before any container starts, rather than only
       # discovering a host-permission mismatch once Alertmanager tries
       # and fails to deliver a real webhook later in this job. Never
-      # prints the token's contents, on a fresh runner (no prior .env
-      # or secrets/ directory) or an existing one alike.
-      - name: Initialize webhook secret (Phase 3C)
+      # prints either token's contents, on a fresh runner (no prior
+      # .env or secrets/ directory) or an existing one alike.
+      - name: Initialize webhook + lifecycle secrets (Phase 3C/3D)
         run: ./scripts/init-webhook-secret.sh
 
       - name: Validate Docker Compose configuration
@@ -209,20 +212,37 @@ jobs:
       - name: Verify control plane (Phase 3B)
         run: ./scripts/verify-control-plane.sh
 
-      # Phase 3C: focused, fast webhook-ingestion acceptance — real
+      # Phase 3C/3D: focused, fast webhook-ingestion acceptance — real
       # authentication (missing/wrong Bearer token), payload validation,
       # the real atomic PostgreSQL upsert/deduplication behavior
       # (incidents_active_fingerprint_uniq), transaction all-or-nothing
-      # behavior, and a real PostgreSQL outage returning 503 — all
-      # POSTed directly to control-plane's own webhook endpoint (not
-      # through Alertmanager; that's what the real alert lifecycle step
-      # further below proves). Reuses the identical shared script used
-      # locally (scripts/verify-webhook-ingestion.sh) — no integration
-      # logic duplicated in this workflow. Placed immediately after
-      # Phase 3B's own verifier, and well before the expensive real
-      # Collector-outage lifecycle gate at the end of this job.
-      - name: Verify webhook ingestion (Phase 3C)
+      # behavior, real source-driven resolution (including idempotent
+      # duplicate resolution), and a real PostgreSQL outage returning
+      # 503 — all POSTed directly to control-plane's own webhook
+      # endpoint (not through Alertmanager; that's what the real alert
+      # lifecycle step further below proves). Reuses the identical
+      # shared script used locally (scripts/verify-webhook-ingestion.sh)
+      # — no integration logic duplicated in this workflow. Placed
+      # immediately after Phase 3B's own verifier, and well before the
+      # expensive real Collector-outage lifecycle gate at the end of
+      # this job.
+      - name: Verify webhook ingestion (Phase 3C/3D)
         run: ./scripts/verify-webhook-ingestion.sh
+
+      # Phase 3D: focused real PostgreSQL incident lifecycle
+      # acceptance — the full state machine via the real PATCH
+      # endpoint, optimistic concurrency (including a genuine
+      # concurrent-request race with exactly one winner), real
+      # PostgreSQL restart durability, and real occurrence-identity/
+      # stale-replay handling via the real webhook endpoint. Reuses
+      # the identical shared script used locally
+      # (scripts/verify-incident-lifecycle.sh) — no integration logic
+      # duplicated in this workflow. Does not touch otel-collector, so
+      # placement relative to the Collector-outage gate doesn't matter;
+      # kept here, alongside the other focused control-plane
+      # verifiers, before the four demo services' own health waits.
+      - name: Verify incident lifecycle (Phase 3D)
+        run: ./scripts/verify-incident-lifecycle.sh
 
       - name: Wait for checkout-service to become healthy
         run: |
@@ -661,17 +681,21 @@ jobs:
       # this SAME real outage, not a second one — that Alertmanager's
       # real webhook delivery persisted the firing alert as a genuine,
       # correctly-mapped reliability.incidents row (see
-      # scripts/verify-ingestion.py). Reuses the identical shared
-      # script used locally (scripts/verify-alert-lifecycle.sh, which
-      # itself reuses scripts/verify-alerting.py for all Prometheus/
-      # Alertmanager HTTP API validation) — no lifecycle or ingestion
-      # logic duplicated in this workflow. That script restores
-      # otel-collector via its own EXIT trap if it fails partway
-      # through, so a failure here never leaves the Collector stopped.
-      # Runs after every other telemetry/dashboard step above (and
-      # after the focused Phase 3C webhook-ingestion step above), since
-      # stopping otel-collector would otherwise invalidate them.
-      - name: Run alert lifecycle + ingestion acceptance test
+      # scripts/verify-ingestion.py), AND (Phase 3D) that once the
+      # Collector recovers and Alertmanager resolves, its real resolved
+      # webhook delivery actually transitions that exact incident to
+      # status=resolved with resolved_at populated. Reuses the
+      # identical shared script used locally
+      # (scripts/verify-alert-lifecycle.sh, which itself reuses
+      # scripts/verify-alerting.py for all Prometheus/Alertmanager HTTP
+      # API validation) — no lifecycle, ingestion, or resolution logic
+      # duplicated in this workflow. That script restores otel-collector
+      # via its own EXIT trap if it fails partway through, so a failure
+      # here never leaves the Collector stopped. Runs after every other
+      # telemetry/dashboard step above (and after the focused Phase
+      # 3C/3D webhook-ingestion and incident-lifecycle steps above),
+      # since stopping otel-collector would otherwise invalidate them.
+      - name: Run alert lifecycle + ingestion + resolution acceptance test
         run: VERIFY_INGESTION=true bash scripts/verify-alert-lifecycle.sh
 
       - name: Show service logs

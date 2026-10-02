@@ -18,12 +18,16 @@ production-style system.
 
 **Actively under early development.** Phase 2 (observability — metrics,
 traces, logs, dashboards, alerting) is **closed**. Phase 3A (incident
-domain model + PostgreSQL persistence) and Phase 3B (read-only FastAPI
-control plane) are also **closed**. The project is currently in
-**Phase 3C — Real Alertmanager Incident Ingestion** (a genuine
-Prometheus alert, delivered through Alertmanager's own authenticated
-webhook, now automatically creates or updates a persistent incident;
-see [Alert Ingestion](#alert-ingestion-phase-3c) below). An
+domain model + PostgreSQL persistence), Phase 3B (read-only FastAPI
+control plane), and Phase 3C (real Alertmanager incident ingestion) are
+also **closed**. The project is currently in
+**Phase 3D — Incident Lifecycle / State Machine** (a centralized,
+validated incident status state machine; an authenticated,
+optimistic-concurrency-safe `PATCH /api/v1/incidents/{id}/status`
+management endpoint; and real, source-driven automatic resolution from
+Alertmanager's own resolved notifications, including stale/recurrence
+safety for delayed or out-of-order alert delivery — see
+[Incident Lifecycle](#incident-lifecycle-phase-3d) below). An
 OpenTelemetry
 Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
@@ -104,11 +108,17 @@ reachable only over the internal Docker network), and a genuine firing
 alert is atomically upserted into `reliability.incidents` —
 deduplicated per-fingerprint against the exact same real database
 constraint Phase 3A defined, empirically re-proven using the identical
-real `otel-collector` outage described above. Resolved notifications
-are accepted and acknowledged but do not change any incident's
-lifecycle yet (Phase 3D). There is still no lifecycle-mutation API, no
-authentication on the read endpoints, and no automatic remediation or
-AI functionality of any kind.
+real `otel-collector` outage described above. As of **Phase 3D**, a
+resolved Alertmanager notification now genuinely resolves the matching
+active incident (real `resolved_at`, source-driven, occurrence-identity
+and stale-replay safe — never auto-closes), and a new authenticated
+`PATCH /api/v1/incidents/{id}/status` endpoint lets a human/operator
+drive the rest of the validated lifecycle (acknowledge, investigate,
+remediate, close) under real optimistic concurrency — see
+[Incident Lifecycle](#incident-lifecycle-phase-3d) below. There is
+still no authentication on the read endpoints, no incident
+audit-history table, and no automatic remediation or AI functionality
+of any kind.
 
 ## Problem this project will eventually solve
 
@@ -357,7 +367,11 @@ summary here:
   `created_at`/`updated_at` (all `TIMESTAMPTZ`). `resolved_at` is
   enforced (via a `CHECK` constraint) to be set if and only if `status`
   is `resolved` or `closed` — a data-integrity rule, not a lifecycle
-  transition rule (Phase 3D will implement real transition validation).
+  transition rule. As of Phase 3D, real transition validation is
+  implemented at the application layer, not here — this table's own
+  `CHECK` constraints are unchanged, and a privileged SQL client still
+  bypasses the application's transition rules the same way it always
+  could; see [Incident Lifecycle](#incident-lifecycle-phase-3d) below.
 - **Deduplication:** a partial unique index on `(source,
   source_fingerprint) WHERE status NOT IN ('resolved', 'closed')` —
   at most one *active* incident per fingerprint; a resolved/closed
@@ -405,9 +419,12 @@ repository (a Python 3.13 / FastAPI project, SQLAlchemy 2.x async +
 `asyncpg`) — and the first application code that reads
 `reliability.incidents`. Its `GET /api/v1/*` API is **read-only**:
 there is no user-facing incident-creation, update, or delete endpoint
-anywhere in it. As of Phase 3C it also exposes ONE authenticated
+anywhere in it. As of Phase 3C it also exposes one authenticated
 internal write path — see
-[Alert Ingestion](#alert-ingestion-phase-3c) below.
+[Alert Ingestion](#alert-ingestion-phase-3c) below — and as of Phase
+3D, an authenticated human/operator write path for the validated
+incident lifecycle — see
+[Incident Lifecycle](#incident-lifecycle-phase-3d) below.
 Full detail — endpoints, request/response shapes, DB configuration,
 startup/readiness behavior (including how it stays alive and recovers
 on its own when PostgreSQL or the Phase 3A migration isn't ready yet),
@@ -416,8 +433,9 @@ error handling, and security limitations — is in
 
 - **Endpoints:** `GET /health/live`, `GET /health/ready`,
   `GET /api/v1/incidents` (status/severity/source filters, pagination,
-  deterministic `last_seen_at DESC, id DESC` ordering), and
-  `GET /api/v1/incidents/{id}`.
+  deterministic `last_seen_at DESC, id DESC` ordering),
+  `GET /api/v1/incidents/{id}`, and (Phase 3D, authenticated)
+  `PATCH /api/v1/incidents/{id}/status`.
 - **Startup ordering:** the `flyway` service is still gated behind
   `profiles: ["tools"]` (Phase 3A), so a plain `docker compose up -d`
   does **not** migrate the database automatically. `control-plane`
@@ -436,10 +454,10 @@ error handling, and security limitations — is in
 - **No authentication on the read API** — local development only.
 
 ```bash
-make db-up                # starts PostgreSQL *and* control-plane (and generates the Phase 3C webhook secret)
+make db-up                # starts PostgreSQL *and* control-plane (and generates the Phase 3C/3D webhook + lifecycle secrets)
 make db-migrate            # apply Phase 3A migrations — control-plane serves 503 until this runs
 curl http://localhost:8000/api/v1/incidents
-make control-plane-test    # unit tests (mocked repository/engine), 40/40 passing
+make control-plane-test    # unit tests (mocked repository/engine), 171/171 passing
 make verify-control-plane  # real integration test against the running, PostgreSQL-backed service
 ```
 
@@ -504,10 +522,13 @@ summary here:
   only after the body is already fully buffered), genuinely bounded
   even when `Content-Length` is missing or dishonest; oversized
   requests get `413` and never reach the application at all.
-- **Resolved notifications** are accepted and acknowledged (counted in
-  the response) but deliberately do **not** create an incident, change
-  any incident's status, set `resolved_at`, or reopen anything —
-  Phase 3D owns real lifecycle/resolution semantics.
+- **Resolved notifications**: as of Phase 3D, a resolved alert whose
+  fingerprint matches a currently-active incident genuinely resolves
+  it (real `resolved_at`, from the alert's own `endsAt`) — see
+  [Incident Lifecycle](#incident-lifecycle-phase-3d) below for the
+  full occurrence-identity/stale-replay design. It never creates an
+  incident, never auto-closes one, and a resolved notification with no
+  matching active incident remains a safe, idempotent no-op.
 - **Secret setup** (`scripts/init-webhook-secret.sh`): generates one
   cryptographically random Bearer token; `.env` is authoritative and
   mirrored into a gitignored file bind-mounted, as a single file (not
@@ -523,6 +544,105 @@ make verify-webhook-ingestion  # focused real-PostgreSQL ingestion test (auth, d
 make verify-alert-ingestion  # the real acceptance gate: Collector outage -> Alertmanager webhook -> persisted incident
 ```
 
+## Incident Lifecycle (Phase 3D)
+
+A real, centralized incident state machine, an authenticated
+human/operator management endpoint, and automatic source-driven
+resolution from Alertmanager — no scattered transition logic in
+routes, SQL, or the webhook handler:
+
+```
+open -> acknowledged | investigating | resolved
+acknowledged -> investigating | resolved
+investigating -> remediating | resolved
+remediating -> investigating | resolved
+resolved -> closed
+closed -> (none)
+```
+
+Full detail — the complete transition matrix and rationale, the
+management API, authentication boundaries, the concurrency mechanism
+(atomic compare-and-swap UPDATE plus transaction-scoped advisory
+locks), source-driven resolution, occurrence-identity/stale-replay
+handling (including two real bugs this development process found and
+fixed against real infrastructure), and the full verification story —
+is in
+[docs/architecture/phase-3d-incident-lifecycle.md](docs/architecture/phase-3d-incident-lifecycle.md);
+summary here:
+
+- **`PATCH /api/v1/incidents/{id}/status`** — the one human/operator
+  write path in this service. Authenticated by a *new*,
+  cryptographically independent Bearer token
+  (`CONTROL_PLANE_LIFECYCLE_TOKEN`, distinct from Phase 3C's
+  `CONTROL_PLANE_WEBHOOK_TOKEN` — Alertmanager has no way to learn it,
+  so it cannot invoke this endpoint, and vice versa, confirmed by both
+  unit and real-integration tests). Body:
+  `{"expected_status": "...", "target_status": "..."}` —
+  `expected_status` is mandatory, the optimistic-concurrency guard
+  below. `200` on success (including the documented no-op when
+  `expected_status == target_status` and already matches); `409` for
+  an illegal transition or a stale `expected_status`; `404` unknown
+  incident; `422` malformed input; `401` missing/wrong credentials;
+  `503` real database unavailability. No generic incident-editing API
+  exists.
+- **Concurrency:** a single atomic conditional `UPDATE ... WHERE id =
+  :id AND status = :expected_status RETURNING *` — PostgreSQL's
+  standard race-free compare-and-swap, no advisory lock needed here.
+  Proven directly: 10 genuinely concurrent `PATCH` requests from the
+  same `expected_status` against the real database produced exactly 1
+  `200` and 9 `409`s, with a consistent final state.
+- **Automatic resolution:** the existing
+  `POST /internal/v1/alertmanager/webhook` endpoint (no new route) now
+  genuinely resolves the matching active incident for a resolved
+  alert's fingerprint — real `resolved_at` from the alert's own
+  `endsAt`, never an auto-close. Occurrence identity
+  (`source`/`fingerprint`/`startsAt` vs. the incident's own
+  **occurrence watermark**, `occurrence_starts_at` — a second,
+  durable timestamp recording the LATEST accepted firing `startsAt`,
+  separately from the immutable `first_seen_at`) distinguishes a
+  repeat delivery, a stale/delayed replay of an older occurrence, and
+  a genuine new recurrence. Independent review found and this phase
+  fixed a real regression in the first version, which compared against
+  `first_seen_at` instead: a delayed resolved notification for an
+  occurrence an incident had already moved past could incorrectly
+  resolve it, and a delayed duplicate firing replay after resolution
+  could incorrectly spawn a second incident — see the design doc's
+  ["Post-review correction: the occurrence watermark"](docs/architecture/phase-3d-incident-lifecycle.md#post-review-correction-the-occurrence-watermark)
+  for the exact reproduction and fix.
+- **Webhook concurrency:** every fingerprint a webhook batch touches
+  is locked, up front and in a stable sorted order, via a
+  transaction-scoped PostgreSQL advisory lock
+  (`pg_advisory_xact_lock`) before any of that batch's firing/resolved
+  alerts are processed — protecting the multi-step
+  SELECT-then-decide-then-write sequence the occurrence-identity logic
+  requires, which a single `UPDATE` cannot express; auto-released at
+  commit/rollback, never held across requests.
+- **One new, narrowly-scoped migration.** The state machine and
+  concurrency-control mechanisms need no schema change. The occurrence
+  watermark does: `database/migrations/V2__add_occurrence_watermark.sql`
+  adds `occurrence_starts_at` (`NOT NULL`, backfilled from each
+  existing row's own `first_seen_at`), purely additive —
+  `V1__create_incident_schema.sql` is unchanged. Enforcement boundary,
+  stated accurately: the transition matrix itself is still enforced by
+  the application, not a database `CHECK` constraint — a privileged
+  SQL client connecting directly bypasses it. (The occurrence
+  watermark's own `>= first_seen_at` invariant IS a real `CHECK`
+  constraint, same as the existing `last_seen_at >= first_seen_at`.)
+- **Identical webhook/lifecycle tokens now fail closed**, at two
+  independent layers: `scripts/init-webhook-secret.sh` refuses to
+  proceed if the two tokens are identical, and `core/config.py`'s
+  `resolve_write_tokens` is an application-level guard that catches
+  the same misconfiguration even if that initializer is bypassed
+  entirely (e.g. an operator setting both environment variables
+  directly) — both write endpoints fail closed without affecting the
+  read API.
+
+```bash
+make control-plane-test          # unit tests including the full lifecycle suite, 171/171 passing
+make verify-incident-lifecycle   # real-PostgreSQL lifecycle acceptance (transitions, concurrency, auth, restart persistence, occurrence watermark)
+make verify-alert-ingestion      # same real Collector-outage gate as Phase 3C, now also proving real resolution
+```
+
 ## Developer Commands
 
 The commands above are also available as `make` targets, for convenience:
@@ -531,7 +651,7 @@ The commands above are also available as `make` targets, for convenience:
 make help            # list available targets
 make check           # verify local prerequisites (scripts/check-env.sh)
 make compose-config  # validate docker-compose.yml
-make db-up           # start the Compose environment (also generates the Phase 3C webhook secret)
+make db-up           # start the Compose environment (also generates the Phase 3C/3D webhook + lifecycle secrets)
 make db-status       # check PostgreSQL status (wait for "healthy")
 make db-logs         # show recent PostgreSQL logs
 make db-down         # stop the Compose environment — preserves the data volume
@@ -541,9 +661,10 @@ make control-plane-build   # build the control-plane Docker image
 make control-plane-test    # run control-plane unit tests on Python 3.13 (via Docker)
 make control-plane-logs    # show recent control-plane logs
 make verify-control-plane  # Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)
-make webhook-secret-init     # generate/reuse the local Alertmanager -> control-plane webhook Bearer token
-make verify-webhook-ingestion  # Phase 3C focused webhook ingestion verification (auth, dedup/upsert, real PostgreSQL)
-make verify-alert-ingestion  # Phase 3C full acceptance: real Collector outage -> Alertmanager webhook -> persisted incident
+make webhook-secret-init     # generate/reuse the local webhook + lifecycle Bearer tokens (Phase 3C/3D)
+make verify-webhook-ingestion  # Phase 3C/3D focused webhook ingestion verification (auth, dedup/upsert, resolution, real PostgreSQL)
+make verify-incident-lifecycle  # Phase 3D focused incident lifecycle verification (transitions, concurrency, auth, real PostgreSQL)
+make verify-alert-ingestion  # Phase 3C/3D full acceptance: real Collector outage -> Alertmanager webhook -> persisted + resolved incident
 make verify-observability  # Phase 2A.1-2B.4 observability verification
 ```
 
@@ -1622,8 +1743,11 @@ its tests pass (Python 3.13 via `actions/setup-python`), that
 `inventory-service` is `gofmt`-clean and passes `go vet`/`go test`/build
 (Go 1.27 via `actions/setup-go`), that `notification-service` installs
 (`npm ci`), typechecks, tests, and builds (Node 24 via `actions/setup-node`),
-that `control-plane`'s dependencies install and its 40 unit tests pass
-(20 from Phase 3B, 20 more from Phase 3C's webhook ingestion — reusing
+that `control-plane`'s dependencies install and its 171 unit tests pass
+(20 from Phase 3B, 20 more from Phase 3C's webhook ingestion, and the
+remainder from Phase 3D's lifecycle/resolution suite (including its
+post-review occurrence-watermark and identical-token corrections) —
+reusing
 the same Python 3.13 setup as `payment-service`, no second
 `setup-python` step), that — as of Phase 3C, immediately before Docker
 Compose config validation — the local webhook Bearer secret is
@@ -1721,7 +1845,22 @@ was added. `scripts/init-webhook-secret.sh` and
 `scripts/verify-webhook-ingestion.sh` were also added to the existing
 shell-syntax-check step; `control-plane` and `alertmanager` logs were
 already present in the "Show service logs" step from Phase 3B/2B.4 and
-needed no change.
+needed no change. As of Phase 3D, the webhook-secret step was renamed
+("Initialize webhook + lifecycle secrets (Phase 3C/3D)") since it now
+also provisions `CONTROL_PLANE_LIFECYCLE_TOKEN`, the existing webhook
+ingestion step was renamed to note it also covers resolution/idempotent
+duplicate-resolution, and a new "Verify incident lifecycle (Phase 3D)"
+step runs `scripts/verify-incident-lifecycle.sh` immediately after it
+(it doesn't touch `otel-collector`, so its placement relative to the
+Collector-outage gate doesn't matter); the final step was renamed to
+"Run alert lifecycle + ingestion + resolution acceptance test" — its
+underlying command (`VERIFY_INGESTION=true bash
+scripts/verify-alert-lifecycle.sh`) is unchanged, since it already
+picks up the Phase 3D resolution proof automatically through the
+shared script. `scripts/verify-incident-lifecycle.sh` was also added to
+the shell-syntax-check step. The job's `timeout-minutes: 20` was left
+unchanged — the steps added this phase are modest relative to existing
+headroom, and no real CI measurement indicated it was insufficient.
 
 The repository has a GitHub remote
 (`abheesh-03/autonomous-reliability-platform`). The workflow version
@@ -1786,7 +1925,18 @@ run directly against the real Compose stack (all 10 sections passed)
 and `VERIFY_INGESTION=true bash scripts/verify-alert-lifecycle.sh` run
 directly against the real Compose stack (the full real
 Collector-outage → Alertmanager webhook → persisted-incident chain
-confirmed end to end) — but has **not yet run on GitHub Actions**.
+confirmed end to end) — but has **not yet run on GitHub Actions**. Phase
+3D's version of the workflow (renaming the secret-init and webhook
+steps, adding the new "Verify incident lifecycle" step, and renaming
+the final step) has been locally validated the same way:
+`scripts/verify-incident-lifecycle.sh` run directly against the real
+Compose stack (all 12 sections passed, including the 10-concurrent-
+request compare-and-swap proof) and `VERIFY_INGESTION=true bash
+scripts/verify-alert-lifecycle.sh` run directly against the real
+Compose stack (the full real Collector-outage → Alertmanager webhook →
+persisted-AND-resolved-incident chain confirmed end to end, including
+genuinely resolving two real incidents left `open` from an earlier
+Phase 3C-era session) — but has **not yet run on GitHub Actions**.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -3984,3 +4134,343 @@ problem today.
     strengthened partial-delivery and stale-incident rejection logic
     described above rather than merely the easy case. `make
     verify-observability` was **not** rerun, per instructions.
+
+### Phase 3D — Incident Lifecycle / State Machine
+
+- **Centralized state machine** (new
+  `services/control-plane/src/control_plane/domain/lifecycle.py`):
+  `ALLOWED_TRANSITIONS: dict[str, frozenset[str]]` — `open ->
+  {acknowledged, investigating, resolved}`, `acknowledged ->
+  {investigating, resolved}`, `investigating -> {remediating,
+  resolved}`, `remediating -> {investigating, resolved}`, `resolved ->
+  {closed}`, `closed -> {}` — plus `is_transition_allowed()` and
+  `entering_resolved()`. The single source of truth: no other module
+  (the PATCH route, the webhook ingestion path, any SQL) re-encodes any
+  part of this table.
+- **`PATCH /api/v1/incidents/{id}/status`**
+  (`services/control-plane/src/control_plane/api/incidents.py`): new
+  route, `{"expected_status": ..., "target_status": ...}` body
+  (`extra="forbid"`). `expected_status` is the mandatory optimistic-
+  concurrency guard. Same-status request is a documented no-op (zero
+  writes if the actual status matches; `409` with the same "stale
+  expected_status" message if it doesn't — the no-op path gets no
+  exemption from the concurrency guarantee). `200`/`409`×2/`404`/`422`/
+  `401`/`503` exactly per the matrix in the design doc. No generic
+  incident-editing API was added.
+- **New, independent Bearer token** (`CONTROL_PLANE_LIFECYCLE_TOKEN`):
+  a new `LifecycleSettings` dataclass
+  (`core/config.py`, mirrors `WebhookSettings`); `api/webhook_auth.py`
+  renamed to `api/auth.py` and refactored into a shared
+  `_require_token(*, state_attr, env_var_name)` factory, so
+  `require_webhook_token` and `require_lifecycle_token` share the exact
+  same `hmac.compare_digest` fail-closed logic without duplicating it,
+  while reading different `app.state` attributes from different,
+  independently random environment variables. Confirmed, both as a
+  unit test and against the real stack, that the webhook token cannot
+  authenticate the lifecycle endpoint and vice versa. Neither token
+  ever appears in a log line or response body.
+- **Concurrency — proven, not just designed:** a single atomic
+  `UPDATE reliability.incidents SET status = ... WHERE id = :id AND
+  status = :expected RETURNING *`
+  (`IncidentRepository.transition_incident_status`, new) — PostgreSQL's
+  standard race-free compare-and-swap; the second of two concurrent
+  requests from the same `expected_status` blocks on the row lock, then
+  re-evaluates its `WHERE` clause against the now-current row and
+  affects zero rows, never a lost update. **Verified with 10 genuinely
+  concurrent real `curl` requests** against the real database: exactly
+  1×`200`, 9×`409`, consistent final state.
+- **Critical bug #1, found via real PostgreSQL testing, not unit
+  tests:** the PATCH handler originally never called `repo.commit()`
+  after a successful transition — every "successful" `200` was silently
+  rolled back when the per-request session closed, confirmed by direct
+  sequential `curl` testing showing transitions reverting between
+  requests. **Fixed** by adding `await repo.commit()` immediately after
+  a successful transition. Added `commit_count` tracking to the fake
+  test repository plus three new regression unit tests
+  (`test_successful_transition_actually_commits`,
+  `test_noop_transition_does_not_commit`,
+  `test_rejected_transition_does_not_commit`) specifically because a
+  mocked repository, with no real transaction to roll back, cannot
+  catch this class of bug on its own — a lesson documented directly in
+  the code and in the design doc.
+- **Automatic resolution from real Alertmanager notifications**
+  (`ingestion/service.py`, rewritten decision logic): a resolved
+  alert's `endsAt` must now be present, timezone-aware, and `>=
+  startsAt` (new validation in
+  `domain/alertmanager_webhook.py`); the matching active incident for
+  `(source, fingerprint)` is resolved with `resolved_at` set from that
+  real `endsAt`, never auto-closed; no matching active incident is a
+  safe, idempotent no-op.
+- **Occurrence identity and stale/recurrence handling:** `(source,
+  fingerprint, startsAt)` compared against the matching incident's
+  `first_seen_at` distinguishes a repeat delivery, a stale/delayed
+  replay, and a genuine recurrence — see the design doc's full table.
+  New repository methods: `get_active_incident`,
+  `get_most_recent_incident`, `acquire_fingerprint_lock`,
+  `resolve_active_incident_for_fingerprint`.
+- **Critical bug #2, found via the full real Collector-outage
+  acceptance test, not a synthetic scenario:** the original equality
+  check (`startsAt == first_seen_at` required to update/resolve an
+  active incident) meant an active-but-never-resolved incident (two
+  real ones existed from an earlier, pre-resolution-capability session)
+  could never be updated or resolved again, since every subsequent real
+  delivery carried a newer `startsAt` that never matched exactly.
+  **Fixed** by changing both the firing-side and resolved-side
+  comparisons from equality to ordering (`startsAt < first_seen_at` →
+  ignore; otherwise update/resolve) — safe because the partial unique
+  index guarantees a newer-`startsAt`-while-active case can only mean
+  "not yet resolved," never a true coexisting recurrence. Two new unit
+  tests added
+  (`test_firing_newer_than_active_incident_still_updates_it`,
+  `test_resolved_with_newer_starts_at_than_active_incident_still_resolves_it`).
+  **Re-verified by rerunning the exact real scenario that found it**:
+  rebuilt the control-plane image, reran `make verify-alert-ingestion`,
+  and confirmed via direct `psql` query that both previously-stuck real
+  incidents (`311e21e8-...`, `82be66a8-...`) were genuinely transitioned
+  to `status='resolved'` with `resolved_at` populated by the fixed code
+  — not worked around by deleting or resetting them.
+- **Webhook concurrency:** new `acquire_fingerprint_lock`
+  (`pg_advisory_xact_lock` keyed by `hashtextextended(source || ':' ||
+  fingerprint, 0)`, transaction-scoped, auto-released at
+  commit/rollback) — every distinct fingerprint a batch touches
+  (firing and resolved alike) is locked up front, in stable sorted
+  order, before any of them are processed, specifically to avoid a
+  deadlock against another concurrent batch locking an overlapping set
+  in a different order. Protects only the multi-step
+  SELECT-then-decide sequence; the actual writes remain independently
+  atomic, race-free statements.
+- **`WebhookAckResponse` restructured**
+  (`domain/alertmanager_webhook.py`): `resolved_ignored` (which
+  specifically encoded "resolved alerts are always ignored") replaced
+  with `resolved_processed`/`incidents_resolved`/`incidents_ignored`,
+  alongside the existing `firing_processed`/`incidents_created`/
+  `incidents_updated`. Every Phase 3C test depending on the old shape
+  was updated, not weakened — the original intent (auth, dedup,
+  transaction atomicity) remains fully covered.
+- **No new migration.** `V1__create_incident_schema.sql` unchanged;
+  the whole phase is application code against the existing schema. No
+  audit-history table (explicitly Phase 3E) was added.
+- **Unit tests:** new `services/control-plane/tests/test_lifecycle.py`
+  — every permitted/forbidden transition (parametrized over the full
+  matrix, including same-status pairs), the no-op (clean-match and
+  stale-actual-status cases), missing incident, invalid UUID, invalid
+  target/expected status, an unknown extra field, missing/incorrect
+  lifecycle credentials, cross-token rejection in both directions, an
+  unconfigured token failing closed, `resolved_at` set/preserved
+  correctly, timestamps unchanged on rejection, resolved/closed never
+  regressing, a real database error returning `503`, and the three
+  commit-bug regression tests above. `test_webhook.py` gained the
+  Alertmanager-resolution counterpart: genuine resolution, idempotent
+  duplicate resolution, a stale resolved notification unable to resolve
+  a newer recurrence, a stale firing unable to recreate a resolved
+  incident, a genuine recurrence preserving history, and the two bug-#2
+  regression tests. `make control-plane-test`: **162 passed**.
+- New `scripts/verify-incident-lifecycle.sh` (bash + `curl` + `psql`,
+  12 real-PostgreSQL sections): creates a run-scoped incident; walks
+  every permitted transition via two separate real paths, confirming
+  the database matches the HTTP response at each step; confirms
+  `resolved_at` set on resolution and preserved byte-for-byte across
+  closure; rejects three illegal transitions and a stale
+  `expected_status`, confirming the row (including `updated_at`) is
+  completely unchanged in every case; confirms the lifecycle endpoint
+  rejects no-auth, wrong-token, and (critically) the webhook token;
+  confirms a malformed UUID, a nonexistent UUID, and an invalid
+  `target_status` each get the correct status code; confirms status
+  and `resolved_at` both survive a real `docker compose restart
+  postgres`; drives a full real occurrence-identity scenario through
+  the actual webhook endpoint (resolve A, recur as distinct incident B,
+  confirm a delayed notification for A touches neither B nor creates
+  anything new); fires 10 genuinely concurrent `PATCH` requests and
+  confirms exactly one wins; and confirms exact-count-verified cleanup.
+  **All 12 sections passed** on a real run. A bash-building-Python-
+  literal bug (`ends_at_json="null"`, a JSON literal, embedded directly
+  into interpolated Python source expecting `None`) was found and fixed
+  during this script's own development.
+- **`scripts/verify-alert-lifecycle.sh` extended, not duplicated:**
+  `--ids-out`/`--ids-file` added to `scripts/verify-ingestion.py`'s
+  `incident-from-alert` (captures confirmed incident IDs) and a new
+  `confirm-resolved` subcommand (read-only — polls each ID's `GET
+  /api/v1/incidents/{id}`, asserts `status=="resolved"` and a populated,
+  fresh-enough `resolved_at`) — wired into a new section inserted after
+  the existing Collector-recovery confirmation, using the SAME real,
+  controlled outage this script already performs; no second outage test
+  anywhere. This is also the real run that found and then re-confirmed
+  the fix for bug #2 above (see that bullet).
+- `Makefile` extended: `verify-incident-lifecycle` added to `.PHONY`
+  and `help`; existing webhook/ingestion target help text updated to
+  mention Phase 3D. Every existing target unchanged.
+- `.github/workflows/ci.yml` extended, not duplicated: the secret-init
+  and webhook-verification steps renamed to note they also cover Phase
+  3D; a new "Verify incident lifecycle (Phase 3D)" step added right
+  after the webhook-verification step; the final step renamed to
+  mention the resolution proof it already picks up automatically
+  through the shared, unchanged `VERIFY_INGESTION=true
+  scripts/verify-alert-lifecycle.sh` command.
+  `scripts/verify-incident-lifecycle.sh` added to the shell-syntax-check
+  step. CI YAML validity reconfirmed via
+  `python3 -c "import yaml; yaml.safe_load(...)"`. `timeout-minutes: 20`
+  left unchanged — no real measurement indicated it was insufficient
+  for this phase's modest additions. Not yet run on GitHub Actions in
+  this updated form.
+- New `docs/architecture/phase-3d-incident-lifecycle.md`: the
+  authoritative, detailed reference for the transition matrix, the
+  management API, authentication boundaries, the concurrency mechanism,
+  automatic resolution, occurrence-identity/stale-replay handling
+  (including both real bugs above), the documented limitation of the
+  Alertmanager webhook event model, and the full verification story.
+  `docs/api/control-plane.md`, `docs/architecture/system-overview.md`,
+  `docs/architecture/incident-domain-model.md`,
+  `docs/architecture/phase-3c-alert-ingestion.md`, and this file
+  updated to summarize and link to it — including removing stale
+  present-tense claims Phase 3D made no longer true (e.g. "resolved
+  webhooks are still intentionally ignored," "Phase 3D will implement
+  real transition validation"), without rewriting the historical
+  narrative of the phases that originally made those claims.
+- **Limitations, honestly reported, not worked around:** this
+  transition matrix is enforced at the application layer only — a
+  privileged SQL client connecting directly to PostgreSQL bypasses it,
+  exactly as it always could bypass any application-level rule; no
+  incident audit-history table (Phase 3E); no agent-generated
+  remediation, human approval workflow, automated remediation, RAG,
+  LangGraph, frontend, external identity provider, Kafka, Redis,
+  Kubernetes, or Terraform/AWS were added, per this phase's explicit
+  scope; the Alertmanager webhook event model's own lack of an explicit
+  occurrence-generation marker means a genuinely new occurrence's
+  firing notification arriving before its predecessor's resolved
+  notification is handled by updating the existing active row in
+  place, not creating a second one — documented as a real, accepted
+  constraint of the event model, not an oversight.
+- **Final validation, run after both real bugs were fixed:**
+  `make control-plane-test` — **162 passed**; `make
+  verify-incident-lifecycle` — **all 12 sections passed** against the
+  real stack, including the 10-concurrent-request compare-and-swap
+  proof; `make verify-webhook-ingestion` — all sections still passed
+  (no Phase 3C regression); `make verify-alert-ingestion` — **passed**
+  (exit 0) against the real stack, using the single existing
+  Collector-outage lifecycle path, genuinely resolving two real,
+  previously-stuck incidents via the real Alertmanager resolved
+  webhook. `make verify-observability` was **not** rerun, per
+  instructions. The Compose stack was torn down afterward
+  (`docker compose down`, volumes preserved).
+- **Post-review corrections (same phase, before commit):** independent
+  review of the version above found three real problems, all fixed and
+  re-verified against the real stack, not just described:
+  1. **Occurrence watermark — the central fix.** The version above
+     compared an incoming alert's `startsAt` against the active
+     incident's `first_seen_at`, which is immutable by design. Review
+     reproduced the exact resulting regression: A fires (creating
+     incident X), B fires later while X is still active (updating it
+     in place — `first_seen_at` stays at A's value, as designed), B
+     resolves, and then (a) a delayed resolved notification for the
+     *original* occurrence A could incorrectly resolve X even though X
+     now represents B, and (b) a delayed duplicate firing replay of B,
+     arriving after its resolution, looked like a *genuinely new*
+     occurrence against X's stale `first_seen_at` and incorrectly
+     spawned a second incident. Fixed with a new, narrowly-scoped
+     Flyway migration, `database/migrations/V2__add_occurrence_watermark.sql`
+     — `reliability.incidents.occurrence_starts_at` (`NOT NULL`,
+     `CHECK (occurrence_starts_at >= first_seen_at)`), backfilled for
+     every existing row from its own `first_seen_at`. This column
+     records the LATEST accepted firing `startsAt`, advancing via
+     `GREATEST` on every accepted update
+     (`repositories/incident_repository.py`'s `upsert_firing_incident`),
+     while `first_seen_at` keeps its original, unchanged meaning.
+     `ingestion/service.py`'s comparisons were rewritten to read this
+     watermark instead of `first_seen_at` throughout — firing-side
+     ordering comparisons stay ordering-based (`<`/`<=` against the
+     watermark), but the resolved-side comparison was tightened from
+     "equal or newer" to **exact equality** against the watermark, so
+     a resolved notification for an occurrence never observed firing
+     (`startsAt` strictly newer than the watermark) is also correctly
+     ignored rather than blindly resolving an incident on a guess — a
+     requirement review called out explicitly.
+     `database/migrations/V1__create_incident_schema.sql` was never
+     touched; the migration was verified to apply cleanly against both
+     a disposable fresh database and the existing, non-empty local
+     development database (which already held two real historical
+     incidents from earlier sessions), correctly backfilling and
+     preserving every existing row in both cases. New unit tests
+     (`test_delayed_resolved_for_superseded_occurrence_does_not_resolve_active_incident`,
+     `test_delayed_duplicate_firing_after_occurrence_resolved_does_not_create_incident`,
+     `test_resolved_notification_matching_watermark_resolves_incident`,
+     `test_resolved_notification_for_unobserved_newer_occurrence_does_not_resolve_active_incident`,
+     `test_genuine_subsequent_occurrence_after_watermark_advance_creates_new_incident`)
+     reproduce every scenario at the mock level, with
+     `tests/conftest.py`'s fake repository rewritten to model real
+     watermark semantics (advancing via `max()`, ordering
+     `get_most_recent_incident` by it) rather than letting the old,
+     incorrect behavior hide behind an unrealistic fake.
+     `scripts/verify-incident-lifecycle.sh` gained two new real
+     PostgreSQL sections (8 and 10, with the existing restart section
+     renumbered to 9 and extended to also prove the watermark itself
+     survives a real restart) that reproduce the exact timeline from
+     the review's own report and confirm the regression no longer
+     occurs. A new `NOT NULL` column with no default affects every
+     direct SQL `INSERT`, not just application code: running the
+     *existing* `scripts/verify-persistence.sh` and
+     `scripts/verify-control-plane.sh` after adding it surfaced exactly
+     that (both insert test rows directly via `psql`, since neither of
+     those earlier phases exposes an incident-creation HTTP API) — every
+     `INSERT` in both scripts needed `occurrence_starts_at` added,
+     otherwise it failed with an unrelated `NOT NULL violation` instead
+     of exercising whatever constraint the test actually means to
+     check. Both scripts were fixed and re-run end to end, confirmed
+     passing with no other change in behavior.
+  2. **`scripts/verify-incident-lifecycle.sh`'s `resolved_at`
+     preservation check was vacuous.** It captured `resolved_at` only
+     *after* the `resolved -> closed` transition had already run (both
+     reads happened on the already-closed row), so the "preserved
+     across closure" assertion was comparing one value to itself and
+     could never have caught a real regression. Fixed by capturing
+     `resolved_at` immediately after entering `resolved`, then driving
+     `resolved -> closed` as its own explicit step, then re-reading and
+     comparing — no artificial sleep or redundant test cycle needed, as
+     review specified.
+  3. **Identical webhook/lifecycle tokens were never explicitly
+     rejected.** Nothing stopped an operator from configuring
+     `CONTROL_PLANE_WEBHOOK_TOKEN` and `CONTROL_PLANE_LIFECYCLE_TOKEN`
+     to the same value, silently defeating the entire reason they are
+     two separate credentials. Fixed with two independent layers:
+     `scripts/init-webhook-secret.sh` now compares the two final
+     values and refuses to proceed (secret-free error, no silent
+     rotation of either value) if they match; and a new
+     `core/config.py` function, `resolve_write_tokens`, is called once
+     at startup (`main.py`'s `lifespan`) and treats both tokens as
+     unconfigured (both write endpoints fail closed) if they were
+     configured identically by some other means that bypassed the
+     initializer entirely — verified directly with both a scratch
+     `.env` (confirming the initializer's own refusal, with no secret
+     value printed) and a new `tests/test_config.py` (the pure
+     `resolve_write_tokens` function for every input combination, plus
+     an end-to-end `TestClient` test with both environment variables
+     set identically, confirming both write endpoints return `401`
+     while `GET /api/v1/incidents` still returns `200`).
+  - **Documentation**
+    (`docs/architecture/phase-3d-incident-lifecycle.md`,
+    `docs/architecture/incident-domain-model.md`, this file) updated
+    to describe all three corrections and their real verification
+    evidence, including a new "Post-review correction: the occurrence
+    watermark" section with the exact reproduction and fix, without
+    rewriting the historical narrative of the original description
+    above.
+  - **Final validation, run after all three fixes:** `make
+    control-plane-test` — **171 passed**; `make verify-incident-lifecycle`
+    — **all 14 sections passed** against the real stack, including the
+    new watermark-regression timeline (sections 8 and 10) and the
+    corrected `resolved_at`-before-closure ordering (section 2), and
+    the restart section (9) now also confirming the watermark itself
+    survives a real PostgreSQL restart; `make verify-persistence` and
+    `make verify-control-plane` — both **passed** against the real
+    stack after fixing their own direct-SQL test inserts for the new
+    `NOT NULL` column (see above) — no other Phase 3A/3B regression;
+    `make verify-webhook-ingestion` — all 10 sections still passed (no
+    regression); `make verify-alert-ingestion` — **passed** (exit 0)
+    against the real stack, using the single existing Collector-outage
+    lifecycle path once more end to end (no second, separate outage
+    test). `make verify-observability` was **not** rerun, per
+    instructions. The Compose stack was torn down afterward
+    (`docker compose down`, volumes preserved); the two throwaway
+    Compose projects used to verify the V2 migration against a
+    disposable fresh database were torn down with `docker compose down
+    -v` (their own disposable volumes only — the real project's
+    `postgres_data` volume was never touched).

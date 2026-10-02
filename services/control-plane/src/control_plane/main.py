@@ -12,10 +12,12 @@ reports this.
 
 As of Phase 3C, lifespan also reads the webhook Bearer token once
 (WebhookSettings.from_env()) and stores it on app.state — see
-api/webhook_auth.py and api/webhook.py. This never blocks startup
-either: an absent token simply means every webhook request fails
-closed (401), the same non-blocking-startup philosophy as the database
-engine above.
+api/auth.py and api/webhook.py. As of Phase 3D, it likewise reads a
+SEPARATE lifecycle Bearer token (LifecycleSettings.from_env()) for
+PATCH /api/v1/incidents/{id}/status — see api/auth.py and
+api/incidents.py. Neither blocks startup: an absent token simply means
+every request to that specific endpoint fails closed (401), the same
+non-blocking-startup philosophy as the database engine above.
 """
 
 import logging
@@ -31,7 +33,7 @@ from control_plane.api.health import router as health_router
 from control_plane.api.incidents import router as incidents_router
 from control_plane.api.webhook import router as webhook_router
 from control_plane.api.webhook_limits import WebhookBodySizeLimitMiddleware
-from control_plane.core.config import DatabaseSettings, WebhookSettings
+from control_plane.core.config import DatabaseSettings, LifecycleSettings, WebhookSettings, resolve_write_tokens
 from control_plane.db.engine import create_engine
 
 logger = logging.getLogger("control_plane")
@@ -43,7 +45,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = create_engine(settings)
     app.state.db_engine = engine
     app.state.db_sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-    app.state.webhook_token = WebhookSettings.from_env().token
+    # Post-review correction: resolve_write_tokens() refuses to let
+    # both write-endpoint tokens authorize anything if they were
+    # (mis)configured identically — see its own docstring and
+    # core/config.py.
+    webhook_token, lifecycle_token = resolve_write_tokens(
+        WebhookSettings.from_env().token, LifecycleSettings.from_env().token
+    )
+    app.state.webhook_token = webhook_token
+    app.state.lifecycle_token = lifecycle_token
     try:
         yield
     finally:
@@ -56,15 +66,19 @@ app = FastAPI(
     title="Autonomous Reliability Platform Control Plane",
     description=(
         "Read-only API over reliability.incidents (GET /api/v1/incidents, "
-        "GET /api/v1/incidents/{id}), plus, as of Phase 3C, one trusted "
-        "internal write path: POST /internal/v1/alertmanager/webhook, "
-        "which requires 'Authorization: Bearer <token>' and ingests real "
-        "firing Alertmanager alerts as reliability.incidents rows "
-        "(deduplicated per-fingerprint via a real PostgreSQL upsert). "
-        "Resolved alert notifications are accepted and acknowledged but "
-        "do not change any incident's lifecycle status yet — no "
-        "lifecycle transitions exist until Phase 3D. Local development "
-        "only — the read API has no authentication at all."
+        "GET /api/v1/incidents/{id}), plus two trusted internal write "
+        "paths, each with its own Bearer token: "
+        "POST /internal/v1/alertmanager/webhook (Phase 3C; "
+        "CONTROL_PLANE_WEBHOOK_TOKEN) ingests real Alertmanager alerts as "
+        "reliability.incidents rows, deduplicated per-fingerprint via a "
+        "real PostgreSQL upsert, and — as of Phase 3D — a matching "
+        "resolved alert automatically transitions the correct occurrence "
+        "to 'resolved'; and PATCH /api/v1/incidents/{id}/status "
+        "(Phase 3D; CONTROL_PLANE_LIFECYCLE_TOKEN, a separate credential "
+        "Alertmanager is never given) lets a human/operator drive explicit, "
+        "validated incident lifecycle transitions with optimistic "
+        "concurrency control. Local development only — the read API has "
+        "no authentication at all."
     ),
     lifespan=lifespan,
 )

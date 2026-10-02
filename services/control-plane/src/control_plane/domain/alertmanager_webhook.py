@@ -1,5 +1,5 @@
 """Pydantic v2 request/response models for the Alertmanager webhook
-ingestion endpoint (Phase 3C).
+ingestion endpoint (Phase 3C, extended Phase 3D).
 
 Matches Alertmanager's real webhook_configs version-4 JSON payload
 shape (notify/webhook.Message in Alertmanager's own source) — only the
@@ -15,8 +15,8 @@ Critically, alert-level status drives all ingestion behavior
 can and does contain a mix of "firing" and "resolved" entries (e.g. one
 alert instance recovers while a sibling in the same group is still
 firing), so only the group-level envelope is validated here; which
-alerts actually get persisted is a per-alert decision made in
-ingestion/service.py.
+alerts actually get persisted, updated, or resolved is a per-alert
+decision made in ingestion/service.py.
 """
 
 from datetime import datetime
@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.domain.incident import VALID_SEVERITIES
 
 # Reasonable, generous-but-bounded limits for a trusted internal
-# endpoint (see api/webhook_auth.py — every request here is already
+# endpoint (see api/auth.py — every request here is already
 # Bearer-authenticated before this model is even parsed). Not a
 # production rate-limiter; just enough to stop a wildly malformed or
 # abusive payload from being accepted at all.
@@ -43,6 +43,14 @@ class AlertmanagerAlert(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)
     annotations: dict[str, str] = Field(default_factory=dict)
     startsAt: datetime
+    # Phase 3D: required and validated only for a RESOLVED alert — the
+    # genuine resolution time (see ingestion/service.py's resolution
+    # handling). Alertmanager always includes this field for a firing
+    # alert too, but sets it to the Go zero-value sentinel
+    # ("0001-01-01T00:00:00Z", meaning "not yet known"), which this
+    # model deliberately accepts but never relies on — firing alerts
+    # never read endsAt at all.
+    endsAt: datetime | None = None
     fingerprint: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -62,13 +70,11 @@ class AlertmanagerAlert(BaseModel):
 
         # alertname is required on every alert regardless of status —
         # it is the safe title fallback (see ingestion/mapping.py) and
-        # is useful even for a resolved-only acknowledgement. severity
-        # is only required (and validated against the real DB
-        # vocabulary) for a FIRING alert, since only firing alerts are
-        # ever mapped onto an incident's severity column — a
-        # resolved-only alert never reaches ingestion/mapping.py at
-        # all (see ingestion/service.py), so it may legitimately lack
-        # or carry a stale severity label.
+        # is useful even for a resolved notification. severity is only
+        # required (and validated against the real DB vocabulary) for
+        # a FIRING alert, since only firing alerts are ever mapped onto
+        # an incident's severity column — a resolved alert may
+        # legitimately lack or carry a stale severity label.
         alertname = self.labels.get("alertname", "").strip()
         if not alertname:
             raise ValueError("labels.alertname is required and must not be blank")
@@ -79,6 +85,20 @@ class AlertmanagerAlert(BaseModel):
                 raise ValueError(
                     f"labels.severity must be one of {sorted(VALID_SEVERITIES)} for a firing alert, got {severity!r}"
                 )
+
+        if self.status == "resolved":
+            # A resolved alert must carry a genuine, timezone-aware
+            # resolution time that is not before its own startsAt —
+            # "appropriate validation" before this value is ever used
+            # to set resolved_at (ingestion/service.py). This also
+            # rejects the Go zero-value sentinel a still-firing alert
+            # carries, since year 1 is always before startsAt.
+            if self.endsAt is None:
+                raise ValueError("endsAt is required for a resolved alert")
+            if self.endsAt.tzinfo is None:
+                raise ValueError("endsAt must include timezone information")
+            if self.endsAt < self.startsAt:
+                raise ValueError("endsAt must not be before startsAt")
 
         return self
 
@@ -94,11 +114,23 @@ class AlertmanagerWebhookPayload(BaseModel):
 
 
 class WebhookAckResponse(BaseModel):
-    """A deliberately small acknowledgement — no incident lifecycle
-    transition is ever implemented by this endpoint (see
-    ingestion/service.py's module docstring)."""
+    """A deliberately small acknowledgement.
+
+    Phase 3D note: `resolved_processed` replaces Phase 3C's
+    `resolved_ignored` field name — resolved alerts are no longer
+    unconditionally ignored (see ingestion/service.py), so a field
+    named "ignored" would now be actively misleading for the common
+    case. `incidents_ignored` separately counts events that WERE
+    safely skipped for a specific, legitimate reason (a stale/
+    mismatched firing replay, a resolved notification with no matching
+    active incident, or one that doesn't match the currently active
+    occurrence) — see
+    docs/architecture/phase-3d-incident-lifecycle.md.
+    """
 
     firing_processed: int
-    resolved_ignored: int
+    resolved_processed: int
     incidents_created: int
     incidents_updated: int
+    incidents_resolved: int
+    incidents_ignored: int

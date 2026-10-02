@@ -26,6 +26,7 @@ class IncidentFields(TypedDict):
     severity: str
     first_seen_at: datetime
     last_seen_at: datetime
+    occurrence_starts_at: datetime
 
 
 def map_firing_alert_to_incident_fields(alert: AlertmanagerAlert, *, ingested_at: datetime) -> IncidentFields:
@@ -47,4 +48,12 @@ def map_firing_alert_to_incident_fields(alert: AlertmanagerAlert, *, ingested_at
         # startsAt — ingested_at is captured once per webhook batch by
         # the caller (ingestion/service.py), not re-read per alert.
         last_seen_at=ingested_at,
+        # Phase 3D (post-review correction): the occurrence-identity
+        # watermark — see database/migrations/V2__add_occurrence_watermark.sql
+        # and ingestion/service.py. Always this alert's own startsAt:
+        # on a genuine new incident it equals first_seen_at; on an
+        # accepted update to an already-active incident, the
+        # repository's upsert advances the stored watermark to this
+        # value (via GREATEST), never regresses it.
+        occurrence_starts_at=alert.startsAt,
     )
