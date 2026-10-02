@@ -84,6 +84,32 @@ class FakeIncidentRepository:
         # transaction to roll back) but silently discards the write
         # against the real database once the session closes.
         self.commit_count = 0
+        # Phase 3E: in-memory audit trail, appended to by the same
+        # three mutation methods the real repository writes it from
+        # (upsert_firing_incident, transition_incident_status,
+        # resolve_active_incident_for_fingerprint) — never by a
+        # separate call a test has to remember to make. This fake
+        # cannot model real transactional atomicity (there is no real
+        # transaction here to roll back) — that proof is
+        # scripts/verify-incident-audit.sh against the real database;
+        # see this fixture's and that script's own docstrings.
+        self.events: list[dict] = []
+        self._next_event_id = 1
+
+    def _record_event(self, incident_id, *, event_type, actor_type, previous_status, new_status, metadata):
+        self.events.append(
+            {
+                "id": self._next_event_id,
+                "incident_id": incident_id,
+                "event_type": event_type,
+                "actor_type": actor_type,
+                "previous_status": previous_status,
+                "new_status": new_status,
+                "occurred_at": datetime.now(UTC),
+                "metadata": dict(metadata),
+            }
+        )
+        self._next_event_id += 1
 
     async def list_incidents(self, *, status, severity, source, limit, offset):
         matched = [
@@ -115,6 +141,10 @@ class FakeIncidentRepository:
         last_seen_at,
         occurrence_starts_at,
     ):
+        metadata = {
+            "source_fingerprint": source_fingerprint,
+            "observed_starts_at": occurrence_starts_at.isoformat(),
+        }
         for row in self.rows:
             if (
                 row["source"] == source
@@ -131,6 +161,14 @@ class FakeIncidentRepository:
                 # database/migrations/V2__add_occurrence_watermark.sql.
                 row["occurrence_starts_at"] = max(row["occurrence_starts_at"], occurrence_starts_at)
                 row["updated_at"] = datetime.now(UTC)
+                self._record_event(
+                    row["id"],
+                    event_type="observed",
+                    actor_type="alertmanager",
+                    previous_status=row["status"],
+                    new_status=row["status"],
+                    metadata=metadata,
+                )
                 return row["id"], False
 
         new_id = uuid.uuid4()
@@ -151,6 +189,14 @@ class FakeIncidentRepository:
                 "updated_at": now,
                 "occurrence_starts_at": occurrence_starts_at,
             }
+        )
+        self._record_event(
+            new_id,
+            event_type="created",
+            actor_type="alertmanager",
+            previous_status=None,
+            new_status="open",
+            metadata=metadata,
         )
         return new_id, True
 
@@ -205,6 +251,14 @@ class FakeIncidentRepository:
                 if resolved_at is not None:
                     row["resolved_at"] = resolved_at
                 row["updated_at"] = datetime.now(UTC)
+                self._record_event(
+                    incident_id,
+                    event_type="status_transition",
+                    actor_type="operator",
+                    previous_status=expected_status,
+                    new_status=target_status,
+                    metadata={},
+                )
                 return row
         return None
 
@@ -213,11 +267,27 @@ class FakeIncidentRepository:
             if row["id"] == incident_id:
                 if row["status"] in ("resolved", "closed"):
                     return None
+                previous_status = row["status"]
                 row["status"] = "resolved"
                 row["resolved_at"] = resolved_at
                 row["updated_at"] = datetime.now(UTC)
+                self._record_event(
+                    incident_id,
+                    event_type="status_transition",
+                    actor_type="alertmanager",
+                    previous_status=previous_status,
+                    new_status="resolved",
+                    metadata={"resolution_source": "alertmanager_webhook"},
+                )
                 return row
         return None
+
+    async def get_incident_events(self, incident_id, *, limit, offset):
+        matched = [e for e in self.events if e["incident_id"] == incident_id]
+        matched.sort(key=lambda e: (e["occurred_at"], e["id"]))
+        total = len(matched)
+        page = matched[offset : offset + limit]
+        return page, total
 
 
 def make_incident_row(**overrides) -> dict:

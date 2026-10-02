@@ -23,14 +23,29 @@
 #
 # Safe to rerun against a nonempty local database: every row this
 # script creates uses a source_fingerprint carrying a UUID unique to
-# this specific execution, and cleanup deletes only rows matching that
-# exact prefix — never another run's rows, and never real data (the
-# `source` column is always the fixed literal "alertmanager", set by
-# the application itself, so — unlike scripts/verify-control-plane.sh,
-# which can scope cleanup by a unique `source` value — this script
-# scopes by source_fingerprint prefix instead, the same pattern
-# scripts/verify-persistence.sh already uses for the same reason).
-# Does not reset or delete any volume at any point.
+# this specific execution (the `source` column is always the fixed
+# literal "alertmanager", set by the application itself, so — unlike
+# scripts/verify-control-plane.sh, which can scope cleanup by a unique
+# `source` value — this script scopes by source_fingerprint prefix
+# instead, the same pattern scripts/verify-persistence.sh already uses
+# for the same reason). Does not reset or delete any volume at any
+# point.
+#
+# Post-review correction (Phase 3E): every row this script creates now
+# goes through the real webhook endpoint, which — as of
+# database/migrations/V3__create_incident_audit.sql — always records a
+# matching, genuinely append-only reliability.incident_events row for
+# an accepted create/observe/resolve. That table's own ON DELETE
+# RESTRICT foreign key means an incident with any recorded audit
+# history can never be deleted at all, by design (see
+# docs/architecture/phase-3e-incident-audit.md) — so this script's
+# final step no longer deletes its test rows. They are confirmed
+# present (count-checked, exactly as before) and then permanently
+# retained, scoped by this run's own unique fingerprint prefix so a
+# future run's rows are never confused with this one's — the same
+# "genuine state is kept, never deleted" precedent already established
+# by the real Collector-outage test's own ingested incidents
+# (scripts/verify-alert-lifecycle.sh).
 #
 # Exits non-zero immediately on the first failed check.
 
@@ -109,7 +124,6 @@ echo "  postgres and control-plane ready"
 
 RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 FP_PREFIX="verify-webhook-ingestion-${RUN_ID}"
-CLEANUP_SQL="DELETE FROM reliability.incidents WHERE source = 'alertmanager' AND source_fingerprint LIKE '${FP_PREFIX}-%';"
 
 psql_exec() {
   docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"
@@ -124,16 +138,14 @@ besteffort_cleanup() {
   # Captured as the very first statement: this is the exit status that
   # triggered the trap (e.g. from an earlier `fail()`'s `exit 1`, or a
   # natural 0). Explicitly restored via `exit "$exit_status"` below so
-  # nothing this trap does — including a failed cleanup attempt or the
-  # postgres-restart wait loop — can ever change the script's own
-  # final/reported exit status.
+  # nothing this trap does — including the postgres-restart wait loop
+  # — can ever change the script's own final/reported exit status.
   local exit_status=$?
 
   # Section 9 deliberately stops postgres to prove a real outage
   # returns 503. If an assertion fails after that stop but before the
   # section's own restart, postgres would otherwise be left stopped —
-  # and the cleanup DELETE just below can never reach a stopped
-  # database anyway. Restore it first, best-effort, bounded.
+  # restore it, best-effort, bounded.
   if [ "$POSTGRES_STOPPED_BY_THIS_SCRIPT" = true ]; then
     echo "" >&2
     echo "-- trap: restoring postgres (this script left it stopped) --" >&2
@@ -145,7 +157,9 @@ besteffort_cleanup() {
     done
   fi
 
-  docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$CLEANUP_SQL" >/dev/null 2>&1 || true
+  # Post-review correction (Phase 3E): no cleanup DELETE here anymore —
+  # see the module docstring above for why this run's rows (complete
+  # or partial) are retained rather than deleted.
 
   exit "$exit_status"
 }
@@ -520,23 +534,47 @@ post_single_alert "$WEBHOOK_TOKEN" "$fp_outage" firing critical "after recovery"
 echo "  normal ingestion resumed after postgres recovery (control-plane container was never restarted)"
 
 # --------------------------------------------------------------------
-# 10. Clean up ONLY this execution's test-created rows
+# 10. Confirm this execution's rows, and their audit trails, are
+#     genuinely present — retained permanently, never deleted
 # --------------------------------------------------------------------
-section "10. Clean up only this execution's test-created rows"
+section "10. Confirm this run's rows (and audit trails) are present; retained permanently, not deleted"
 
-before_count="$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WHERE source = 'alertmanager' AND source_fingerprint LIKE '${FP_PREFIX}-%';")"
+final_count="$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WHERE source = 'alertmanager' AND source_fingerprint LIKE '${FP_PREFIX}-%';")"
 # 2 rows for fp1 (section 5's resolved-historical + new-active pair) +
 # 1 each for fp2, fp3 (section 6), the mixed-batch firing alert
 # (section 7), fp_resolve_me (section 7b, resolved — duplicate
 # resolution never adds a row), and the post-recovery outage alert
 # (section 9) = 7. Auth failures, 422s, and resolved-only/resolved-in-
 # a-mixed-batch deliveries are all asserted to write zero rows above.
-[ "$before_count" = "7" ] || fail "expected exactly 7 rows for this run's fingerprint prefix before cleanup, found: $before_count"
-# Not suppressed: a cleanup failure here fails the whole script.
-psql_exec -c "$CLEANUP_SQL"
-after_count="$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WHERE source = 'alertmanager' AND source_fingerprint LIKE '${FP_PREFIX}-%';")"
-[ "$after_count" = "0" ] || fail "cleanup did not remove all of this run's rows (still present: $after_count)"
-echo "  cleaned up: $before_count -> $after_count rows for fingerprint prefix '${FP_PREFIX}-'"
+[ "$final_count" = "7" ] || fail "expected exactly 7 rows for this run's fingerprint prefix, found: $final_count"
+
+# Phase 3E: every one of those 7 rows was created or mutated through
+# the real webhook endpoint, so every one of them must have at least
+# one real, append-only reliability.incident_events row — this is
+# exactly what makes them undeletable (ON DELETE RESTRICT), and also a
+# direct confirmation that this run's audit trail was genuinely
+# written, not merely that this script never attempted to check it.
+# Exact expected count, same precision as every other assertion in
+# this script (section's own manual UPDATE for fp1's first resolution
+# in section 5 deliberately bypasses the application layer entirely —
+# via a direct SQL UPDATE, not the webhook — so it contributes no
+# event; everything else here was a real webhook call):
+#   fp1 original row:  created + observed        = 2
+#   fp1 new active row (section 5 recurrence): created = 1
+#   fp2:                created                  = 1
+#   fp3:                created                  = 1
+#   mixed-batch fp_firing: created                = 1
+#   fp_resolve_me:      created + resolved        = 2
+#   fp_outage (post-recovery only — the during-outage 503 attempt
+#     rolled back entirely, recording nothing): created = 1
+#   total: 9
+events_count="$(psql_exec -t -A -c "
+  SELECT count(*) FROM reliability.incident_events ev
+  JOIN reliability.incidents inc ON inc.id = ev.incident_id
+  WHERE inc.source = 'alertmanager' AND inc.source_fingerprint LIKE '${FP_PREFIX}-%';
+")"
+[ "$events_count" = "9" ] || fail "expected exactly 9 audit events across this run's 7 rows, found $events_count"
+echo "  confirmed: $final_count rows present with exactly $events_count audit events — permanently retained, not deleted (append-only by design)"
 trap - EXIT
 
 echo ""

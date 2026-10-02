@@ -30,6 +30,7 @@ from control_plane.domain.incident import (
     IncidentListResponse,
     IncidentStatusTransitionRequest,
 )
+from control_plane.domain.incident_event import IncidentEvent, IncidentEventListResponse
 from control_plane.domain.lifecycle import entering_resolved, is_transition_allowed
 from control_plane.repositories.incident_repository import IncidentRepository
 
@@ -78,6 +79,42 @@ async def get_incident(
     if row is None:
         raise HTTPException(status_code=404, detail="incident not found")
     return Incident.model_validate(dict(row))
+
+
+@router.get("/incidents/{incident_id}/events", response_model=IncidentEventListResponse)
+async def list_incident_events(
+    incident_id: uuid.UUID,
+    repo: Annotated[IncidentRepository, Depends(get_incident_repository)],
+    limit: Annotated[int, Query(ge=1, le=100, description="Page size")] = 20,
+    offset: Annotated[int, Query(ge=0, description="Number of records to skip")] = 0,
+) -> IncidentEventListResponse:
+    """Phase 3E: the incident's full, append-only audit timeline —
+    every accepted creation, observation, and status transition,
+    oldest first. Read-only, unauthenticated, same local-development
+    policy as every other GET route in this module (see
+    docs/architecture/phase-3e-incident-audit.md). Not a generic
+    incident-editing API: there is no corresponding write endpoint
+    here or anywhere else — events are only ever written as a direct
+    consequence of an accepted mutation elsewhere in this module or
+    ingestion/service.py (see repositories/incident_repository.py).
+
+    An incident that exists but has no recorded history yet (e.g. a
+    pre-Phase-3E incident, or one that has only ever been read) is a
+    genuine 200 with an empty `items` list — never fabricated, and
+    never conflated with 404 (which means the incident itself does not
+    exist).
+    """
+    incident = await repo.get_by_id(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="incident not found")
+
+    rows, total = await repo.get_incident_events(incident_id, limit=limit, offset=offset)
+    return IncidentEventListResponse(
+        items=[IncidentEvent.model_validate(dict(row)) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.patch(

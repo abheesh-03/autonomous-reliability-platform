@@ -786,12 +786,18 @@ still passed — no Phase 3C regression), and one final
 `make verify-alert-ingestion` run using the single existing real
 Collector-outage cycle (ingestion and resolution both passed).
 
-## Features reserved for Phase 3E / 3F
+## Features reserved for Phase 3F
 
-- An incident audit-history table recording every transition (who, when,
-  from what, to what) — Phase 3E, explicitly not built here.
-- Agent-generated remediation decisions, root-cause analysis, RAG,
-  LangGraph.
+Implemented since this document was first written, by Phase 3E,
+without changing anything described above: a durable, append-only
+incident audit-history table recording every accepted creation,
+observation, operator transition, and automatic resolution — see
+[docs/architecture/phase-3e-incident-audit.md](phase-3e-incident-audit.md).
+
+Still reserved for Phase 3F:
+
+- Incident simulation, agent-generated remediation decisions, root-
+  cause analysis, RAG, LangGraph.
 - Human approval workflows for remediation.
 - Automated infrastructure remediation of any kind.
 - A frontend / operations console consuming any of this.

@@ -20,20 +20,33 @@
 # (VERIFY_INGESTION=true) / `make verify-alert-ingestion`.
 #
 # Safe to rerun against a nonempty local database: every row this
-# script creates uses a `source` value unique to this specific
-# execution, and cleanup deletes only rows matching that exact value —
-# never another run's rows, and never real data. Does not reset or
-# delete any volume at any point.
+# script creates uses a `source` value (or, for sections driven
+# through the real webhook endpoint, a fingerprint) unique to this
+# specific execution — never another run's rows, and never real data.
+# Does not reset or delete any volume at any point.
 #
-# Post-review correction: sections 8-10 below specifically reproduce
-# the occurrence-watermark regression independent review found (a
-# firing update into a still-active incident never advanced
+# Post-review correction (Phase 3D): sections 8-10 below specifically
+# reproduce the occurrence-watermark regression independent review
+# found (a firing update into a still-active incident never advanced
 # first_seen_at, so a later delayed resolved notification for the
 # ORIGINAL occurrence could incorrectly resolve an incident that had
 # already moved on, and a delayed duplicate replay of the occurrence it
 # now represented could be mistaken for a genuine new recurrence) —
 # see database/migrations/V2__add_occurrence_watermark.sql and
 # docs/architecture/phase-3d-incident-lifecycle.md.
+#
+# Post-review correction (Phase 3E): every row this script creates is
+# either inserted directly (never touched by the application) or
+# mutated through a real PATCH/webhook call — and every one of THOSE
+# accepted mutations now records a matching, genuinely append-only
+# reliability.incident_events row (database/migrations/V3__create_incident_audit.sql).
+# That table's ON DELETE RESTRICT foreign key means an incident with
+# any recorded audit history can never be deleted at all, by design
+# (see docs/architecture/phase-3e-incident-audit.md). Since every row
+# this script creates gets at least one PATCH or webhook call applied
+# to it, none of them remain deletable — so, unlike earlier phases,
+# this script's final step confirms presence and retains its rows
+# permanently rather than deleting them. See section 14 below.
 #
 # Exits non-zero immediately on the first failed check.
 
@@ -122,7 +135,12 @@ AM_FP="verify-incident-lifecycle-am-${RUN_ID}"
 # same rationale and scoping pattern as AM_FP above, a distinct
 # fingerprint so it never collides with it.
 WM_FP="verify-incident-lifecycle-wm-${RUN_ID}"
-CLEANUP_SQL="DELETE FROM reliability.incidents WHERE source = '$TEST_SOURCE' OR (source = 'alertmanager' AND source_fingerprint IN ('$AM_FP', '$WM_FP'));"
+# A SELECT, not a DELETE: see the module docstring's Phase 3E note —
+# every row this script creates ends up with recorded audit history
+# and is therefore permanently retained, never deleted. Kept as one
+# shared WHERE-clause fragment so every section counting "this run's
+# rows" (11, 13) uses the exact same scoping.
+ROWS_WHERE_SQL="source = '$TEST_SOURCE' OR (source = 'alertmanager' AND source_fingerprint IN ('$AM_FP', '$WM_FP'))"
 
 psql_exec() {
   docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"
@@ -131,6 +149,9 @@ psql_exec() {
 POSTGRES_STOPPED_BY_THIS_SCRIPT=false
 
 besteffort_cleanup() {
+  # Captured as the very first statement so nothing this trap does can
+  # change the script's own final/reported exit status (see `exit
+  # "$exit_status"` below).
   local exit_status=$?
   if [ "$POSTGRES_STOPPED_BY_THIS_SCRIPT" = true ]; then
     echo "" >&2
@@ -142,7 +163,9 @@ besteffort_cleanup() {
       sleep 3
     done
   fi
-  docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$CLEANUP_SQL" >/dev/null 2>&1 || true
+  # Post-review correction (Phase 3E): no cleanup DELETE here anymore
+  # — this run's rows (complete or partial) are retained, never
+  # deleted, exactly like the happy-path's own section 14 below.
   exit "$exit_status"
 }
 trap besteffort_cleanup EXIT
@@ -573,7 +596,7 @@ echo "  10 concurrent requests from the same expected_status: exactly 1 succeede
 # --------------------------------------------------------------------
 section "13. Historical rows remain intact"
 
-final_count="$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WHERE source = '$TEST_SOURCE' OR (source='alertmanager' AND source_fingerprint IN ('$AM_FP', '$WM_FP'));")"
+final_count="$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WHERE $ROWS_WHERE_SQL;")"
 # id1 (progression), id2 (ack path), id3 (forbidden), id4 (stale/access/restart),
 # id5 (concurrency) = 5 TEST_SOURCE rows, plus 2 alertmanager-sourced AM_FP
 # occurrence rows (A resolved + B active) plus 2 alertmanager-sourced
@@ -582,14 +605,37 @@ final_count="$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WH
 echo "  all 9 rows created by this run are still present and accounted for (no row silently lost)"
 
 # --------------------------------------------------------------------
-# 14. Clean up ONLY this execution's test-created rows
+# 14. Confirm this run's rows, and their audit trails, are genuinely
+#     present — retained permanently, never deleted
 # --------------------------------------------------------------------
-section "14. Clean up only this execution's test-created rows"
+section "14. Confirm this run's rows (and audit trails) are present; retained permanently, not deleted"
 
-psql_exec -c "$CLEANUP_SQL"
-remaining="$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WHERE source = '$TEST_SOURCE' OR (source='alertmanager' AND source_fingerprint IN ('$AM_FP', '$WM_FP'));")"
-[ "$remaining" = "0" ] || fail "cleanup did not remove all of this run's rows (still present: $remaining)"
-echo "  cleaned up: 9 -> 0 rows for this run"
+# Post-review correction (Phase 3E): every row this script creates
+# that was ever successfully mutated (PATCHed or ingested) after
+# creation now has at least one real, append-only
+# reliability.incident_events row, which is exactly what makes it
+# undeletable (ON DELETE RESTRICT; see
+# database/migrations/V3__create_incident_audit.sql). id3 (section 4)
+# is the one exception: every PATCH attempt against it was rejected
+# (409), so it alone has zero events — a correct, expected reflection
+# of "no audit event for a rejected transition", not a gap. No DELETE
+# is attempted; this section confirms the exact expected audit trail
+# is genuinely present instead:
+#   id1: 5 (open->investigating->remediating->investigating->resolved->closed)
+#   id2: 2 (open->acknowledged->resolved)
+#   id3: 0 (every attempt rejected)
+#   id4: 2 (open->acknowledged, acknowledged->resolved)
+#   id5: 1 (exactly one of 10 concurrent attempts wins)
+#   WM_FP: 4 (X: created, observed, resolved = 3; C: created = 1)
+#   AM_FP: 3 (A: created, resolved = 2; B: created = 1)
+#   total: 17
+events_count="$(psql_exec -t -A -c "
+  SELECT count(*) FROM reliability.incident_events ev
+  JOIN reliability.incidents inc ON inc.id = ev.incident_id
+  WHERE $ROWS_WHERE_SQL;
+")"
+[ "$events_count" = "17" ] || fail "expected exactly 17 audit events across this run's 9 rows, found $events_count"
+echo "  confirmed: $final_count rows present with exactly $events_count audit events — permanently retained, not deleted (append-only by design)"
 trap - EXIT
 
 echo ""

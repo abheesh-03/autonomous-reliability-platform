@@ -51,6 +51,27 @@ resolved_at — proving Alertmanager's own real resolved webhook
 delivery drove that transition, not merely that the incident still
 exists.
 
+Phase 3E extends `confirm-resolved` further (see verify_audit_trail):
+for each of those same incident ids, it also reads the real, persisted
+audit timeline (GET /api/v1/incidents/{id}/events) and confirms a
+genuine 'created' event and a resolving 'status_transition' event both
+exist, are both attributed to actor_type='alertmanager' (never
+'operator' — no human ever touches an incident in this fully automated
+test), and are correctly ordered. No second Collector outage, and no
+new subcommand — this is the exact same real chain, checked one layer
+deeper.
+
+Post-review correction: the timeline is read via fetch_all_events,
+which fully paginates the endpoint (limit<=100 per page, looping on
+offset) rather than reading only its unpaginated first page — a
+long-lived incident with more than 20 accepted firing observations
+(this script's own real Collector-outage incidents normally have very
+few, but the endpoint's contract makes no such guarantee in general)
+could otherwise have its resolving event lie beyond the first page
+entirely. fetch_all_events also cross-checks that the API's own
+reported `total` stays consistent across pages and that no event id
+is ever returned twice.
+
 Usage:
     python3 scripts/verify-ingestion.py incident-from-alert \\
         --alert NAME --since ISO8601 \\
@@ -279,12 +300,113 @@ def cmd_incident_from_alert(args):
     sys.exit(0)
 
 
+def fetch_all_events(control_plane_url, incident_id, page_size=100):
+    """Post-review correction: fully paginates
+    GET /api/v1/incidents/{id}/events via the API's own limit/offset
+    contract (page_size capped at the API's own max, 100) — correct
+    regardless of how many events a long-lived incident has
+    accumulated, not just its first page. The original implementation
+    read only the unpaginated first page (the API's own default,
+    limit=20); a long-lived incident with more than 20 accepted firing
+    observations could have its resolving status_transition event lie
+    beyond that first page entirely, in which case the original
+    verify_audit_trail would never see it at all.
+
+    Validates internal consistency while paginating, not just after:
+    the reported `total` must stay identical across every page of the
+    same incident, and no event id may ever appear twice (which would
+    mean pagination is unstable, e.g. rows shifting between fetches)."""
+    base = control_plane_url.rstrip("/")
+    items = []
+    seen_ids = set()
+    offset = 0
+    expected_total = None
+    while True:
+        body = http_get_json(f"{base}/api/v1/incidents/{incident_id}/events?limit={page_size}&offset={offset}")
+        page_items = body.get("items", [])
+        total = body.get("total", len(items) + len(page_items))
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            fail(f"incident {incident_id}: reported total changed across pages ({expected_total} -> {total})")
+        for event in page_items:
+            if event["id"] in seen_ids:
+                fail(f"incident {incident_id}: duplicate event id {event['id']} returned across pages")
+            seen_ids.add(event["id"])
+        items.extend(page_items)
+        offset += page_size
+        if not page_items or offset >= total:
+            break
+    if len(items) != expected_total:
+        fail(
+            f"incident {incident_id}: fetched {len(items)} events across all pages, but the API reported "
+            f"total={expected_total}"
+        )
+    return items
+
+
+def verify_audit_trail(base, incident_id):
+    """Phase 3E: confirms this incident's real, persisted audit
+    timeline (GET /api/v1/incidents/{id}/events, fully paginated — see
+    fetch_all_events above) genuinely contains a 'created' event and a
+    resolving 'status_transition' event, both attributed to
+    actor_type='alertmanager' — never 'operator', which would mean a
+    human/operator action was fabricated for an incident that, in this
+    real Collector-outage test, no human ever touched. Read-only, like
+    the rest of this script: only reads control-plane's own HTTP API."""
+    events = fetch_all_events(base, incident_id)
+
+    created_events = [e for e in events if e["event_type"] == "created"]
+    if len(created_events) != 1:
+        fail(f"incident {incident_id}: expected exactly 1 'created' audit event, found {len(created_events)}")
+    created = created_events[0]
+    if created["actor_type"] != "alertmanager":
+        fail(f"incident {incident_id}: 'created' event has actor_type={created['actor_type']!r}, expected 'alertmanager'")
+
+    resolution_events = [
+        e for e in events if e["event_type"] == "status_transition" and e["new_status"] == "resolved"
+    ]
+    if len(resolution_events) != 1:
+        fail(
+            f"incident {incident_id}: expected exactly 1 resolving 'status_transition' audit event, "
+            f"found {len(resolution_events)}"
+        )
+    resolution = resolution_events[0]
+    if resolution["actor_type"] != "alertmanager":
+        fail(
+            f"incident {incident_id}: resolving status_transition event has actor_type={resolution['actor_type']!r}, "
+            "expected 'alertmanager' — a human/operator action must never be fabricated for this real, "
+            "automated Collector-outage test"
+        )
+
+    operator_events = [e for e in events if e["actor_type"] == "operator"]
+    if operator_events:
+        fail(f"incident {incident_id}: found {len(operator_events)} operator-attributed event(s) — no human ever touched this incident in this test")
+
+    # Correct ordering: the creation event must genuinely precede the
+    # resolution event, not merely both be present.
+    created_index = events.index(created)
+    resolution_index = events.index(resolution)
+    if created_index >= resolution_index:
+        fail(f"incident {incident_id}: 'created' event is not ordered before the resolving 'status_transition' event")
+
+    print(
+        f"  audit trail OK: id={incident_id} created(alertmanager) -> ... -> "
+        f"status_transition(alertmanager, resolved); no fabricated operator intervention"
+    )
+
+
 def cmd_confirm_resolved(args):
     """Phase 3D: confirms each incident id in --ids-file has genuinely
     transitioned to status="resolved" with a populated resolved_at —
     proving Alertmanager's own real resolved webhook delivery drove the
-    transition (not merely that the row still exists). Read-only, like
-    incident-from-alert: never POSTs anything."""
+    transition (not merely that the row still exists). As of Phase 3E,
+    also confirms (see verify_audit_trail above) that this same real
+    chain produced a genuine, correctly-attributed audit trail — a
+    'created' event and a resolving 'status_transition' event, both
+    actor_type='alertmanager', correctly ordered, with no fabricated
+    operator intervention. Read-only, like incident-from-alert: never
+    POSTs anything."""
     with open(args.ids_file) as f:
         incident_ids = [line.strip() for line in f if line.strip()]
     if not incident_ids:
@@ -310,10 +432,12 @@ def cmd_confirm_resolved(args):
 
         print(f"  incident OK: id={incident_id} status=resolved resolved_at={incident['resolved_at']}")
 
+        verify_audit_trail(base, incident_id)
+
     print(
         f"Resolution verified: all {len(incident_ids)} incident(s) confirmed in incident-from-alert have "
         "genuinely transitioned to status='resolved' with a populated resolved_at, via Alertmanager's own real "
-        "resolved webhook delivery."
+        "resolved webhook delivery, each with a genuine, correctly-attributed audit trail."
     )
     sys.exit(0)
 

@@ -194,24 +194,30 @@ Full inventory:
   `PATCH /api/v1/incidents/{id}/status` (a distinct Bearer token from
   the webhook's), lets a human/operator drive the rest of a
   centralized, validated state machine under real optimistic
-  concurrency — see [Alert ingestion](#alert-ingestion-phase-3c) and
-  [Incident lifecycle](#incident-lifecycle-phase-3d) below. Full
+  concurrency. As of **Phase 3E**, every one of those accepted
+  mutations also durably records a matching, append-only audit event
+  in the SAME transaction as the mutation — see
+  [Alert ingestion](#alert-ingestion-phase-3c),
+  [Incident lifecycle](#incident-lifecycle-phase-3d), and
+  [Incident audit trail](#incident-audit-trail-phase-3e) below. Full
   detail: [docs/api/control-plane.md](../api/control-plane.md),
   [docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md),
+  [docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md),
   and
-  [docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md).
+  [docs/architecture/phase-3e-incident-audit.md](phase-3e-incident-audit.md).
   Verified by `scripts/verify-control-plane.sh`
   (`make verify-control-plane`), `scripts/verify-webhook-ingestion.sh`
   (`make verify-webhook-ingestion`),
   `scripts/verify-incident-lifecycle.sh`
-  (`make verify-incident-lifecycle`), and
-  `scripts/verify-alert-lifecycle.sh` with `VERIFY_INGESTION=true`
+  (`make verify-incident-lifecycle`),
+  `scripts/verify-incident-audit.sh` (`make verify-incident-audit`),
+  and `scripts/verify-alert-lifecycle.sh` with `VERIFY_INGESTION=true`
   (`make verify-alert-ingestion`) — all run in CI — against the real,
   running, PostgreSQL-backed service, including a genuine Prometheus
   alert delivered through Alertmanager's own real webhook, now proven
-  all the way through to real resolution. **Still planned:**
-  authentication on the read API, an incident audit-history table, and
-  any consumption by an agent or operations console.
+  all the way through to real resolution and a genuine, correctly-
+  attributed audit trail. **Still planned:** authentication on the
+  read API, and any consumption by an agent or operations console.
 - **Alert ingestion** (Phase 3C, `observability/alertmanager/alertmanager.yml`
   + `scripts/init-webhook-secret.sh`): Alertmanager's single receiver
   was changed from a no-op `local-null` sink to a real webhook
@@ -257,15 +263,34 @@ Full inventory:
   Alertmanager webhook endpoint from Phase 3C now also genuinely
   resolves a matching active incident from a real resolved
   notification, using `(source, fingerprint, startsAt)` occurrence
-  identity compared against the incident's own `first_seen_at` to
-  safely distinguish a repeat delivery, a stale/delayed replay, and a
-  genuine recurrence — real PostgreSQL testing against accumulated
-  state (not a clean slate) found and fixed two bugs in this exact
-  area, documented in full. No new Flyway migration — this phase is
-  pure application code against the unchanged Phase 3A schema; this
+  identity compared against a durable occurrence watermark
+  (`occurrence_starts_at`, added by a post-review Flyway migration,
+  `V2__add_occurrence_watermark.sql` — separate from the immutable
+  `first_seen_at`) to safely distinguish a repeat delivery, a
+  stale/delayed replay, and a genuine recurrence — real PostgreSQL
+  testing against accumulated state (not a clean slate) found and
+  fixed real regressions in this exact area, documented in full. This
   transition matrix is enforced at the application layer only, not a
   database `CHECK` constraint. Full detail:
   [docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md).
+- **Incident audit trail** (Phase 3E,
+  `database/migrations/V3__create_incident_audit.sql` +
+  `src/control_plane/repositories/incident_repository.py`): a new,
+  durable, append-only table, `reliability.incident_events`, records
+  every accepted incident creation, accepted firing observation,
+  operator status transition, and automatic Alertmanager resolution —
+  in the SAME PostgreSQL transaction as the incident change itself, so
+  an audit-insert failure rolls back the incident mutation too (proven
+  against real PostgreSQL, not merely designed that way). A real,
+  database-level trigger rejects any `UPDATE`/`DELETE` against this
+  table, and its foreign key to `reliability.incidents` is `ON DELETE
+  RESTRICT` — an incident with recorded audit history can never be
+  deleted. A new, unauthenticated, read-only
+  `GET /api/v1/incidents/{id}/events` exposes the timeline; no
+  audit-creation or mutation endpoint exists anywhere. No history is
+  invented for incidents that predate this phase — an empty timeline
+  on a pre-existing incident is valid, expected behavior. Full detail:
+  [docs/architecture/phase-3e-incident-audit.md](phase-3e-incident-audit.md).
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.
@@ -731,16 +756,22 @@ centralized, validated state machine; an authenticated
 `PATCH /api/v1/incidents/{id}/status` endpoint (optimistic concurrency
 via a real atomic compare-and-swap `UPDATE`) for a human/operator; and
 real, source-driven automatic resolution from the same Alertmanager
-webhook — see [Control plane](#control-plane-phase-3b),
-[Alert ingestion](#alert-ingestion-phase-3c), and
-[Incident lifecycle](#incident-lifecycle-phase-3d) above,
+webhook. As of **Phase 3E**, it also **records a durable audit trail**:
+every accepted mutation above gets a matching, append-only
+`reliability.incident_events` row, in the same transaction as the
+mutation, exposed read-only via
+`GET /api/v1/incidents/{id}/events` — see
+[Control plane](#control-plane-phase-3b),
+[Alert ingestion](#alert-ingestion-phase-3c),
+[Incident lifecycle](#incident-lifecycle-phase-3d), and
+[Incident audit trail](#incident-audit-trail-phase-3e) above,
 [docs/api/control-plane.md](../api/control-plane.md),
 [docs/architecture/phase-3c-alert-ingestion.md](phase-3c-alert-ingestion.md),
+[docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md),
 and
-[docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md).
-**Still planned:** orchestrating investigation, an incident
-audit-history table, authentication on the read API, and consumption
-by the operations console or an agent.
+[docs/architecture/phase-3e-incident-audit.md](phase-3e-incident-audit.md).
+**Still planned:** orchestrating investigation, authentication on the
+read API, and consumption by the operations console or an agent.
 
 ### Durable state
 **PostgreSQL** for persisting incidents, investigation history, decisions,
@@ -761,12 +792,18 @@ a real incident **lifecycle** governs this table: a centralized,
 validated state machine, an authenticated management endpoint with
 real optimistic concurrency, and genuine automatic resolution from a
 resolved Alertmanager notification (occurrence-identity/stale-replay
-safe) — see [Incident lifecycle](#incident-lifecycle-phase-3d) above.
-This phase added no new migration; `V1__create_incident_schema.sql` is
-unchanged. **Still planned:** any agent reading from or writing to
-this table; additional tables for investigation history, decisions,
-approvals, and an incident audit trail (future migrations, not yet
-written).
+safe, backed by a new watermark column added via
+`V2__add_occurrence_watermark.sql`) — see
+[Incident lifecycle](#incident-lifecycle-phase-3d) above. As of
+**Phase 3E**, a new table, `reliability.incident_events`
+(`V3__create_incident_audit.sql`), durably records every accepted
+mutation to this table, append-only and in the same transaction as
+the mutation — see
+[Incident audit trail](#incident-audit-trail-phase-3e) above. `V1` is
+still unchanged; `V2` and `V3` are both purely additive. **Still
+planned:** any agent reading from or writing to this table; additional
+tables for investigation history, decisions, and approvals (future
+migrations, not yet written).
 
 ### Coordination / ephemeral state
 **Redis** for short-lived state such as in-flight workflow coordination.

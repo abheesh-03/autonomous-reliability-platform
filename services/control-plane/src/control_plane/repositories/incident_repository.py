@@ -20,6 +20,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,6 +47,25 @@ incidents_table = sa.table(
     # — this is internal occurrence-identity bookkeeping, not part of
     # the incident resource itself.
     sa.column("occurrence_starts_at"),
+    schema="reliability",
+)
+
+# Phase 3E: see database/migrations/V3__create_incident_audit.sql.
+# `metadata` is the one column given an explicit type (JSONB) rather
+# than left bare like every other column above — SQLAlchemy/asyncpg
+# need that type information to serialize a Python dict into the
+# column correctly; every other column's type is inferred fine from
+# untyped bind parameters.
+incident_events_table = sa.table(
+    "incident_events",
+    sa.column("id"),
+    sa.column("incident_id"),
+    sa.column("event_type"),
+    sa.column("actor_type"),
+    sa.column("previous_status"),
+    sa.column("new_status"),
+    sa.column("occurred_at"),
+    sa.column("metadata", JSONB),
     schema="reliability",
 )
 
@@ -161,6 +181,18 @@ class IncidentRepository:
         genuine new INSERT — determined via Postgres's own real
         `xmax = 0` tuple-visibility idiom (true only for a row's own
         inserting transaction), not an application-level flag.
+
+        Phase 3E: also records the matching audit event — 'created'
+        (previous_status=NULL, new_status='open') for a genuine new
+        row, or 'observed' (previous_status == new_status, the row's
+        own actual current status) for an accepted update to an
+        already-active incident — in the SAME statement's own
+        transaction, using `status` straight from this UPSERT's own
+        RETURNING clause. This is safe without any extra read/lock:
+        this statement's SET clause never touches `status` at all
+        (on conflict, see above), so the value RETURNING reports is
+        simultaneously correct as both "previous" and "new" status —
+        there is no window in which it could be stale.
         """
         insert_stmt = pg_insert(incidents_table).values(
             source=source,
@@ -185,14 +217,113 @@ class IncidentRepository:
                     incidents_table.c.occurrence_starts_at, insert_stmt.excluded.occurrence_starts_at
                 ),
             },
-        ).returning(incidents_table.c.id, sa.literal_column("(xmax = 0)").label("created"))
+        ).returning(
+            incidents_table.c.id,
+            incidents_table.c.status,
+            sa.literal_column("(xmax = 0)").label("created"),
+        )
 
         result = await self._session.execute(upsert_stmt)
         row = result.mappings().one()
-        return row["id"], bool(row["created"])
+        incident_id = row["id"]
+        created = bool(row["created"])
+        status = row["status"]
+
+        # Allowlisted, structured metadata only — the alert's own
+        # fingerprint and the observation's own startsAt. Never the
+        # Authorization header, the Bearer token, or the raw webhook
+        # payload — see docs/architecture/phase-3e-incident-audit.md.
+        metadata = {
+            "source_fingerprint": source_fingerprint,
+            "observed_starts_at": occurrence_starts_at.isoformat(),
+        }
+        await self._record_event(
+            incident_id,
+            event_type="created" if created else "observed",
+            actor_type="alertmanager",
+            previous_status=None if created else status,
+            new_status=status,
+            metadata=metadata,
+        )
+
+        return incident_id, created
 
     async def commit(self) -> None:
         await self._session.commit()
+
+    # ------------------------------------------------------------------
+    # Phase 3E: incident audit trail. `_record_event` is deliberately
+    # private — every audit record is written as a direct consequence
+    # of an accepted mutation this repository itself already performs
+    # (upsert_firing_incident, transition_incident_status,
+    # resolve_active_incident_for_fingerprint below), using the exact
+    # same `self._session` and therefore the exact same transaction as
+    # that mutation. There is no separate public write path for audit
+    # events — see docs/architecture/phase-3e-incident-audit.md: no
+    # audit-creation endpoint exists, and none is planned. If this
+    # INSERT raises for any reason, it propagates to the caller exactly
+    # like any other repository exception; neither this repository nor
+    # its callers ever swallow it or call commit() afterward — the
+    # whole transaction (the mutation AND this record) rolls back
+    # together when the session closes without a commit.
+    # ------------------------------------------------------------------
+
+    async def _record_event(
+        self,
+        incident_id: uuid.UUID,
+        *,
+        event_type: str,
+        actor_type: str,
+        previous_status: str | None,
+        new_status: str,
+        metadata: Mapping[str, object],
+    ) -> None:
+        stmt = sa.insert(incident_events_table).values(
+            incident_id=incident_id,
+            event_type=event_type,
+            actor_type=actor_type,
+            previous_status=previous_status,
+            new_status=new_status,
+            metadata=dict(metadata),
+        )
+        await self._session.execute(stmt)
+
+    async def get_incident_events(
+        self,
+        incident_id: uuid.UUID,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[Sequence[Mapping], int]:
+        """GET /api/v1/incidents/{id}/events's own query: this
+        incident's full timeline, oldest first, with a deterministic
+        tie-breaker (occurred_at is not guaranteed unique — two events
+        for the same incident can share a timestamp, e.g. within the
+        same transaction). Returns an empty page (and total=0) for an
+        incident that genuinely has no recorded history yet — a
+        pre-Phase-3E incident, or one that has only ever been read, not
+        mutated — which is valid, expected behavior, not an error. This
+        method itself never checks whether `incident_id` exists at
+        all; the caller (api/incidents.py) does that separately via
+        get_by_id() to distinguish 404 from a real, empty timeline.
+        """
+        total_stmt = (
+            sa.select(sa.func.count())
+            .select_from(incident_events_table)
+            .where(incident_events_table.c.incident_id == incident_id)
+        )
+        total = (await self._session.execute(total_stmt)).scalar_one()
+
+        page_stmt = (
+            sa.select(incident_events_table)
+            .where(incident_events_table.c.incident_id == incident_id)
+            .order_by(incident_events_table.c.occurred_at.asc(), incident_events_table.c.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self._session.execute(page_stmt)
+        rows = result.mappings().all()
+        return rows, total
 
     # ------------------------------------------------------------------
     # Phase 3D: incident lifecycle (manual transitions + Alertmanager-
@@ -296,6 +427,19 @@ class IncidentRepository:
         untouched — every other transition, including resolved ->
         closed, which must preserve the ORIGINAL resolution time, not
         overwrite it with the closure time.
+
+        Phase 3E: on a genuine (non-zero-row) transition, also records
+        the matching 'status_transition' audit event, actor_type
+        'operator', in this exact same statement's transaction.
+        `expected_status` is already the ACTUAL previous status with
+        no staleness risk at all — not because of any extra locking
+        here, but because this UPDATE's own WHERE clause is what
+        guarantees it: zero rows would have been affected (and this
+        branch never reached) if the row's real status had been
+        anything else at the moment this statement ran. No event is
+        recorded when zero rows are affected (api/incidents.py then
+        reports 404 or a stale-expected_status 409, neither of which
+        is a real mutation).
         """
         values: dict[str, object] = {"status": target_status}
         if resolved_at is not None:
@@ -307,7 +451,17 @@ class IncidentRepository:
             .returning(incidents_table)
         )
         result = await self._session.execute(stmt)
-        return result.mappings().first()
+        row = result.mappings().first()
+        if row is not None:
+            await self._record_event(
+                incident_id,
+                event_type="status_transition",
+                actor_type="operator",
+                previous_status=expected_status,
+                new_status=target_status,
+                metadata={},
+            )
+        return row
 
     async def resolve_active_incident_for_fingerprint(
         self,
@@ -322,22 +476,71 @@ class IncidentRepository:
         transition straight to resolved per the state machine, so no
         separate ALLOWED_TRANSITIONS lookup is needed here — the WHERE
         clause's `status NOT IN ('resolved', 'closed')` already is that
-        check). Also a single atomic conditional UPDATE, so it is
-        race-free against a concurrent operator PATCH resolving or
-        otherwise transitioning the very same row: whichever commits
+        check). Race-free against a concurrent operator PATCH resolving
+        or otherwise transitioning the very same row: whichever commits
         first wins, the other affects zero rows. The caller treats zero
         rows as an idempotent no-op (the incident was already resolved/
         closed by the time this ran), never an error — see
         ingestion/service.py.
+
+        Phase 3E: this method also records the matching
+        'status_transition' audit event, actor_type 'alertmanager'.
+        Unlike transition_incident_status above, the caller here
+        (ingestion/service.py) does NOT already know which specific
+        active status (open/acknowledged/investigating/remediating)
+        this incident currently holds -- only that get_active_incident
+        found some active row, moments earlier. Reading that earlier
+        snapshot's status here would risk recording a STALE previous
+        status if a concurrent operator PATCH changed it in the
+        meantime (e.g. open -> acknowledged) between that read and this
+        resolution -- exactly the staleness this phase must avoid. So
+        this is deliberately TWO statements, not one, both inside this
+        same method/session/transaction: first, SELECT ... FOR UPDATE
+        takes a real row lock and reads the status as of THIS moment;
+        then the UPDATE (guaranteed to match, since the lock prevents
+        any other writer from having changed it in between) applies the
+        resolution, and this method records the event using that
+        just-locked, genuinely current value. The advisory fingerprint
+        lock (acquire_fingerprint_lock) already serializes concurrent
+        *webhook* deliveries for this fingerprint before any of this
+        runs, but it does nothing against a concurrent *operator* PATCH
+        racing on the same row by id -- this row-level FOR UPDATE lock
+        is what closes that specific gap.
         """
-        stmt = (
-            sa.update(incidents_table)
+        lock_stmt = (
+            sa.select(incidents_table.c.status)
             .where(
                 incidents_table.c.id == incident_id,
                 incidents_table.c.status.not_in(["resolved", "closed"]),
             )
+            .with_for_update()
+        )
+        locked = (await self._session.execute(lock_stmt)).mappings().first()
+        if locked is None:
+            return None
+        previous_status = locked["status"]
+
+        update_stmt = (
+            sa.update(incidents_table)
+            .where(incidents_table.c.id == incident_id, incidents_table.c.status == previous_status)
             .values(status="resolved", resolved_at=resolved_at)
             .returning(incidents_table)
         )
-        result = await self._session.execute(stmt)
-        return result.mappings().first()
+        result = await self._session.execute(update_stmt)
+        row = result.mappings().first()
+        if row is None:
+            # Not expected to be reachable -- the row lock held since
+            # the SELECT above should make this WHERE clause always
+            # match -- but handled defensively rather than assumed
+            # impossible.
+            return None
+
+        await self._record_event(
+            incident_id,
+            event_type="status_transition",
+            actor_type="alertmanager",
+            previous_status=previous_status,
+            new_status="resolved",
+            metadata={"resolution_source": "alertmanager_webhook"},
+        )
+        return row

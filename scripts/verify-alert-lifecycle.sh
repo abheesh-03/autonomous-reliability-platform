@@ -21,8 +21,13 @@
 # additionally proves that once the Collector recovers and Alertmanager
 # resolves, its real resolved webhook delivery (send_resolved: true)
 # actually transitions that exact incident to status=resolved with
-# resolved_at populated — never a simulated resolution. Default
-# (unset/false) preserves the original Phase 2B.4-only behavior
+# resolved_at populated — never a simulated resolution. As of Phase
+# 3E, the SAME flag additionally proves that this exact real chain
+# produced a genuine, correctly-attributed audit trail — a 'created'
+# event and a resolving 'status_transition' event, both attributed to
+# actor_type='alertmanager', with no fabricated operator intervention
+# (see scripts/verify-ingestion.py's confirm-resolved subcommand).
+# Default (unset/false) preserves the original Phase 2B.4-only behavior
 # exactly, including when called from scripts/verify-observability.sh.
 # See scripts/verify-ingestion.py for the HTTP-API cross-checking logic
 # (also not duplicated here) and `make verify-alert-ingestion` for the
@@ -204,7 +209,7 @@ done
 [ "$recovered_ok" = true ] || fail "$ALERT_NAME never recovered to inactive in Prometheus / resolved in Alertmanager"
 
 if [ "$VERIFY_INGESTION" = "true" ]; then
-  section "12b. (Phase 3D) Confirm the real Alertmanager resolved webhook actually resolved the matching incident(s)"
+  section "12b. (Phase 3D/3E) Confirm the real Alertmanager resolved webhook actually resolved the matching incident(s), with a genuine, correctly-attributed audit trail"
 
   echo "-- Alertmanager has already delivered its own real resolved webhook"
   echo "   as part of reaching the 'recovered' state confirmed above (send_resolved:"
@@ -212,7 +217,11 @@ if [ "$VERIFY_INGESTION" = "true" ]; then
   echo "   scripts/verify-ingestion.py confirm-resolved, which only reads"
   echo "   control-plane's own HTTP API, so this is proof of the real"
   echo "   Collector recovery -> Prometheus resolves -> Alertmanager resolved"
-  echo "   webhook -> incident resolved chain, not a simulated resolution --"
+  echo "   webhook -> incident resolved chain, not a simulated resolution — and,"
+  echo "   as of Phase 3E, also confirms each incident's real, persisted audit"
+  echo "   timeline shows a 'created' event and a resolving 'status_transition'"
+  echo "   event, both attributed to actor_type='alertmanager', with no"
+  echo "   fabricated operator intervention --"
 
   resolution_ok=false
   for i in $(seq 1 20); do
@@ -222,11 +231,11 @@ if [ "$VERIFY_INGESTION" = "true" ]; then
       resolution_ok=true
       break
     fi
-    echo "  attempt $i/20: incident(s) not yet confirmed resolved via the real webhook path"
+    echo "  attempt $i/20: incident(s) not yet confirmed resolved (with a genuine audit trail) via the real webhook path"
     sleep 3
   done
   rm -f "$ingestion_ids_file"
-  [ "$resolution_ok" = true ] || fail "the real Alertmanager resolved webhook never resulted in the matching incident(s) transitioning to resolved"
+  [ "$resolution_ok" = true ] || fail "the real Alertmanager resolved webhook never resulted in the matching incident(s) transitioning to resolved with a genuine audit trail"
 fi
 
 section "13. Trigger a fresh real checkout and confirm telemetry resumes normally"
@@ -264,7 +273,7 @@ echo "  telemetry resumed normally: checkout-service /checkouts request count $b
 
 echo ""
 if [ "$VERIFY_INGESTION" = "true" ]; then
-  echo "ALERT LIFECYCLE + INGESTION + RESOLUTION VERIFIED: $ALERT_NAME went inactive -> firing (real Collector outage) -> observed in Alertmanager -> delivered via its real webhook -> persisted as reliability.incidents row(s), correctly mapped -> recovered -> inactive -> Alertmanager's real resolved webhook delivered -> matching incident(s) transitioned to resolved with resolved_at populated, and telemetry resumed."
+  echo "ALERT LIFECYCLE + INGESTION + RESOLUTION + AUDIT VERIFIED: $ALERT_NAME went inactive -> firing (real Collector outage) -> observed in Alertmanager -> delivered via its real webhook -> persisted as reliability.incidents row(s), correctly mapped, with a genuine 'created' audit event -> recovered -> inactive -> Alertmanager's real resolved webhook delivered -> matching incident(s) transitioned to resolved with resolved_at populated and a genuine, correctly-attributed resolving audit event, and telemetry resumed."
 else
   echo "ALERT LIFECYCLE VERIFIED: $ALERT_NAME went inactive -> firing (real Collector outage) -> observed in Alertmanager -> recovered -> inactive, and telemetry resumed."
 fi

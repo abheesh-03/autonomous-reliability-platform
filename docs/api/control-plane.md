@@ -1,4 +1,4 @@
-# Control Plane API (Phase 3B, extended Phase 3C/3D)
+# Control Plane API (Phase 3B, extended Phase 3C/3D/3E)
 
 This document describes the FastAPI control plane service
 (`services/control-plane`) and its HTTP API. It is the authoritative
@@ -6,11 +6,12 @@ reference for endpoints, request/response shapes, DB configuration,
 readiness behavior, and scope — summarized in
 [README.md](../../README.md#control-plane-phase-3b) and
 [docs/architecture/system-overview.md](../architecture/system-overview.md#control-plane-phase-3b).
-Phase 3C's webhook ingestion endpoint and Phase 3D's incident lifecycle
-are summarized below; full detail is in
-[docs/architecture/phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md)
+Phase 3C's webhook ingestion endpoint, Phase 3D's incident lifecycle,
+and Phase 3E's audit trail are summarized below; full detail is in
+[docs/architecture/phase-3c-alert-ingestion.md](../architecture/phase-3c-alert-ingestion.md),
+[docs/architecture/phase-3d-incident-lifecycle.md](../architecture/phase-3d-incident-lifecycle.md),
 and
-[docs/architecture/phase-3d-incident-lifecycle.md](../architecture/phase-3d-incident-lifecycle.md)
+[docs/architecture/phase-3e-incident-audit.md](../architecture/phase-3e-incident-audit.md)
 respectively.
 
 ## Where this fits
@@ -241,6 +242,42 @@ malformed value returns `422` with no extra code needed). Returns the
 same incident object shown above on `200`, or `404`
 (`{"detail": "incident not found"}`) if no row matches.
 
+### `GET /api/v1/incidents/{incident_id}/events`
+
+Phase 3E: the incident's full, append-only audit timeline, oldest
+first (`occurred_at ASC, id ASC`), with the same `limit`/`offset`
+pagination contract as `GET /api/v1/incidents` (default `20`, max
+`100`). Returns `404` if the incident itself doesn't exist, but `200`
+with an empty `items` list for an incident that exists but has no
+recorded history — a pre-Phase-3E incident, or one that has only ever
+been read, not mutated:
+
+```json
+{
+  "items": [
+    {
+      "id": 1,
+      "incident_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "event_type": "created",
+      "actor_type": "alertmanager",
+      "previous_status": null,
+      "new_status": "open",
+      "occurred_at": "2026-04-01T10:00:00.123456+00:00",
+      "metadata": {"source_fingerprint": "8d2b83b6bbca23c7", "observed_starts_at": "2026-04-01T10:00:00+00:00"}
+    }
+  ],
+  "total": 1,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+No authentication (same local-development policy as every other `GET`
+route here). No corresponding write endpoint exists — events are only
+ever written as a side effect of the webhook and `PATCH .../status`
+endpoints below. Full design:
+[docs/architecture/phase-3e-incident-audit.md](../architecture/phase-3e-incident-audit.md).
+
 ## Webhook ingestion (Phase 3C)
 
 ### `POST /internal/v1/alertmanager/webhook`
@@ -451,7 +488,7 @@ unhandled-exception `500`.
 ## Testing
 
 **Unit tests** (`services/control-plane/tests/`, `make
-control-plane-test`, 162 tests): dependency-injected fakes — an
+control-plane-test`, 196 tests): dependency-injected fakes — an
 in-memory `FakeIncidentRepository` (installed via
 `app.dependency_overrides[get_incident_repository]`) for the incidents,
 webhook, and lifecycle endpoints, and fake engine/connection doubles
@@ -475,7 +512,12 @@ set/preserved correctly, timestamps unchanged on rejection, a real
 database error returning 503, a commit-after-transition regression
 suite, genuine Alertmanager resolution, idempotent duplicate
 resolution, and stale-replay/recurrence safety for both firing and
-resolved alerts.
+resolved alerts; and (Phase 3E, `test_incident_audit.py`) correct
+event attribution for creation/observation/operator-transition/
+automatic-resolution, ordered timeline + pagination, zero events for
+every rejected/ignored/no-op scenario, a concurrent-transition proxy,
+an audit-insertion-failure-never-commits proxy, and no credentials or
+raw payloads in any event's metadata.
 
 **Mocked tests are not sufficient for acceptance on their own** — see
 below. In particular, the mocked `FakeIncidentRepository`'s
@@ -546,6 +588,18 @@ with a read-only confirmation that the real Alertmanager resolved
 webhook genuinely resolved the matching incident(s); full detail in
 [phase-3d-incident-lifecycle.md](../architecture/phase-3d-incident-lifecycle.md#verification).
 
+**Phase 3E** adds `scripts/verify-incident-audit.sh`
+(`make verify-incident-audit`) — a focused, real-PostgreSQL acceptance
+test covering the V3 schema's own constraints/index/append-only
+triggers, correct event attribution for every accepted mutation, zero
+events for every rejected/ignored/no-op operation, a real
+transactional-rollback proof, a genuine concurrent-PATCH race
+producing exactly one event, and audit-trail restart durability — and
+extends `scripts/verify-alert-lifecycle.sh`'s same real Collector-
+outage test with a read-only confirmation that the real chain produced
+a genuine, correctly-attributed audit trail; full detail in
+[phase-3e-incident-audit.md](../architecture/phase-3e-incident-audit.md#testing).
+
 All sections passed on real runs against the live stack.
 
 ## Security limitations (local development only)
@@ -588,11 +642,9 @@ All sections passed on real runs against the live stack.
   API is loopback-only; the webhook is reachable only over the internal
   Docker network, never published on a host port.
 
-## Planned (Phase 3E+, not yet implemented)
+## Planned (Phase 3F+, not yet implemented)
 
-- An incident audit-history table recording every transition (who,
-  when, from what, to what).
-- Agent-generated remediation decisions, human approval workflows, and
-  automated remediation of any kind.
+- Incident simulation, agent-generated remediation decisions, human
+  approval workflows, and automated remediation of any kind.
 - Authentication on the read API, an operations console, and any agent
   consumption of this API all remain future work.

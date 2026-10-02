@@ -211,27 +211,42 @@ database/
   migrations/
     V1__create_incident_schema.sql
     V2__add_occurrence_watermark.sql
+    V3__create_incident_audit.sql
+    V4__harden_incident_audit.sql
 ```
 
 Standard Flyway versioned-migration naming (`V<version>__<description>.sql`).
-Future migrations will be added as `V3__...`, etc. — never editing an
+Future migrations will be added as `V5__...`, etc. — never editing an
 already-applied migration file (Flyway's checksum validation makes
 that a hard failure, confirmed directly: editing
 `V1__create_incident_schema.sql` after it had been applied and
 re-running `migrate` produced `ERROR: Validate failed: Migrations have
 failed validation — Migration checksum mismatch for migration version 1`,
 a real, reproduced failure, not an assumed one). `V2__add_occurrence_watermark.sql`
-is the first real instance of this pattern: a Phase 3D post-review
+was the first real instance of this pattern: a Phase 3D post-review
 correction added a single new column
 (`reliability.incidents.occurrence_starts_at`, the occurrence-identity
 watermark — see
 [docs/architecture/phase-3d-incident-lifecycle.md](phase-3d-incident-lifecycle.md#post-review-correction-the-occurrence-watermark))
 via `ALTER TABLE`, backfilling it from each existing row's own
-`first_seen_at`, without touching `V1` at all — confirmed directly
-against both a fresh database and the existing, non-empty development
-database (which already held real historical incidents from earlier
-sessions), in both cases applying cleanly and preserving every
-existing row.
+`first_seen_at`, without touching `V1` at all. `V3__create_incident_audit.sql`
+(Phase 3E) added an entirely new table,
+`reliability.incident_events` — the durable, append-only incident
+audit trail — again without touching `V1` or `V2` at all.
+`V4__harden_incident_audit.sql` is the SAME pattern applied a second
+time within the same phase: a Phase 3E post-review correction closed a
+real gap in `V3`'s append-only enforcement (a `TRUNCATE` guard, via
+`CREATE OR REPLACE FUNCTION` on `V3`'s own trigger function plus one
+new `BEFORE TRUNCATE` trigger) and corrected `occurred_at`'s column
+default (`ALTER COLUMN ... SET DEFAULT clock_timestamp()`), again
+without touching `V3` — see
+[docs/architecture/phase-3e-incident-audit.md](phase-3e-incident-audit.md).
+`V2`, `V3`, and `V4` were all confirmed directly against both a fresh
+database and the existing, non-empty development database (which
+already held real historical incidents from earlier sessions), in
+every case applying cleanly and preserving every existing row — and,
+for `V4` specifically, with `V1`–`V3`'s own Flyway checksums confirmed
+byte-for-byte unchanged afterward.
 
 **How migrations run:** via a dedicated `flyway` Docker Compose service
 (pinned image, `FLYWAY_SCHEMAS=reliability`, mounts
@@ -325,24 +340,25 @@ Run manually via `make verify-persistence`.
 
 Explicitly out of scope for Phase 3A, per its own instructions:
 
-- An incident audit-history table (who/when/from what/to what for
-  every transition) — Phase 3E.
 - Any AI/LLM agent, LangGraph, or RAG component.
 - Investigation workflows, remediation actions, or human-approval
   records.
 - A frontend of any kind.
-- Additional tables (investigations, approval records, audit trails)
-  — future phases will add these through subsequent versioned
-  migrations (`V3__...`, etc. — `V2` is already taken, see above), not
-  retrofitted into `V1`.
+- Additional tables (investigations, approval records) — future
+  phases will add these through subsequent versioned migrations
+  (`V5__...`, etc. — `V2`, `V3`, and `V4` are already taken, see
+  above), not retrofitted into `V1`.
 
 Implemented since this document was first written, by later phases,
 without changing anything described above: Alertmanager ingestion
 (turning a real firing alert into a database row —
-[Phase 3C](phase-3c-alert-ingestion.md)) and incident lifecycle
+[Phase 3C](phase-3c-alert-ingestion.md)), incident lifecycle
 transition validation (which status changes are legal, an
 application-layer state machine —
-[Phase 3D](phase-3d-incident-lifecycle.md)).
+[Phase 3D](phase-3d-incident-lifecycle.md)), and a durable, append-only
+incident audit trail — a genuinely new table, not retrofitted into
+`V1` (
+[Phase 3E](phase-3e-incident-audit.md)).
 
 This document will be extended (not rewritten) as those phases land, in
 the same way `V1__create_incident_schema.sql` is the first of a growing

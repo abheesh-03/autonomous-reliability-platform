@@ -19,15 +19,17 @@ production-style system.
 **Actively under early development.** Phase 2 (observability — metrics,
 traces, logs, dashboards, alerting) is **closed**. Phase 3A (incident
 domain model + PostgreSQL persistence), Phase 3B (read-only FastAPI
-control plane), and Phase 3C (real Alertmanager incident ingestion) are
-also **closed**. The project is currently in
-**Phase 3D — Incident Lifecycle / State Machine** (a centralized,
-validated incident status state machine; an authenticated,
-optimistic-concurrency-safe `PATCH /api/v1/incidents/{id}/status`
-management endpoint; and real, source-driven automatic resolution from
-Alertmanager's own resolved notifications, including stale/recurrence
-safety for delayed or out-of-order alert delivery — see
-[Incident Lifecycle](#incident-lifecycle-phase-3d) below). An
+control plane), Phase 3C (real Alertmanager incident ingestion), and
+Phase 3D (incident lifecycle / state machine) are also **closed**. The
+project is currently in
+**Phase 3E — Incident Audit Trail** (a durable, append-only
+`reliability.incident_events` table recording every accepted incident
+creation, firing observation, operator transition, and automatic
+Alertmanager resolution, in the SAME PostgreSQL transaction as the
+incident change itself; a real, database-enforced append-only
+guarantee; and a new, read-only `GET /api/v1/incidents/{id}/events`
+timeline endpoint — see
+[Incident Audit Trail](#incident-audit-trail-phase-3e) below). An
 OpenTelemetry
 Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
@@ -457,7 +459,7 @@ error handling, and security limitations — is in
 make db-up                # starts PostgreSQL *and* control-plane (and generates the Phase 3C/3D webhook + lifecycle secrets)
 make db-migrate            # apply Phase 3A migrations — control-plane serves 503 until this runs
 curl http://localhost:8000/api/v1/incidents
-make control-plane-test    # unit tests (mocked repository/engine), 171/171 passing
+make control-plane-test    # unit tests (mocked repository/engine), 196/196 passing
 make verify-control-plane  # real integration test against the running, PostgreSQL-backed service
 ```
 
@@ -638,9 +640,108 @@ summary here:
   read API.
 
 ```bash
-make control-plane-test          # unit tests including the full lifecycle suite, 171/171 passing
+make control-plane-test          # unit tests including the full lifecycle suite, 196/196 passing
 make verify-incident-lifecycle   # real-PostgreSQL lifecycle acceptance (transitions, concurrency, auth, restart persistence, occurrence watermark)
 make verify-alert-ingestion      # same real Collector-outage gate as Phase 3C, now also proving real resolution
+```
+
+## Incident Audit Trail (Phase 3E)
+
+A durable, append-only audit trail recording every accepted incident
+mutation — creation, an accepted firing observation, an operator
+status transition, or Alertmanager's automatic resolution — in the
+SAME PostgreSQL transaction as the incident change itself:
+
+```
+GET /api/v1/incidents/{id}/events  ->  {items, total, limit, offset}
+  ordered occurred_at ASC, id ASC; 200 with an empty timeline for an
+  incident that exists but was never mutated; 404 if it doesn't exist.
+```
+
+Full detail — the V3/V4 schema and its invariants, exact event
+semantics and attribution, the transactional guarantee, concurrency/
+ordering (including corrected `occurred_at` timestamp semantics), and
+the full real-PostgreSQL and real-Collector-outage verification
+story — is in
+[docs/architecture/phase-3e-incident-audit.md](docs/architecture/phase-3e-incident-audit.md);
+summary here:
+
+- **One new table, `reliability.incident_events`**
+  (`database/migrations/V3__create_incident_audit.sql`, purely
+  additive — `V1` and `V2` are untouched): `event_type`
+  (`created`/`observed`/`status_transition`), `actor_type`
+  (`alertmanager`/`operator`), `previous_status`/`new_status`,
+  `occurred_at`, and a minimal, allowlisted `metadata` JSONB object —
+  never a Bearer token, an `Authorization` header, or a raw webhook
+  payload. Three named `CHECK` constraints enforce exactly which
+  shape is legal per `event_type` (e.g. `created` requires
+  `previous_status IS NULL` and `new_status = 'open'`).
+- **Append-only, for real — covering `UPDATE`, `DELETE`, AND
+  `TRUNCATE`.** Database-level triggers reject any direct `UPDATE`,
+  `DELETE`, or `TRUNCATE` against this table (the third via a
+  post-review `V4` migration — `TRUNCATE` bypasses row-level triggers
+  entirely and needs its own `BEFORE TRUNCATE`, `FOR EACH STATEMENT`
+  trigger), and its foreign key to `reliability.incidents` is
+  `ON DELETE RESTRICT` — an incident with recorded audit history can
+  never be deleted at all. Stated honestly, and corrected by
+  post-review review: **any role with sufficient privilege over this
+  table — its owner, or a role granted the right to `ALTER`/`DROP` it,
+  not only a PostgreSQL superuser** — can disable or drop these
+  triggers; this guards against this application's own connection role
+  and any other ordinary client, not a tamper-proof storage claim.
+- **`occurred_at` records genuine insertion time, not transaction-start
+  time.** A post-review correction: the original `DEFAULT now()`
+  returns the time the *transaction* began, not the time the row was
+  actually inserted — under concurrent writes, a transaction that
+  starts first but blocks on a row lock can commit its audit event
+  *after* another transaction, yet still report an *earlier*
+  `occurred_at`, misordering the timeline `GET .../events` returns
+  (`occurred_at ASC, id ASC`). Fixed by changing the column default to
+  `clock_timestamp()` (genuine wall-clock time at insertion), via
+  `ALTER COLUMN ... SET DEFAULT` — a schema-only fix; every
+  already-recorded event's timestamp is preserved untouched, and the
+  application needed zero code changes (it never set `occurred_at`
+  explicitly).
+- **Real transactional atomicity, not merely designed that way.**
+  Every audit record is written by the exact same repository method
+  that performs the matching mutation, using the exact same database
+  session — so an audit-insert failure takes the incident mutation
+  down with it. Proven directly against real PostgreSQL: a
+  deliberately invalid audit insert issued in the same transaction as
+  a real incident `UPDATE` is rejected, and the `UPDATE` is confirmed
+  not to have persisted either.
+- **The operator attribution never fabricates an identity.** The
+  lifecycle endpoint's shared Bearer token doesn't identify an
+  individual human — `actor_type='operator'` records only that an
+  authenticated operator request caused the event, never a user id.
+- **Honest historical-coverage limitation.** Audit coverage begins
+  with this phase — pre-existing incidents are never retroactively
+  given invented history. An incident that exists but has an empty
+  timeline is valid, expected behavior (`200`, not `404`).
+- **Pagination that actually works beyond the first page.** A
+  post-review correction: `GET .../events` defaults to `limit=20`, and
+  a long-lived incident's resolving event can genuinely lie beyond
+  that first page — the real Collector-outage audit check
+  (`scripts/verify-ingestion.py`) originally read only the unpaginated
+  first page, a latent false-negative risk. Fixed with a
+  fully-paginating fetch helper, and proven with a dedicated real
+  test (an incident driven through 22 total events, confirming its
+  resolution is genuinely on page two and is still found).
+- **A real, necessary consequence for existing test tooling.** Any
+  incident mutated through the real webhook or `PATCH` endpoints now
+  accumulates real audit history and can never be deleted afterward —
+  `scripts/verify-webhook-ingestion.sh` and
+  `scripts/verify-incident-lifecycle.sh` both had their final cleanup
+  step changed from "delete this run's rows" to "confirm this run's
+  rows and their exact expected audit-event count, then retain them
+  permanently" (the same "never delete genuine state" precedent the
+  real Collector-outage test's own ingested incidents already
+  established).
+
+```bash
+make control-plane-test        # unit tests including the full audit suite, 196/196 passing
+make verify-incident-audit     # real-PostgreSQL audit acceptance (attribution, atomicity, concurrency, append-only enforcement incl. TRUNCATE, pagination)
+make verify-alert-ingestion    # same real Collector-outage gate, now also proving a genuine, correctly-attributed, fully-paginated audit trail
 ```
 
 ## Developer Commands
@@ -664,7 +765,8 @@ make verify-control-plane  # Phase 3B control-plane integration verification (re
 make webhook-secret-init     # generate/reuse the local webhook + lifecycle Bearer tokens (Phase 3C/3D)
 make verify-webhook-ingestion  # Phase 3C/3D focused webhook ingestion verification (auth, dedup/upsert, resolution, real PostgreSQL)
 make verify-incident-lifecycle  # Phase 3D focused incident lifecycle verification (transitions, concurrency, auth, real PostgreSQL)
-make verify-alert-ingestion  # Phase 3C/3D full acceptance: real Collector outage -> Alertmanager webhook -> persisted + resolved incident
+make verify-incident-audit  # Phase 3E focused audit-trail verification (attribution, atomicity, concurrency, append-only, real PostgreSQL)
+make verify-alert-ingestion  # Phase 3C/3D/3E full acceptance: real Collector outage -> Alertmanager webhook -> persisted + resolved incident + audit trail
 make verify-observability  # Phase 2A.1-2B.4 observability verification
 ```
 
@@ -1743,11 +1845,11 @@ its tests pass (Python 3.13 via `actions/setup-python`), that
 `inventory-service` is `gofmt`-clean and passes `go vet`/`go test`/build
 (Go 1.27 via `actions/setup-go`), that `notification-service` installs
 (`npm ci`), typechecks, tests, and builds (Node 24 via `actions/setup-node`),
-that `control-plane`'s dependencies install and its 171 unit tests pass
-(20 from Phase 3B, 20 more from Phase 3C's webhook ingestion, and the
-remainder from Phase 3D's lifecycle/resolution suite (including its
-post-review occurrence-watermark and identical-token corrections) —
-reusing
+that `control-plane`'s dependencies install and its 196 unit tests pass
+(20 from Phase 3B, 20 more from Phase 3C's webhook ingestion, 131 from
+Phase 3D's lifecycle/resolution suite (including its post-review
+occurrence-watermark and identical-token corrections), and 25 from
+Phase 3E's audit-trail suite — reusing
 the same Python 3.13 setup as `payment-service`, no second
 `setup-python` step), that — as of Phase 3C, immediately before Docker
 Compose config validation — the local webhook Bearer secret is
@@ -1860,7 +1962,16 @@ picks up the Phase 3D resolution proof automatically through the
 shared script. `scripts/verify-incident-lifecycle.sh` was also added to
 the shell-syntax-check step. The job's `timeout-minutes: 20` was left
 unchanged — the steps added this phase are modest relative to existing
-headroom, and no real CI measurement indicated it was insufficient.
+headroom, and no real CI measurement indicated it was insufficient. As
+of Phase 3E, a new "Verify incident audit trail (Phase 3E)" step runs
+`scripts/verify-incident-audit.sh` immediately after the Phase 3D
+lifecycle step (same "doesn't touch `otel-collector`" placement
+reasoning); `scripts/verify-incident-audit.sh` was also added to the
+shell-syntax-check step; and the final step was renamed to "Run alert
+lifecycle + ingestion + resolution + audit acceptance test" — its
+underlying command is unchanged, since it already picks up the Phase
+3E audit-trail proof automatically through the shared script
+(`scripts/verify-ingestion.py`'s `confirm-resolved` subcommand).
 
 The repository has a GitHub remote
 (`abheesh-03/autonomous-reliability-platform`). The workflow version
@@ -1937,6 +2048,17 @@ Compose stack (the full real Collector-outage → Alertmanager webhook →
 persisted-AND-resolved-incident chain confirmed end to end, including
 genuinely resolving two real incidents left `open` from an earlier
 Phase 3C-era session) — but has **not yet run on GitHub Actions**.
+Phase 3E's version of the workflow (adding the new "Verify incident
+audit trail" step and renaming the final step) has been locally
+validated the same way: `scripts/verify-incident-audit.sh` run
+directly against the real Compose stack (all 12 sections passed,
+including the real-transaction-rollback and concurrent-PATCH-race
+proofs) and `VERIFY_INGESTION=true bash scripts/verify-alert-lifecycle.sh`
+run directly against the real Compose stack (the full real
+Collector-outage → Alertmanager webhook → persisted/resolved incident
+→ genuine, correctly-attributed audit trail chain confirmed end to
+end, for both real incidents the outage produced) — but has **not yet
+run on GitHub Actions**.
 
 The previous run also noted an informational warning that `ubuntu-latest`
 will migrate to Ubuntu 26 in the future; per guidance, the runner has
@@ -4474,3 +4596,368 @@ problem today.
     disposable fresh database were torn down with `docker compose down
     -v` (their own disposable volumes only — the real project's
     `postgres_data` volume was never touched).
+
+### Phase 3E — Incident Audit Trail
+
+- **New V3 migration, purely additive:**
+  `database/migrations/V3__create_incident_audit.sql` adds exactly one
+  new table, `reliability.incident_events` — `id` (`BIGINT GENERATED
+  ALWAYS AS IDENTITY`), `incident_id` (`UUID NOT NULL REFERENCES
+  reliability.incidents(id) ON DELETE RESTRICT`), `event_type`
+  (`created`/`observed`/`status_transition`), `actor_type`
+  (`alertmanager`/`operator`), `previous_status`/`new_status`,
+  `occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()`, and `metadata
+  JSONB NOT NULL DEFAULT '{}'::jsonb`. Three named `CHECK` constraints
+  (`incident_events_created_shape`, `_observed_shape`,
+  `_status_transition_shape`) enforce exactly which
+  previous/new-status/actor combination is legal per `event_type` —
+  e.g. `created` requires `previous_status IS NULL`,
+  `new_status = 'open'`, `actor_type = 'alertmanager'`. A fourth,
+  `incident_events_metadata_check`, requires `metadata` to be a JSON
+  *object* (`jsonb_typeof(metadata) = 'object'`), rejecting an array or
+  scalar. A supporting index,
+  `incident_events_incident_id_occurred_at_idx (incident_id,
+  occurred_at ASC, id ASC)`, matches the timeline API's own query
+  exactly. `V1` and `V2` were never touched.
+- **Append-only, enforced at the database level, not by convention.**
+  Two triggers (`incident_events_no_update`, `incident_events_no_delete`),
+  both calling one function that unconditionally `RAISE EXCEPTION`s,
+  reject any direct `UPDATE` or `DELETE` against this table — proven
+  directly: a real `UPDATE`/`DELETE` attempt via `psql` both failed
+  with `reliability.incident_events is append-only: ... is not
+  permitted`. The foreign key is `ON DELETE RESTRICT`, not `CASCADE`
+  — proven directly: deleting an incident with recorded audit history
+  failed with a real `violates RESTRICT setting of foreign key
+  constraint` error. Stated honestly: a PostgreSQL superuser can
+  disable or drop these triggers — this is a guard against this
+  application's own connection role and any other ordinary client, not
+  a tamper-proof storage claim.
+- **Honest historical-coverage limitation, by design.** This table is
+  populated going forward only — no invented historical events for
+  incidents or mutations that predate it. A pre-existing incident
+  legitimately has an empty audit timeline (`200`, not `404`).
+- **Audit event semantics**, matched exactly to the four required
+  cases: (A) incident creation — `created`/`alertmanager`/`NULL ->
+  open`; (B) an accepted firing observation into an active incident —
+  `observed`/`alertmanager`/`<status> -> <same status>` (status never
+  actually changes); (C) a successful operator PATCH transition —
+  `status_transition`/`operator`/`<actual previous> -> <committed
+  target>`; (D) Alertmanager's automatic resolution —
+  `status_transition`/`alertmanager`/`<actual previous> -> resolved`.
+  `domain/lifecycle.py`'s existing state machine remains the sole
+  authority for which transitions are legal — this phase adds no new
+  transition logic anywhere, only records what it already decided to
+  accept.
+- **Metadata: minimal, structured, allowlisted — never credentials or
+  raw payloads.** `created`/`observed`:
+  `{"source_fingerprint": ..., "observed_starts_at": ...}`.
+  `status_transition` (operator): `{}`. `status_transition`
+  (Alertmanager resolution): `{"resolution_source":
+  "alertmanager_webhook"}`. There is no code path through which a
+  caller's own arbitrary data reaches this column at all — every
+  value is assembled by the repository itself from a fixed, small set
+  of already-validated fields. A dedicated unit test asserts the
+  webhook token, "Authorization", and "Bearer" never appear in any
+  recorded event.
+- **`actor_type='operator'` never fabricates an individual identity.**
+  The lifecycle endpoint's Bearer token is shared, not per-user — this
+  phase deliberately adds no `user_id` column or any other
+  individual-identity claim; `actor_type='operator'` records only that
+  an authenticated operator request caused the event.
+- **Real transactional atomicity — proven against real PostgreSQL,
+  not merely designed that way.** Every audit record is written by
+  the exact same repository method that performs the matching
+  mutation (`upsert_firing_incident`, `transition_incident_status`,
+  `resolve_active_incident_for_fingerprint`), using the exact same
+  `AsyncSession` and therefore the exact same transaction — callers in
+  `ingestion/service.py`/`api/incidents.py` needed **no new code** to
+  get this guarantee; it falls entirely out of the existing
+  "single transaction, one commit at the end" architecture Phase
+  3C/3D already established. `upsert_firing_incident`'s `RETURNING`
+  clause now also returns `status`, letting it record `created`
+  (`created=True`) or `observed` (`created=False`) using that one
+  statement's own result — safe without any extra read, since the
+  statement's `SET` clause never touches `status` at all.
+  `transition_incident_status` records its event using
+  `expected_status` — already guaranteed correct by the existing
+  atomic compare-and-swap `UPDATE`'s own `WHERE` clause.
+  `resolve_active_incident_for_fingerprint` needed real new work: its
+  caller doesn't already know which active status the incident
+  currently holds, and reading an earlier snapshot would risk a STALE
+  previous status if a concurrent operator PATCH changed it in the
+  meantime. Fixed with two statements in the same transaction — a real
+  `SELECT ... FOR UPDATE` row lock that reads the status as of that
+  exact moment, then an `UPDATE` guaranteed to match it — closing a
+  race the existing advisory fingerprint lock does nothing against
+  (that lock only serializes concurrent *webhook* deliveries, not a
+  concurrent *operator* PATCH on the same row).
+- **Concurrent operator transitions produce exactly one event, never
+  one per loser** — a direct, zero-new-code consequence of the
+  existing compare-and-swap guarantee: of 10 genuinely concurrent real
+  `PATCH` requests, exactly one `UPDATE` affects a row (and records an
+  event); the other nine affect zero rows and the audit-recording call
+  is never reached.
+- **The read-only timeline API:** `GET /api/v1/incidents/{id}/events`
+  (new, in `api/incidents.py`; new Pydantic models in
+  `domain/incident_event.py`) — `items`/`total`/`limit`/`offset`,
+  ordered `occurred_at ASC, id ASC`, default `limit=20`/max `100`,
+  `offset >= 0`. `200` (including an empty timeline), `404` (incident
+  doesn't exist), `422` (malformed UUID or invalid pagination), `503`
+  (database unavailable) — exactly the existing read-only `GET`
+  endpoints' own conventions, unauthenticated, same local-development
+  policy. No audit-creation/mutation/deletion endpoint exists anywhere,
+  and no generic incident-editing API was added.
+- **Unit tests:** new `services/control-plane/tests/test_incident_audit.py`
+  (25 tests) — creation/observation/operator-transition/automatic-
+  resolution events with correct attribution, creation vs. observation
+  as distinct event types across two deliveries, ordered timeline +
+  pagination, the default `limit=20`, invalid `limit`/`offset` (422),
+  an incident with no history (200, empty, not 404), missing incident
+  (404), invalid UUID (422), zero events for every rejected/ignored/
+  no-op scenario this phase's own requirements explicitly list
+  (illegal transition, stale `expected_status`, same-status no-op,
+  missing incident, missing webhook/lifecycle credentials, a stale
+  firing replay, an ignored resolved notification, a duplicate
+  resolved delivery after success), a sequential winner-then-loser
+  proxy for "only the winning concurrent transition records an
+  event", a `commit_count`-based proxy for "an audit-insertion failure
+  never commits" (the same proxy Phase 3D's own commit-bug regression
+  tests use — a real rollback needs a real transaction, proven
+  separately below), and a direct assertion that no event's metadata
+  ever contains the webhook token, "Authorization", or "Bearer".
+  `tests/conftest.py`'s `FakeIncidentRepository` was extended to
+  record events from the same three mutation methods the real
+  repository writes them from, modeling the real semantics accurately
+  rather than just enough to pass each test in isolation — no existing
+  test was weakened. `make control-plane-test`: **196 passed** (171
+  from Phase 3D plus 25 new).
+- New `scripts/verify-incident-audit.sh` (`make verify-incident-audit`,
+  12 real-PostgreSQL sections, all passing on a real run): the V3
+  schema itself (table/index/`RESTRICT` FK all present; a direct
+  `UPDATE`/`DELETE` on `incident_events` both blocked; deleting an
+  incident with audit history blocked; a non-object `metadata` value
+  and a shape-violating event both rejected by their `CHECK`
+  constraints); creation, observation, operator-transition, and
+  automatic-resolution events each matched against the incident's own
+  real current status; zero events for six distinct rejected/ignored/
+  no-op scenarios; a **real transaction-rollback proof** — a
+  deliberately invalid audit insert issued in the same real
+  transaction as a real incident `UPDATE` (one multi-statement `psql`
+  invocation under `ON_ERROR_STOP=1`) is rejected, and the `UPDATE` is
+  confirmed not to have persisted either; 10 genuinely concurrent real
+  `PATCH` requests producing exactly 1 success and exactly 1 recorded
+  event; audit-trail byte-for-byte persistence across a real
+  PostgreSQL restart; a directly-inserted (never application-touched)
+  incident's genuinely empty timeline; and `404`/`422` API validation.
+  **A real, necessary consequence of the append-only/`RESTRICT`
+  design, discovered by running the EXISTING Phase 3C/3D verifiers
+  after this migration landed:** `scripts/verify-webhook-ingestion.sh`
+  and `scripts/verify-incident-lifecycle.sh` both began failing their
+  final cleanup `DELETE` with a real `RESTRICT` violation, since every
+  one of their test incidents is PATCHed or webhook-ingested at least
+  once and therefore accumulates real audit history. Both scripts were
+  updated to retain their run-scoped rows permanently instead —
+  asserting an *exact* expected audit-event count (9 and 17
+  respectively, hand-traced through every section) before leaving them
+  in place — the same "never delete genuine state" precedent the real
+  Collector-outage test's own ingested incidents already established,
+  now the *only* option for anything touching the real write paths.
+  `scripts/verify-persistence.sh`/`scripts/verify-control-plane.sh`
+  were confirmed unaffected (neither ever calls the webhook or
+  lifecycle endpoint, so neither accumulates audit history).
+- **V3 validated against both a fresh database and the existing,
+  non-empty development database** (which already held real
+  historical incidents from earlier Phase 3C/3D sessions, with
+  genuinely empty audit timelines, exactly as this phase's own design
+  predicts): applies cleanly in both cases via a disposable Compose
+  project for the fresh-database case (torn down afterward,
+  `docker compose down -v`, its own volume only), with append-only
+  enforcement and every `CHECK` constraint confirmed identical in
+  both.
+- **Real Collector-outage acceptance extended, not duplicated:**
+  `scripts/verify-ingestion.py`'s existing `confirm-resolved`
+  subcommand gained one new function, `verify_audit_trail`, called for
+  each confirmed incident id — reads the real, persisted
+  `GET /api/v1/incidents/{id}/events` timeline and confirms exactly
+  one `created` event and exactly one resolving `status_transition`
+  event, both `actor_type='alertmanager'` (never `operator` — no human
+  touches an incident in this fully automated test), correctly
+  ordered. No second Collector outage; no new subcommand.
+  `scripts/verify-alert-lifecycle.sh`'s own comments/messages updated
+  to describe the extended proof. **A real run confirmed the complete
+  chain end to end** for both real incidents the outage produced:
+  genuine `created` and resolving `status_transition` events, both
+  correctly attributed to Alertmanager, with no fabricated operator
+  intervention.
+- `Makefile`/`.github/workflows/ci.yml` extended, not duplicated: new
+  `verify-incident-audit` target/step (placed alongside the other
+  focused control-plane verifiers, before the expensive final gate —
+  doesn't touch `otel-collector`, so exact placement relative to the
+  Collector-outage gate doesn't matter); `scripts/verify-incident-audit.sh`
+  added to the shell-syntax-check step; the final step renamed to "Run
+  alert lifecycle + ingestion + resolution + audit acceptance test"
+  (underlying command unchanged — it already picks up the Phase 3E
+  audit-trail proof automatically through the shared script). CI YAML
+  validity reconfirmed. Not yet run on GitHub Actions in this updated
+  form.
+- New `docs/architecture/phase-3e-incident-audit.md`: the
+  authoritative, detailed reference for the V3 schema, audit event
+  semantics and attribution, transaction boundaries, concurrency/
+  ordering, the timeline API, retry/idempotency behavior, security/
+  privacy limitations, the honest historical-coverage limitation, and
+  the full real-PostgreSQL and real-Collector-outage verification
+  story. `docs/api/control-plane.md`, `docs/architecture/system-overview.md`,
+  `docs/architecture/incident-domain-model.md`,
+  `docs/architecture/phase-3d-incident-lifecycle.md`, and this file
+  updated to summarize and link to it, including correcting the
+  now-stale "an incident audit-history table" entries in each
+  document's own "planned/still reserved" sections.
+- **Limitations, honestly reported, not worked around:** this is an
+  append-only *application* record, not tamper-proof storage against a
+  PostgreSQL superuser; no individual-identity tracking for operator
+  actions (the lifecycle token is shared); no backfilled history for
+  anything that predates this phase; the read timeline API has no
+  authentication, the same local-development-only policy as every
+  other `GET` route; no incident simulation, AI/LLM agents, RAG,
+  remediation/approval workflows, or a frontend were added, per this
+  phase's explicit scope — all remain Phase 3F.
+- **Final validation:** `make control-plane-test` — **196 passed**;
+  `make verify-persistence` and `make verify-control-plane` — both
+  **passed** (confirmed unaffected by the append-only design); `make
+  verify-webhook-ingestion` and `make verify-incident-lifecycle` —
+  both **passed** after their cleanup-strategy update (exact audit-
+  event counts of 9 and 17 confirmed); `make verify-incident-audit` —
+  **all 12 sections passed** against the real stack; `make
+  verify-alert-ingestion` — **passed** (exit 0) against the real
+  stack, using the single existing Collector-outage lifecycle path
+  once more end to end, now also proving the audit trail. `make
+  verify-observability` was **not** rerun, per instructions. The
+  Compose stack was torn down afterward (`docker compose down`,
+  volumes preserved); the throwaway Compose project used to verify the
+  V3 migration against a disposable fresh database was torn down with
+  `docker compose down -v` (its own disposable volume only — the real
+  project's `postgres_data` volume was never touched).
+- **Post-review corrections (same phase, before commit):** independent
+  review of the version above found four real problems, all fixed and
+  re-verified against the real stack, not just described:
+  1. **TRUNCATE bypassed the append-only guarantee entirely.** The
+     original two triggers were `BEFORE UPDATE`/`DELETE`, `FOR EACH
+     ROW` — `TRUNCATE` never fires row-level triggers at all (that's
+     exactly why it's faster than a row-by-row `DELETE`), so it was
+     completely unguarded. Fixed with a new, narrowly-scoped migration,
+     `database/migrations/V4__harden_incident_audit.sql` —
+     `CREATE OR REPLACE FUNCTION` on `V3`'s own trigger function
+     (branching on `TG_OP` before ever referencing `OLD.id`, so the
+     row-level branch's `OLD.id` reference is never evaluated during a
+     statement-level `TRUNCATE` invocation — avoiding Postgres's own
+     "record \"old\" is not assigned yet" error) plus one new
+     `BEFORE TRUNCATE`, `FOR EACH STATEMENT` trigger.
+     `V3__create_incident_audit.sql` itself was never touched — it had
+     already been applied to the non-empty local development database,
+     and editing it would have invalidated Flyway's recorded checksum
+     for it; confirmed directly that `V1`–`V3`'s checksums are
+     byte-for-byte unchanged after `V4` applies.
+     `scripts/verify-incident-audit.sh`'s new TRUNCATE test wraps the
+     attempt in `BEGIN; TRUNCATE ...; ROLLBACK;` — never committed —
+     so that even a missing/broken guard could not have actually
+     destroyed data; the table's *total* row count (44 real rows at
+     the time, not just this run's) was confirmed unchanged across the
+     attempt. The documentation's "a PostgreSQL superuser can bypass
+     this" framing was also corrected, in both `V4`'s own comments and
+     `docs/architecture/phase-3e-incident-audit.md`, to "any role with
+     sufficient privilege over this table (its owner, or a role
+     granted `ALTER`/`DROP`), not only a superuser" — `V3`'s file was
+     not edited for this either, since it is comment-only text in an
+     already-checksummed migration.
+  2. **`occurred_at`'s `DEFAULT now()` recorded transaction-start time,
+     not insertion time.** Under concurrent writes, a transaction that
+     starts first but blocks on another transaction's row lock can
+     commit its own audit event *after* that other transaction, yet
+     still report an *earlier* `occurred_at` (fixed once, at
+     transaction start) — misordering the timeline
+     `GET .../events`'s `occurred_at ASC, id ASC` ordering returns.
+     Fixed in the same `V4` migration:
+     `ALTER TABLE reliability.incident_events ALTER COLUMN occurred_at
+     SET DEFAULT clock_timestamp()` — genuine wall-clock time at the
+     moment each row is actually inserted. A schema-only fix: every
+     already-recorded event's timestamp is preserved untouched
+     (`ALTER COLUMN ... SET DEFAULT` never rewrites existing rows), and
+     the application needed zero code changes, since
+     `_record_event`'s `INSERT` never set `occurred_at` explicitly in
+     the first place — it has always relied on the column default.
+     `scripts/verify-incident-audit.sh` now asserts the live column
+     default is exactly `clock_timestamp()` via
+     `information_schema.columns`.
+  3. **The final run-scoped acceptance counts were neither exact nor
+     actually run-scoped.** `scripts/verify-incident-audit.sh`'s final
+     section scoped its presence check with `source_fingerprint LIKE
+     'verify-incident-audit-%'` — which matches every prior retained
+     run's rows too (since, by design, nothing this script creates is
+     ever deleted), and asserted only a loose `>= 9` lower bound, never
+     an exact event count. Fixed by scoping to the exact, unique
+     `TEST_SOURCE` plus the exact Alertmanager fingerprints *this run
+     itself* generated (`AM_FP`, `stale_fp`, `dup_resolve_fp`, and the
+     new pagination test's own fingerprint) — never a `LIKE` pattern.
+     Independently re-traced by hand through every section of the
+     script to confirm the exact expected totals, then asserted as
+     exact counts: **10 incidents, 31 audit events** (direct-insert
+     incidents contribute 0 events unless actually mutated afterward;
+     every ignored/rejected operation contributes 0;
+     `resolved_no_active_fp`, which never creates an incident at all,
+     is correctly excluded from the scoping). Real-run confirmed:
+     exactly 10 and exactly 31.
+  4. **The real Collector-outage audit check read only the unpaginated
+     first page.** `scripts/verify-ingestion.py`'s `verify_audit_trail`
+     called `GET .../events` with no `limit`/`offset` at all, reading
+     only the API's default first page (`limit=20`). A long-lived
+     incident with more than 20 accepted firing observations could
+     have its resolving event lie entirely beyond that page, in which
+     case the check would never see it. Fixed with a new
+     `fetch_all_events` helper that fully paginates (`limit<=100` per
+     page, looping on `offset`), cross-checking that the API's own
+     reported `total` stays consistent across pages and that no event
+     id is ever returned twice. Added a dedicated real regression test
+     for exactly this scenario in `scripts/verify-incident-audit.sh`
+     (new section 12, since the Collector-outage script itself was
+     deliberately left unchanged, per instructions, and its own
+     incidents don't naturally accumulate enough events to exercise
+     this): an incident driven through 1 creation + 20 accepted
+     observations + 1 resolution (22 events total) confirms the
+     *default* first page genuinely does **not** contain the resolving
+     event, and that fetching all pages (page size 10, forcing several
+     real page boundaries) yields exactly 22 distinct event ids with
+     no duplicates, the resolving event present and correctly
+     attributed.
+  - **Documentation**
+    (`docs/architecture/phase-3e-incident-audit.md`,
+    `docs/architecture/incident-domain-model.md`, this file) updated
+    to describe all four corrections and their real verification
+    evidence, including a new "Post-review correction" subsection for
+    each, without rewriting the historical narrative of the original
+    description above.
+  - **Final validation, run after all four fixes:** `make
+    control-plane-test` — **196 passed** (unaffected — no application
+    code changed this round); `make verify-incident-audit` — **all 13
+    sections passed** against the real stack, including the new
+    TRUNCATE/`occurred_at`-default/pagination checks and the corrected
+    exact run-scoped counts (10 incidents, 31 events); `V1`–`V4`
+    confirmed applying cleanly against both the existing non-empty
+    development database (with `V1`–`V3`'s checksums unchanged) and a
+    disposable fresh database (`V1 -> V2 -> V3 -> V4` in sequence,
+    torn down afterward with `docker compose down -v`, its own volume
+    only); `make verify-webhook-ingestion` and
+    `make verify-incident-lifecycle` were **not** rerun, since none of
+    this round's changes (SQL/verification-script only — no
+    application code) affect either script's own functionality; one
+    final `make verify-alert-ingestion` — **passed** (exit 0) against
+    the real stack, using the single existing Collector-outage
+    lifecycle path once more end to end, confirming the corrected,
+    fully-paginated audit check still finds the real incident's
+    `created` and resolving `status_transition` events correctly
+    attributed to Alertmanager. `make verify-observability` was
+    **not** rerun, per instructions. The Compose stack was torn down
+    afterward (`docker compose down`, volumes preserved); the
+    throwaway Compose project used to verify the `V4` migration
+    against a disposable fresh database was torn down with
+    `docker compose down -v` (its own disposable volume only — the
+    real project's `postgres_data` volume was never touched).
