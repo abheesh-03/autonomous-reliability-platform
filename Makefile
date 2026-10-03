@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -37,6 +37,10 @@ help: ## Show available targets
 	@echo "  verify-alert-ingestion Phase 3C/3D full acceptance: real Collector outage -> Alertmanager webhook -> persisted + resolved incident"
 	@echo "  verify-incident-lifecycle Phase 3D real PostgreSQL lifecycle verification (state machine, concurrency, restart durability)"
 	@echo "  verify-incident-audit Phase 3E real PostgreSQL audit trail verification (attribution, atomicity, concurrency, append-only enforcement)"
+	@echo "  simulate-payment-outage Phase 4: deliberately stop payment-service, verify safe 502 + recovery (add FULL_ACCEPTANCE=true for the full alert/incident/audit chain)"
+	@echo "  simulate-inventory-outage Phase 4: deliberately stop inventory-service, verify safe 502 + short-circuit + recovery"
+	@echo "  test-failure-simulation Phase 4 focused tests: scenario selection, safety checks, restoration behavior (no Docker required)"
+	@echo "  verify-failure-simulation Phase 4 full acceptance: payment-outage (full alert/incident/audit chain) + inventory-outage, against the real stack"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -196,3 +200,29 @@ verify-incident-audit: ## Phase 3E real PostgreSQL audit trail verification (att
 # own docstring.
 verify-alert-ingestion: ## Phase 3C/3D/3E full acceptance: real Collector outage -> Alertmanager webhook -> persisted + resolved incident + audit trail
 	VERIFY_INGESTION=true ./scripts/verify-alert-lifecycle.sh
+
+# Phase 4: controlled failure injection against the real Compose
+# checkout application. simulate-*-outage deliberately stops exactly
+# one allowlisted application dependency, verifies the real safe
+# failure, restores it, and verifies recovery -- see
+# scripts/simulate-failure.sh and
+# docs/architecture/phase-4-failure-simulation.md. Pass
+# FULL_ACCEPTANCE=true with simulate-payment-outage to additionally
+# prove the real Prometheus -> Alertmanager -> incident -> audit ->
+# recovery chain (this is the expensive path -- prefer the plain form
+# for quick local iteration).
+simulate-payment-outage: ## Phase 4: deliberately stop payment-service, verify safe 502 + recovery (FULL_ACCEPTANCE=true for the full alert/incident/audit chain)
+	./scripts/simulate-failure.sh payment-outage $(if $(filter true,$(FULL_ACCEPTANCE)),--full-acceptance,)
+
+simulate-inventory-outage: ## Phase 4: deliberately stop inventory-service, verify safe 502 + short-circuit + recovery
+	./scripts/simulate-failure.sh inventory-outage
+
+test-failure-simulation: ## Phase 4 focused tests: scenario selection, safety checks, restoration behavior (no Docker required)
+	./scripts/test-simulate-failure.sh
+
+# The Phase 4 real acceptance gate. Deliberately placed after
+# verify-alert-ingestion in both the Makefile ordering and CI, so this
+# phase's own real outages (payment-service, inventory-service) never
+# race or interfere with the Collector-outage gate's preconditions.
+verify-failure-simulation: ## Phase 4 full acceptance: payment-outage (full alert/incident/audit chain) + inventory-outage, against the real stack
+	./scripts/verify-failure-simulation.sh

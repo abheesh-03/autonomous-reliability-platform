@@ -39,6 +39,14 @@ incident-management foundation is closed out with an audited
 acceptance matrix, one narrow cross-system coverage gap closed, and a
 handoff runbook — see
 [End-to-end acceptance and handoff](#end-to-end-acceptance-and-handoff-phase-3f)
+below. As of **Phase 4**, the repository also has an opt-in,
+allowlisted failure-injection scenario runner that deliberately breaks
+`payment-service` or `inventory-service` against the real Compose
+stack and, for the payment-service case, proves the real
+Prometheus → Alertmanager → incident → audit → recovery chain through
+a second, distinct real failure path (no second Collector outage) —
+see [Controlled failure injection and deterministic incident
+simulation](#controlled-failure-injection-and-deterministic-incident-simulation-phase-4)
 below.
 Conceptually, the current demo
 application shape is:
@@ -309,6 +317,32 @@ Full inventory:
   Alertmanager fingerprint that produced it, not just the incident
   row), and a reproducible operations runbook. Full detail:
   [docs/architecture/phase-3f-acceptance-and-handoff.md](phase-3f-acceptance-and-handoff.md).
+- **Controlled failure injection and deterministic incident
+  simulation** (Phase 4, `scripts/simulate-failure.sh`): an opt-in
+  scenario runner that deliberately stops exactly one allowlisted real
+  dependency (`payment-service` or `inventory-service` — never
+  PostgreSQL or any other infrastructure, and no Docker volume),
+  verifies checkout-service's real safe `502` response identifies the
+  correct failed dependency, restores it (a trap armed before the stop
+  covers success, failure, Ctrl+C, and termination, idempotently, and
+  verifies health rather than trusting `docker compose start`'s exit
+  code), and confirms a fresh checkout succeeds. `payment-outage
+  --full-acceptance` additionally reuses the existing, unmodified
+  `CheckoutServerErrors` Prometheus rule and the existing, unmodified
+  `scripts/verify-alerting.py`/`scripts/verify-ingestion.py` to prove
+  the complete real chain end to end: real outage → real failing
+  checkouts → genuine HTTP 5xx metrics → the rule firing → a real
+  Alertmanager webhook delivery → a persisted, fingerprint-matched
+  incident → restoration → real recovery → genuine automatic
+  resolution → a correctly-attributed audit trail — a second, distinct
+  real failure path through the same Phase 3A–3F machinery, not a
+  second Collector outage. Testing this directly discovered a real gap
+  (checkout-service's downstream `RestClient`s had no connect/read
+  timeout, so a dependency stopped mid-connection could hang a request
+  indefinitely) and fixed it narrowly with one new
+  `RestClientCustomizer` bean, with no change to any of the three
+  downstream client classes. Full detail:
+  [docs/architecture/phase-4-failure-simulation.md](phase-4-failure-simulation.md).
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.

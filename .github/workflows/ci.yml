@@ -14,16 +14,28 @@ jobs:
   repository-validation:
     name: Repository validation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Raised from 20: Phase 4's real acceptance step (CheckoutServerErrors'
+    # real 5-minute rate() decay on recovery) alone measured ~8-9 minutes
+    # locally, on top of the pre-existing Collector-outage gate and every
+    # build/test step.
+    timeout-minutes: 35
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh
 
       - name: Verify Makefile is usable
         run: make help
+
+      # Phase 4: scenario-selection/safety-check/restoration-behavior
+      # tests for scripts/simulate-failure.sh. No Docker/Compose stack
+      # needed — every case here either exits during argument parsing
+      # (before any Docker call) or exercises restore_target() with
+      # docker stubbed. See scripts/test-simulate-failure.sh.
+      - name: Run failure-simulation focused tests (Phase 4)
+        run: make test-failure-simulation
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -719,6 +731,21 @@ jobs:
       # since stopping otel-collector would otherwise invalidate them.
       - name: Run alert lifecycle + ingestion + resolution + audit acceptance test
         run: VERIFY_INGESTION=true bash scripts/verify-alert-lifecycle.sh
+
+      # Phase 4: real controlled failure injection against payment-service
+      # and inventory-service (never postgres, never otel-collector).
+      # Deliberately placed AFTER the Collector-outage gate above, so
+      # this phase's own real outages cannot interfere with that gate's
+      # preconditions. payment-outage's --full-acceptance proves the
+      # real Prometheus CheckoutServerErrors -> Alertmanager webhook ->
+      # incident -> audit -> recovery chain (its own, separate alert
+      # rule and real failure mechanism — no second Collector outage);
+      # inventory-outage runs its own deterministic checks only. See
+      # scripts/verify-failure-simulation.sh and
+      # docs/architecture/phase-4-failure-simulation.md.
+      - name: Verify failure simulation (Phase 4)
+        timeout-minutes: 15
+        run: bash scripts/verify-failure-simulation.sh
 
       - name: Show service logs
         if: always()

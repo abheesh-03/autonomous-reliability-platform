@@ -42,7 +42,26 @@ see
 Phase 3 as a whole is now **closed**; later phases (AI-driven
 investigation, remediation, a frontend, deployment infrastructure) are
 explicitly future work — see that document's "Implemented vs. planned"
-section. An OpenTelemetry
+section. The project is currently in **Phase 4 — Controlled Failure
+Injection and Deterministic Incident Simulation**: a safe, opt-in
+scenario runner (`scripts/simulate-failure.sh`, `make
+simulate-payment-outage` / `make simulate-inventory-outage`) that
+deliberately stops exactly one allowlisted real dependency
+(`payment-service` or `inventory-service` — never PostgreSQL, never
+any other infrastructure), verifies checkout-service's real safe `502`
+response identifies the correct failed dependency, verifies recovery,
+and — for payment-service, via `FULL_ACCEPTANCE=true` — proves the
+complete existing Phase 2/3 platform reacts to a real application
+failure end to end: real outage → real failing checkouts → genuine
+HTTP 5xx metrics → the real, unmodified `CheckoutServerErrors`
+Prometheus rule firing → a real Alertmanager webhook delivery →
+persisted incident → restoration → real recovery → genuine automatic
+resolution → correctly-attributed audit history. See [Failure
+Simulation](#failure-simulation-phase-4) below and
+[docs/architecture/phase-4-failure-simulation.md](docs/architecture/phase-4-failure-simulation.md).
+No AI investigation, automated remediation, approval workflow,
+frontend, or deployment infrastructure has been added — see that
+document's scope boundaries. An OpenTelemetry
 Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
 services are instrumented, each its own idiomatic way: `checkout-service`
@@ -771,6 +790,84 @@ make control-plane-test        # unit tests including the full audit suite, 196/
 make verify-incident-audit     # real-PostgreSQL audit acceptance (attribution, atomicity, concurrency, append-only enforcement incl. TRUNCATE, pagination)
 make verify-alert-ingestion    # same real Collector-outage gate, now also proving a genuine, correctly-attributed, fully-paginated audit trail
 ```
+
+## Failure Simulation (Phase 4)
+
+A safe, opt-in scenario runner (`scripts/simulate-failure.sh`) that
+deliberately breaks one real dependency of the real Compose checkout
+application, observes the real symptom, verifies the expected safe
+behavior, and restores the environment — never by inserting a SQL row
+directly or POSTing a synthetic alert to Alertmanager. Full detail:
+[docs/architecture/phase-4-failure-simulation.md](docs/architecture/phase-4-failure-simulation.md).
+
+- **Two allowlisted scenarios, nothing else.** `payment-outage` stops
+  `payment-service`; `inventory-outage` stops `inventory-service`.
+  The scenario name is matched against exactly these two `case` arms
+  before any Docker/network action — any other value (including
+  `postgres`) is refused immediately, with a redundant explicit
+  postgres guard on top. Neither PostgreSQL nor any other
+  infrastructure service, and no Docker volume, is ever touched.
+- **Both scenarios prove the real safe-failure contract.**
+  `payment-outage`: a real checkout returns `502` with
+  `{"error":"downstream_failure","service":"payment-service",...}`.
+  `inventory-outage`: a real checkout returns the same shape for
+  `inventory-service`, while payment-service's own Prometheus counter
+  is confirmed to have genuinely increased (the payment step
+  completed) and notification-service's is confirmed unchanged (the
+  orchestration short-circuited before ever reaching it) — proven from
+  the outside via real telemetry, never by reading internal call order.
+  Both scenarios restore the stopped dependency and confirm a fresh
+  checkout succeeds afterward.
+- **Full incident acceptance (`payment-outage --full-acceptance`,
+  `make verify-failure-simulation`).** Reuses the existing, unmodified
+  `CheckoutServerErrors` Prometheus rule and the existing, unmodified
+  `scripts/verify-alerting.py`/`scripts/verify-ingestion.py` (the exact
+  same scripts Phase 3C/3D/3E/3F already use for
+  `TelemetryPipelineUnavailable`) to prove: real outage → real failing
+  checkouts → genuine HTTP 5xx metrics → `CheckoutServerErrors` firing
+  → a real Alertmanager webhook delivery → a persisted, fingerprint-
+  matched incident → restoration → real recovery → genuine automatic
+  resolution → a correctly-attributed audit trail. No second Collector
+  outage; no alert threshold or `for:` duration was changed to make
+  this faster or easier to pass.
+- **A real reliability gap discovered and fixed by this exact
+  testing.** checkout-service's downstream `RestClient`s had no
+  explicit connect/read timeout: stopping a dependency while a
+  keep-alive connection to it was already pooled left requests hanging
+  (measured: still unresolved past 90 seconds) instead of failing
+  fast, since no TCP `RST` is ever sent for an already-established
+  connection whose peer silently vanishes (a *fresh* connection attempt
+  already failed in under 100ms). Fixed with one new
+  `RestClientCustomizer` bean
+  (`services/checkout-service/.../config/DownstreamRestClientCustomizer.java`,
+  3s connect / 5s read timeout) applied automatically to all three
+  downstream clients — no change to `PaymentClient`, `InventoryClient`,
+  or `NotificationClient` themselves.
+- **Safety, not just features:** a trap armed before the target is
+  ever stopped restores it on success, failure, Ctrl+C, and
+  termination — idempotent, and always verifying health via `docker
+  inspect` rather than trusting `docker compose start`'s exit code. If
+  that verification ever fails, the run exits nonzero with an explicit
+  `FAIL: cleanup could not verify ... healthy` message instead of
+  claiming success — manual investigation (`docker compose start
+  <service>`, `docker compose ps`) is explicitly required in that
+  case, stated honestly rather than promised away. Nothing here needs
+  or prints a Bearer token.
+
+```bash
+make simulate-payment-outage                       # basic (~30s)
+FULL_ACCEPTANCE=true make simulate-payment-outage   # full chain (~8-9 min real wall-clock time)
+make simulate-inventory-outage                      # basic only, no second full-alert simulation
+make test-failure-simulation                        # focused scenario-selection/safety/restoration tests, no Docker needed
+make verify-failure-simulation                      # the full CI-equivalent acceptance gate (both scenarios)
+```
+
+**Not implemented in this phase (explicitly out of scope — see the
+dedicated doc's scope boundaries):** failure injection beyond these
+two scenarios (no chaos-engineering sidecar, no network-level fault
+injection), AI/LLM investigation, LangGraph or RAG, automated
+remediation, a human-approval workflow, a frontend, and
+Kubernetes/Terraform/AWS deployment.
 
 ## Developer Commands
 
@@ -5057,3 +5154,154 @@ problem today.
   workflows, a frontend, and Kubernetes/Terraform/AWS deployment are
   all still **future work**, not implemented by this or any prior
   phase.
+
+### Phase 4 — Controlled Failure Injection and Deterministic Incident Simulation
+
+- **One scenario runner, two allowlisted scenarios.**
+  `scripts/simulate-failure.sh payment-outage|inventory-outage
+  [--full-acceptance]` is the only place a Compose service is ever
+  stopped; the scenario name is matched against exactly those two
+  `case` arms (with a redundant, explicit `postgres`-is-never-a-target
+  guard on top) before any Docker or network call — refusing anything
+  else immediately. `--full-acceptance` is refused for
+  `inventory-outage`. The file defines its functions unconditionally
+  but only runs the scenario when executed directly (a
+  `[[ "${BASH_SOURCE[0]}" == "${0}" ]]` guard), which is what lets
+  `scripts/test-simulate-failure.sh` unit-test the allowlist/
+  restoration logic by sourcing it, with `docker` stubbed, and no
+  Docker daemon required.
+- **Safety, proven, not just claimed — and corrected by independent
+  review.** `NEEDS_RESTORE` is set `true` *before* the stop command is
+  even issued (not after it returns), so a partial/failed stop is
+  still cleaned up. Exactly one place ever calls `restore_target`: the
+  single `EXIT` trap; `INT`/`TERM` only set the right exit code and
+  `exit`, which itself triggers that same trap — no recursive cleanup.
+  `restore_target` only clears `NEEDS_RESTORE` once `wait_healthy`
+  actually confirms the dependency healthy again; a restoration that
+  cannot be verified returns failure and forces a nonzero exit even if
+  the scenario had otherwise succeeded, so a run is never reported as
+  `PASS` while a dependency is left down (the original nonzero status
+  is preserved if the scenario was already failing). `SIGKILL`/power
+  loss honestly cannot be trapped by any shell script — stated as a
+  limitation, not papered over. Only `payment-service`/
+  `inventory-service` are ever touched; no volume is ever touched; no
+  incident or audit row is ever deleted (and Phase 3E's append-only
+  triggers would reject an attempt regardless). Nothing in this phase
+  needs or prints a Bearer token.
+- **payment-outage:** real checkout `502`s with
+  `service: "payment-service"`, confirmed exactly against the real
+  `DownstreamErrorResponse` shape. **inventory-outage:** real checkout
+  `502`s with `service: "inventory-service"`, AND payment-service's
+  own Prometheus request counter is confirmed to have genuinely
+  increased (the payment step completed before the failure) AND
+  notification-service's own counter is confirmed unchanged (the
+  orchestration short-circuited) — proven from the outside via real
+  telemetry deltas, never by reading checkout-service's internal call
+  order. Both scenarios restore the dependency and confirm a fresh
+  checkout succeeds afterward.
+- **Full incident acceptance
+  (`payment-outage --full-acceptance`/`make verify-failure-simulation`).**
+  Reuses the existing, unmodified `CheckoutServerErrors` Prometheus
+  rule and the existing, unmodified `scripts/verify-alerting.py`/
+  `scripts/verify-ingestion.py` (the same scripts Phase 3C/3D/3E/3F
+  already use for `TelemetryPipelineUnavailable`) against a *different*
+  real failure mechanism: real outage → sustained real failing
+  checkouts → genuine HTTP 5xx metrics → `CheckoutServerErrors` firing
+  → real Alertmanager webhook delivery → a persisted,
+  fingerprint-matched incident → restoration → real recovery → genuine
+  automatic resolution → a correctly-attributed audit trail. No second
+  Collector outage; the alert's threshold/`for:` duration was never
+  altered to make this faster. `--ids-out`'s existing
+  `incident_id<TAB>fingerprint` format (Phase 3F) made this a pure
+  reuse — zero changes to either Python script.
+- **A real reliability gap discovered and fixed by this exact
+  testing, reported honestly rather than hidden.** checkout-service's
+  downstream `RestClient`s had no explicit connect/read timeout.
+  Stopping a dependency while a keep-alive connection to it was
+  already pooled left real requests hanging — measured directly,
+  still unresolved past 90 seconds with zero bytes received — rather
+  than failing fast into the existing, already-correct
+  `DownstreamServiceException` → HTTP 502 path. Root cause: no TCP
+  `RST` is ever generated for an already-established connection whose
+  peer silently disappears (unlike a *fresh* connection attempt to a
+  stopped dependency, which already failed in well under 100ms, since
+  Docker's bridge rejects it immediately). Fixed with one new Spring
+  `RestClientCustomizer` bean,
+  `services/checkout-service/src/main/java/com/reliabilityplatform/checkout/config/DownstreamRestClientCustomizer.java`
+  (3s connect timeout / 5s read timeout via
+  `ClientHttpRequestFactorySettings`), which Spring Boot applies
+  automatically to the one auto-configured `RestClient.Builder` all
+  three downstream clients already receive — zero changes to
+  `PaymentClient`, `InventoryClient`, or `NotificationClient`
+  themselves. Re-verified directly: the identical real stop-mid-
+  connection reproduction now returns `502` in ~3 seconds instead of
+  hanging.
+- **CI.** A new "Run failure-simulation focused tests (Phase 4)" step
+  (`make test-failure-simulation`, no Docker needed) runs early,
+  alongside the other repository-validation checks. A new "Verify
+  failure simulation (Phase 4)" step
+  (`bash scripts/verify-failure-simulation.sh`) runs the full
+  acceptance gate — deliberately placed immediately AFTER the existing
+  Collector-outage gate, so this phase's own real outages never race
+  that gate's preconditions. The job's `timeout-minutes` was raised
+  from 20 to 35 to accommodate `CheckoutServerErrors`'s real multi-
+  minute firing/recovery timings. Every pre-existing Phase 0–3 CI gate
+  is otherwise unchanged.
+- **Final validation:** `make test-failure-simulation` — **12/12
+  passed**; `./mvnw test` for checkout-service (run via
+  `eclipse-temurin:21-jdk`, no local Java 21 available) — **all tests
+  passed** both before and after the `DownstreamRestClientCustomizer`
+  change; a full real-stack `make verify-failure-simulation` — **both
+  scenarios passed**, including the complete real
+  Prometheus → Alertmanager → incident → audit → recovery chain for
+  `payment-outage`. The Compose stack was torn down afterward
+  (`docker compose down`, volumes preserved; no historical incident or
+  audit row deleted). `make verify-observability`,
+  `make verify-persistence`, `make verify-control-plane`,
+  `make verify-webhook-ingestion`, `make verify-incident-lifecycle`,
+  `make verify-incident-audit`, and the plain (non-full-acceptance)
+  `make verify-alert-ingestion` were **not** rerun locally for this
+  phase, since none of their own scripts or migrations changed — CI
+  runs all of them on push.
+- **Documentation:** new
+  [docs/architecture/phase-4-failure-simulation.md](docs/architecture/phase-4-failure-simulation.md);
+  `README.md` (this file) and `docs/architecture/system-overview.md`
+  updated with an accurate Phase 4 summary and an explicit
+  implemented-vs-planned split. No AI investigator, LangGraph/RAG,
+  automated remediation, approval workflow, frontend, or
+  Kubernetes/Terraform/AWS deployment was added — all remain future
+  work for later phases.
+- **Post-review corrections (same phase, before commit):** independent
+  review found four real problems, all fixed and re-verified against
+  the real stack:
+  1. **A restoration-safety race.** `TARGET_STOPPED`/`RESTORE_DONE`
+     were renamed/restructured into a single `NEEDS_RESTORE` flag set
+     *before* the stop command (not after), and `restore_target` now
+     only clears it once health is actually verified — see "Safety,
+     proven, not just claimed" above.
+  2. **Sustained traffic wasn't actually verified per attempt.** Every
+     iteration of `payment-outage --full-acceptance`'s traffic loop
+     now re-asserts the full 502/`downstream_failure`/
+     `service=payment-service` contract, aborting immediately on any
+     deviation; the rule's initial `inactive` state is now confirmed
+     before fault injection, the alert name is a non-overridable
+     constant, and the freshness timestamp is captured before the
+     fault rather than before the traffic loop.
+  3. **The notification short-circuit check was checked too
+     early.** `inventory-outage` now observes notification-service's
+     counter 5 times across a real settle window, not once
+     immediately, honestly described as proving it stayed uncalled
+     for that window, not for all time.
+  4. **`prom_count` had no timeout.** Added
+     `--connect-timeout 5 --max-time 15`, consistent with every other
+     network call this script makes.
+  - **Final validation:** `make test-failure-simulation` — **18/18
+     passed** (6 new cases covering unsuccessful restoration, retry-
+     after-failure, and `on_exit`'s exit-code propagation); both basic
+     scenarios and one full `make verify-failure-simulation` run —
+     **all passed** against the real stack (one full-acceptance
+     attempt correctly refused to start while a prior run's
+     `CheckoutServerErrors` was still decaying — the new pre-fault
+     check working as designed, not a flake). No Java code changed
+     this round, so `./mvnw test` was not rerun. The Compose stack was
+     torn down afterward (`docker compose down`, volumes preserved).
