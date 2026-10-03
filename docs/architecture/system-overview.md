@@ -32,6 +32,14 @@ application**, a read-only FastAPI control plane
 (`services/control-plane`) sitting in front of `reliability.incidents`
 — see [Control plane](#control-plane-phase-3b) below and
 [docs/api/control-plane.md](../api/control-plane.md) for full detail.
+As of Phase 3C/3D/3E it also gained authenticated write paths, a
+validated lifecycle state machine, and a durable audit trail (see the
+dedicated bullets below); as of **Phase 3F**, that entire Phase 3
+incident-management foundation is closed out with an audited
+acceptance matrix, one narrow cross-system coverage gap closed, and a
+handoff runbook — see
+[End-to-end acceptance and handoff](#end-to-end-acceptance-and-handoff-phase-3f)
+below.
 Conceptually, the current demo
 application shape is:
 
@@ -291,6 +299,16 @@ Full inventory:
   invented for incidents that predate this phase — an empty timeline
   on a pre-existing incident is valid, expected behavior. Full detail:
   [docs/architecture/phase-3e-incident-audit.md](phase-3e-incident-audit.md).
+- **End-to-end acceptance and handoff** (Phase 3F — closes Phase 3 as
+  a whole; no new migration, endpoint, or verifier script): an audited
+  acceptance matrix mapping every Phase 3A–3E capability to its
+  already-existing real verification gate, one narrow cross-system gap
+  closed in the single existing Collector-outage acceptance test
+  (`scripts/verify-ingestion.py` now traces a persisted `created`
+  audit event's own `metadata.source_fingerprint` back to the real
+  Alertmanager fingerprint that produced it, not just the incident
+  row), and a reproducible operations runbook. Full detail:
+  [docs/architecture/phase-3f-acceptance-and-handoff.md](phase-3f-acceptance-and-handoff.md).
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.

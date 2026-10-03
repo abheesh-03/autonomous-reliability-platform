@@ -61,6 +61,17 @@ test), and are correctly ordered. No second Collector outage, and no
 new subcommand — this is the exact same real chain, checked one layer
 deeper.
 
+Phase 3F correction: `--ids-out` now writes each confirmed incident's
+id together with the exact Alertmanager fingerprint it was matched to
+(`incident_id<TAB>fingerprint`, one pair per line), and `confirm-resolved`
+cross-checks that the persisted 'created' audit event's own metadata
+(`metadata.source_fingerprint`) equals that same real fingerprint. The
+incident row itself was already matched to Alertmanager by fingerprint
+in `incident-from-alert`; this closes the one remaining gap, which was
+that the audit *event* — the record `confirm-resolved` actually reads
+— was never itself tied back to the real alert's identity, only to an
+already-trusted incident id.
+
 Post-review correction: the timeline is read via fetch_all_events,
 which fully paginates the endpoint (limit<=100 per page, looping on
 offset) rather than reading only its unpaginated first page — a
@@ -294,8 +305,9 @@ def cmd_incident_from_alert(args):
     if args.ids_out:
         with open(args.ids_out, "w") as f:
             for alert in matches:
-                f.write(f"{incidents_by_fp[alert['fingerprint']]['id']}\n")
-        print(f"wrote {len(matches)} confirmed incident id(s) to {args.ids_out}")
+                fp = alert["fingerprint"]
+                f.write(f"{incidents_by_fp[fp]['id']}\t{fp}\n")
+        print(f"wrote {len(matches)} confirmed incident id(s) (with their real Alertmanager fingerprint) to {args.ids_out}")
 
     sys.exit(0)
 
@@ -345,7 +357,7 @@ def fetch_all_events(control_plane_url, incident_id, page_size=100):
     return items
 
 
-def verify_audit_trail(base, incident_id):
+def verify_audit_trail(base, incident_id, expected_fingerprint):
     """Phase 3E: confirms this incident's real, persisted audit
     timeline (GET /api/v1/incidents/{id}/events, fully paginated — see
     fetch_all_events above) genuinely contains a 'created' event and a
@@ -353,7 +365,14 @@ def verify_audit_trail(base, incident_id):
     actor_type='alertmanager' — never 'operator', which would mean a
     human/operator action was fabricated for an incident that, in this
     real Collector-outage test, no human ever touched. Read-only, like
-    the rest of this script: only reads control-plane's own HTTP API."""
+    the rest of this script: only reads control-plane's own HTTP API.
+
+    Phase 3F correction: also confirms the 'created' event's own
+    metadata.source_fingerprint equals expected_fingerprint — the real
+    Alertmanager fingerprint this exact incident was matched to back in
+    incident-from-alert. Without this, nothing ever read back the audit
+    event's own attribution to the real alert; only the incident row
+    (a different table) was ever checked against Alertmanager."""
     events = fetch_all_events(base, incident_id)
 
     created_events = [e for e in events if e["event_type"] == "created"]
@@ -362,6 +381,14 @@ def verify_audit_trail(base, incident_id):
     created = created_events[0]
     if created["actor_type"] != "alertmanager":
         fail(f"incident {incident_id}: 'created' event has actor_type={created['actor_type']!r}, expected 'alertmanager'")
+
+    created_fp = created.get("metadata", {}).get("source_fingerprint")
+    if created_fp != expected_fingerprint:
+        fail(
+            f"incident {incident_id}: 'created' event metadata.source_fingerprint={created_fp!r}, "
+            f"expected {expected_fingerprint!r} (the real Alertmanager fingerprint this incident was "
+            "matched to) — the persisted audit record does not trace back to the real alert"
+        )
 
     resolution_events = [
         e for e in events if e["event_type"] == "status_transition" and e["new_status"] == "resolved"
@@ -407,14 +434,47 @@ def cmd_confirm_resolved(args):
     actor_type='alertmanager', correctly ordered, with no fabricated
     operator intervention. Read-only, like incident-from-alert: never
     POSTs anything."""
+    incident_fingerprints = {}
+    fingerprint_owners = {}
     with open(args.ids_file) as f:
-        incident_ids = [line.strip() for line in f if line.strip()]
-    if not incident_ids:
+        for line in f:
+            # Only the line terminator is stripped here, deliberately
+            # NOT a generic .strip() — that would silently eat a
+            # leading/trailing tab too, masking an empty incident_id
+            # or fingerprint field as "no tab found" instead of
+            # reporting the actual empty-field error below.
+            line = line.rstrip("\r\n")
+            if not line:
+                continue
+            fields = line.split("\t")
+            if len(fields) != 2:
+                fail(
+                    f"--ids-file {args.ids_file!r}: line {line!r} does not contain exactly one "
+                    f"tab-separated field pair (found {len(fields) - 1} tab(s), expected 1)"
+                )
+            incident_id, fingerprint = fields
+            if not incident_id or not fingerprint:
+                fail(f"--ids-file {args.ids_file!r}: line {line!r} has an empty incident id or fingerprint")
+            if incident_id in incident_fingerprints:
+                fail(
+                    f"--ids-file {args.ids_file!r}: incident id {incident_id!r} appears more than once "
+                    "— incident-from-alert never writes the same id twice; a duplicate indicates a "
+                    "corrupted or hand-edited ids file"
+                )
+            if fingerprint in fingerprint_owners and fingerprint_owners[fingerprint] != incident_id:
+                fail(
+                    f"--ids-file {args.ids_file!r}: fingerprint {fingerprint!r} is claimed by both "
+                    f"incident {fingerprint_owners[fingerprint]!r} and {incident_id!r} — a real "
+                    "Alertmanager fingerprint must map to at most one active incident"
+                )
+            incident_fingerprints[incident_id] = fingerprint
+            fingerprint_owners[fingerprint] = incident_id
+    if not incident_fingerprints:
         fail(f"--ids-file {args.ids_file!r} contained no incident ids")
 
     since = datetime.fromisoformat(args.since)
     base = args.control_plane_url.rstrip("/")
-    for incident_id in incident_ids:
+    for incident_id, expected_fingerprint in incident_fingerprints.items():
         incident = http_get_json(f"{base}/api/v1/incidents/{incident_id}")
 
         if incident["status"] != "resolved":
@@ -432,10 +492,10 @@ def cmd_confirm_resolved(args):
 
         print(f"  incident OK: id={incident_id} status=resolved resolved_at={incident['resolved_at']}")
 
-        verify_audit_trail(base, incident_id)
+        verify_audit_trail(base, incident_id, expected_fingerprint)
 
     print(
-        f"Resolution verified: all {len(incident_ids)} incident(s) confirmed in incident-from-alert have "
+        f"Resolution verified: all {len(incident_fingerprints)} incident(s) confirmed in incident-from-alert have "
         "genuinely transitioned to status='resolved' with a populated resolved_at, via Alertmanager's own real "
         "resolved webhook delivery, each with a genuine, correctly-attributed audit trail."
     )
@@ -460,8 +520,9 @@ def main():
     p.add_argument(
         "--ids-out",
         default=None,
-        help="optional: write each confirmed incident's id, one per line, to this file — consumed by the "
-        "confirm-resolved subcommand after Alertmanager's resolved webhook has had a chance to arrive",
+        help="optional: write each confirmed incident's id and its real Alertmanager fingerprint "
+        "(tab-separated, one pair per line) to this file — consumed by the confirm-resolved subcommand "
+        "after Alertmanager's resolved webhook has had a chance to arrive",
     )
 
     pr = sub.add_parser("confirm-resolved")

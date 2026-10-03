@@ -19,9 +19,8 @@ production-style system.
 **Actively under early development.** Phase 2 (observability — metrics,
 traces, logs, dashboards, alerting) is **closed**. Phase 3A (incident
 domain model + PostgreSQL persistence), Phase 3B (read-only FastAPI
-control plane), Phase 3C (real Alertmanager incident ingestion), and
-Phase 3D (incident lifecycle / state machine) are also **closed**. The
-project is currently in
+control plane), Phase 3C (real Alertmanager incident ingestion),
+Phase 3D (incident lifecycle / state machine), and
 **Phase 3E — Incident Audit Trail** (a durable, append-only
 `reliability.incident_events` table recording every accepted incident
 creation, firing observation, operator transition, and automatic
@@ -29,8 +28,21 @@ Alertmanager resolution, in the SAME PostgreSQL transaction as the
 incident change itself; a real, database-enforced append-only
 guarantee; and a new, read-only `GET /api/v1/incidents/{id}/events`
 timeline endpoint — see
-[Incident Audit Trail](#incident-audit-trail-phase-3e) below). An
-OpenTelemetry
+[Incident Audit Trail](#incident-audit-trail-phase-3e) below) are also
+**closed**. **Phase 3F — End-to-End Acceptance and Handoff** closes
+out the Phase 3 incident-management foundation as a whole: no new
+product capability, just an audited acceptance matrix mapping every
+Phase 3A–3E capability to its real verification gate, one narrow,
+previously-missing cross-system assertion added to the existing
+Collector-outage acceptance test (tracing a persisted audit event back
+to the real Alertmanager fingerprint that produced it), and a single
+operations runbook for another engineer to pick the system up from —
+see
+[docs/architecture/phase-3f-acceptance-and-handoff.md](docs/architecture/phase-3f-acceptance-and-handoff.md).
+Phase 3 as a whole is now **closed**; later phases (AI-driven
+investigation, remediation, a frontend, deployment infrastructure) are
+explicitly future work — see that document's "Implemented vs. planned"
+section. An OpenTelemetry
 Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
 services are instrumented, each its own idiomatic way: `checkout-service`
@@ -312,9 +324,25 @@ Alertmanager's own real webhook delivery now atomically upserts a
 genuine firing alert into `reliability.incidents`, deduplicated
 per-fingerprint against the same real partial unique index Phase 3A
 defined, verified against a real, controlled `otel-collector` outage
-end to end. There is still no user-facing incident-creation/lifecycle-
-mutation API and no authentication on the read endpoints. No AI
-integration has been added yet.
+end to end. As of Phase 3D, **Phase 3C is closed** and the control
+plane gained its first authenticated write path a human/operator can
+drive directly: `PATCH /api/v1/incidents/{id}/status` (see
+[Incident Lifecycle](#incident-lifecycle-phase-3d) below), governed by
+a centralized state machine and real optimistic concurrency, plus
+genuine source-driven automatic resolution from the same Alertmanager
+webhook. As of Phase 3E, **Phase 3D is closed** and every accepted
+mutation above is also durably recorded as an append-only audit event,
+in the same PostgreSQL transaction as the mutation (see
+[Incident Audit Trail](#incident-audit-trail-phase-3e) below). As of
+Phase 3F, **Phase 3E is closed and Phase 3 as a whole is closed**: no
+new capability was added; the existing coverage was audited into a
+single acceptance matrix, one narrow cross-system gap was closed in
+the existing Collector-outage acceptance test, and a handoff runbook
+was written — see
+[docs/architecture/phase-3f-acceptance-and-handoff.md](docs/architecture/phase-3f-acceptance-and-handoff.md).
+There is still no user-facing incident-creation API, no authentication
+on the read endpoints (by design — see that document), and no AI
+integration, automated remediation, or frontend of any kind.
 
 ## Local PostgreSQL
 
@@ -4620,16 +4648,20 @@ problem today.
   occurred_at ASC, id ASC)`, matches the timeline API's own query
   exactly. `V1` and `V2` were never touched.
 - **Append-only, enforced at the database level, not by convention.**
-  Two triggers (`incident_events_no_update`, `incident_events_no_delete`),
-  both calling one function that unconditionally `RAISE EXCEPTION`s,
-  reject any direct `UPDATE` or `DELETE` against this table — proven
-  directly: a real `UPDATE`/`DELETE` attempt via `psql` both failed
-  with `reliability.incident_events is append-only: ... is not
-  permitted`. The foreign key is `ON DELETE RESTRICT`, not `CASCADE`
-  — proven directly: deleting an incident with recorded audit history
-  failed with a real `violates RESTRICT setting of foreign key
-  constraint` error. Stated honestly: a PostgreSQL superuser can
-  disable or drop these triggers — this is a guard against this
+  Three triggers (`incident_events_no_update`, `incident_events_no_delete`,
+  and — added by a post-review `V4` migration, since `TRUNCATE` bypasses
+  row-level triggers entirely — the statement-level
+  `incident_events_no_truncate`) reject any direct `UPDATE`, `DELETE`,
+  or `TRUNCATE` against this table — proven directly: real `UPDATE`,
+  `DELETE`, and `TRUNCATE` attempts via `psql` all failed with
+  `reliability.incident_events is append-only: ... is not permitted`.
+  The foreign key is `ON DELETE RESTRICT`, not `CASCADE` — proven
+  directly: deleting an incident with recorded audit history failed
+  with a real `violates RESTRICT setting of foreign key constraint`
+  error. Stated honestly, and corrected by post-review review: any
+  role with sufficient privilege over this table — its owner, or a
+  role granted `ALTER`/`DROP` on it, not only a PostgreSQL superuser —
+  can disable or drop these triggers; this guards against this
   application's own connection role and any other ordinary client, not
   a tamper-proof storage claim.
 - **Honest historical-coverage limitation, by design.** This table is
@@ -4961,3 +4993,67 @@ problem today.
     against a disposable fresh database was torn down with
     `docker compose down -v` (its own disposable volume only — the
     real project's `postgres_data` volume was never touched).
+
+### Phase 3F — End-to-End Acceptance and Handoff
+
+- **Closure milestone, not a new-feature phase.** No migration was
+  added or changed (`V1`–`V4` are byte-for-byte unchanged), no new
+  verifier script was created, and no new application endpoint was
+  added. This phase audited the existing real Phase 3A–3E verification
+  coverage against a single acceptance matrix, closed one genuinely
+  missing cross-system assertion in the existing acceptance path, and
+  produced one handoff document. Full detail, including the complete
+  matrix:
+  [docs/architecture/phase-3f-acceptance-and-handoff.md](docs/architecture/phase-3f-acceptance-and-handoff.md).
+- **Acceptance matrix.** Every Phase 3A–3E capability mapped to the
+  real, already-existing gate that proves it (`make verify-persistence`,
+  `make verify-control-plane`, `make verify-webhook-ingestion`,
+  `make verify-incident-lifecycle`, `make verify-incident-audit`, and
+  the single cross-system `make verify-alert-ingestion`), all of which
+  already run in CI on every push. No gap was found in the five
+  focused gates — each already independently proves its own layer
+  against a real PostgreSQL database (and, for the ingestion/lifecycle
+  gates, a real HTTP API).
+- **The one genuine gap, closed narrowly.** The final cross-system
+  acceptance path (`scripts/verify-alert-lifecycle.sh` with
+  `VERIFY_INGESTION=true` / `scripts/verify-ingestion.py`) already
+  matched a real Alertmanager alert's fingerprint to the correct
+  incident *row*, and resolved that *exact* incident id after
+  recovery — but its audit-trail check (`verify_audit_trail`) never
+  read the persisted `created` event's own
+  `metadata.source_fingerprint` field back and compared it to the real
+  alert's fingerprint. The audit *event* itself — the actual record
+  the check reads — was never traced back to the real alert's
+  identity, only the incident row (a different table) had been. Fixed
+  by extending `incident-from-alert`'s `--ids-out` file to carry
+  `incident_id<TAB>fingerprint` pairs (previously bare incident ids)
+  and having `confirm-resolved`/`verify_audit_trail` assert the
+  `created` event's `metadata.source_fingerprint` equals that real
+  fingerprint. No second Collector outage, no new subcommand, no new
+  Make target — the one existing acceptance path, checked one field
+  deeper.
+- **Final validation:** `bash -n`/AST-parse confirmed the modified
+  `scripts/verify-ingestion.py` is syntactically valid; a full,
+  real-stack run of `make verify-alert-ingestion` (2026-10-03) —
+  **passed** (exit 0), including the new fingerprint cross-check on
+  both real firing `TelemetryPipelineUnavailable` instances, through
+  to genuine automatic resolution and a correctly-attributed,
+  fingerprint-traceable audit trail for each. The Compose stack was
+  torn down afterward (`docker compose down`, volumes preserved; no
+  volume reset, no historical incident or audit row deleted).
+  `make verify-observability`, `make verify-persistence`, `make
+  verify-control-plane`, `make verify-webhook-ingestion`, `make
+  verify-incident-lifecycle`, and `make verify-incident-audit` were
+  **not** rerun for this phase, since none of their own scripts
+  changed — see the full report for the reasoning.
+- **Documentation.** `README.md` (this file) and
+  `docs/architecture/system-overview.md` updated with an accurate
+  Phase 3F closure summary, a fixed stale duplicate of the Phase 3E
+  append-only-bypass wording that the post-review correction had
+  missed (this entry's own, now-corrected text lived in two places in
+  this file; only one had been updated), and an explicit
+  implemented-vs-planned distinction — chaos engineering, AI/LLM
+  investigation, LangGraph/RAG, automated remediation, approval
+  workflows, a frontend, and Kubernetes/Terraform/AWS deployment are
+  all still **future work**, not implemented by this or any prior
+  phase.
