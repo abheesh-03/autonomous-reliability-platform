@@ -284,7 +284,7 @@ assert body == {'firing_processed': 1, 'resolved_processed': 0, 'incidents_creat
 print('  ack body OK:', body)
 "
 
-id1="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source_fingerprint = '$fp1';" | head -1)"
+id1="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source_fingerprint = '$fp1';" | sed -n '1p')"
 [ -n "$id1" ] || fail "no row found for $fp1 after a 200 response"
 status_val="$(psql_exec -t -A -c "SELECT status FROM reliability.incidents WHERE id = '$id1';")"
 [ "$status_val" = "open" ] || fail "newly created incident status=$status_val, expected open"
@@ -452,7 +452,7 @@ body = json.load(sys.stdin)
 assert body == {'firing_processed': 0, 'resolved_processed': 1, 'incidents_created': 0, 'incidents_updated': 0, 'incidents_resolved': 1, 'incidents_ignored': 0}, body
 print('  ack body OK (genuinely resolved):', body)
 "
-resolve_me_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source_fingerprint = '$fp_resolve_me';" | head -1)"
+resolve_me_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source_fingerprint = '$fp_resolve_me';" | sed -n '1p')"
 resolve_me_status="$(psql_exec -t -A -c "SELECT status FROM reliability.incidents WHERE id = '$resolve_me_id';")"
 resolve_me_resolved_at="$(psql_exec -t -A -c "SELECT resolved_at FROM reliability.incidents WHERE id = '$resolve_me_id';")"
 [ "$resolve_me_status" = "resolved" ] || fail "fp_resolve_me's status is $resolve_me_status, expected resolved"

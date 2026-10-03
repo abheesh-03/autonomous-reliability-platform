@@ -174,7 +174,7 @@ incident_id="$(psql_exec -t -A -c "
   INSERT INTO reliability.incidents (source, source_fingerprint, title, description, severity, first_seen_at, last_seen_at, occurrence_starts_at)
   VALUES ('$TEST_SOURCE', '$TEST_FINGERPRINT', 'Verification incident', 'Created by scripts/verify-persistence.sh', 'critical', now(), now(), now())
   RETURNING id;
-" | head -1)"
+" | sed -n '1p')"
 [ -n "$incident_id" ] || fail "INSERT of a valid incident returned no id"
 echo "  inserted incident id=$incident_id"
 
@@ -275,7 +275,7 @@ recurred_id="$(psql_exec -t -A -c "
   INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, first_seen_at, last_seen_at, occurrence_starts_at)
   VALUES ('$TEST_SOURCE', '$TEST_FINGERPRINT', 'Recurred after resolution', 'warning', now(), now(), now())
   RETURNING id;
-" | head -1)"
+" | sed -n '1p')"
 [ -n "$recurred_id" ] || fail "re-using (source, source_fingerprint) after the prior incident resolved was unexpectedly rejected"
 [ "$recurred_id" != "$incident_id" ] || fail "re-using the fingerprint after resolution should create a NEW row, got the same id back"
 echo "  new active incident ($recurred_id) created after prior ($incident_id) resolved"

@@ -181,7 +181,7 @@ insert_incident() {
     INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at, occurrence_starts_at, resolved_at)
     VALUES ('$TEST_SOURCE', '$fp', 'Lifecycle test incident', 'warning', '$st', now() - interval '10 minutes', now(), now() - interval '10 minutes', $resolved_expr)
     RETURNING id;
-  " | head -1
+  " | sed -n '1p'
 }
 
 db_occurrence_starts_at() {
@@ -408,7 +408,7 @@ wm_b_end="2026-02-01T11:05:00Z"
 post_alert firing "$WM_FP" "$wm_a_start"
 [ "$POST_STATUS" = "200" ] || fail "firing A (watermark scenario) returned $POST_STATUS: $POST_BODY"
 echo "$POST_BODY" | python3 -c "import json,sys; b=json.load(sys.stdin); assert b['incidents_created']==1, b"
-wm_x_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$WM_FP';" | head -1)"
+wm_x_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$WM_FP';" | sed -n '1p')"
 [ -n "$wm_x_id" ] || fail "no row found for watermark occurrence A"
 
 wm_first_seen_before="$(psql_exec -t -A -c "SELECT first_seen_at FROM reliability.incidents WHERE id='$wm_x_id';")"
@@ -523,7 +523,7 @@ post_alert firing "$AM_FP" "$occ_a_start"
 [ "$POST_STATUS" = "200" ] || fail "firing occurrence A returned $POST_STATUS: $POST_BODY"
 echo "$POST_BODY" | python3 -c "import json,sys; b=json.load(sys.stdin); assert b['incidents_created']==1, b"
 
-occ_a_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$AM_FP';" | head -1)"
+occ_a_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$AM_FP';" | sed -n '1p')"
 [ -n "$occ_a_id" ] || fail "no row found for occurrence A"
 
 post_alert resolved "$AM_FP" "$occ_a_start" "$occ_a_end"
@@ -534,7 +534,7 @@ echo "$POST_BODY" | python3 -c "import json,sys; b=json.load(sys.stdin); assert 
 post_alert firing "$AM_FP" "$occ_b_start"
 [ "$POST_STATUS" = "200" ] || fail "firing occurrence B (genuine recurrence) returned $POST_STATUS: $POST_BODY"
 echo "$POST_BODY" | python3 -c "import json,sys; b=json.load(sys.stdin); assert b['incidents_created']==1, b"
-occ_b_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$AM_FP' AND status NOT IN ('resolved','closed');" | head -1)"
+occ_b_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$AM_FP' AND status NOT IN ('resolved','closed');" | sed -n '1p')"
 [ -n "$occ_b_id" ] && [ "$occ_b_id" != "$occ_a_id" ] || fail "occurrence B was not created as a distinct new row"
 
 row_count_am="$(psql_exec -t -A -c "SELECT count(*) FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$AM_FP';")"

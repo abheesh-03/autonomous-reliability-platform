@@ -154,7 +154,7 @@ insert_incident() {
     INSERT INTO reliability.incidents (source, source_fingerprint, title, severity, status, first_seen_at, last_seen_at, occurrence_starts_at)
     VALUES ('$TEST_SOURCE', '$fp', 'Audit test incident', 'warning', '$st', now() - interval '10 minutes', now(), now() - interval '10 minutes')
     RETURNING id;
-  " | head -1
+  " | sed -n '1p'
 }
 
 db_status() {
@@ -238,7 +238,7 @@ seed_event_id="$(psql_exec -t -A -c "
   INSERT INTO reliability.incident_events (incident_id, event_type, actor_type, previous_status, new_status, metadata)
   VALUES ('$seed_id', 'created', 'alertmanager', NULL, 'open', '{}'::jsonb)
   RETURNING id;
-" | head -1)"
+" | sed -n '1p')"
 [ -n "$seed_event_id" ] || fail "a valid, directly-inserted audit event was unexpectedly rejected"
 
 update_blocked="$(docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "UPDATE reliability.incident_events SET new_status = 'closed' WHERE id = '$seed_event_id';" 2>&1 | grep -c "append-only" || true)"
@@ -321,7 +321,7 @@ post_alert firing "$AM_FP" "$occ_a_start"
 [ "$POST_STATUS" = "200" ] || fail "firing webhook returned $POST_STATUS: $POST_BODY"
 echo "$POST_BODY" | python3 -c "import json,sys; b=json.load(sys.stdin); assert b['incidents_created']==1, b"
 
-am_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$AM_FP';" | head -1)"
+am_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$AM_FP';" | sed -n '1p')"
 [ -n "$am_id" ] || fail "no row found for $AM_FP"
 
 response="$(get_events "$am_id")"
@@ -443,7 +443,7 @@ echo "  illegal transition (409), stale expected_status (409), and same-status n
 stale_fp="verify-incident-audit-stale-${RUN_ID}"
 post_alert firing "$stale_fp" "2026-04-01T09:00:00Z"
 [ "$POST_STATUS" = "200" ] || fail "setup firing for stale-replay test returned $POST_STATUS"
-stale_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$stale_fp';" | head -1)"
+stale_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$stale_fp';" | sed -n '1p')"
 post_alert firing "$stale_fp" "2026-04-01T08:00:00Z"  # strictly OLDER -> ignored
 [ "$POST_STATUS" = "200" ] || fail "stale firing replay returned $POST_STATUS"
 echo "$POST_BODY" | python3 -c "import json,sys; b=json.load(sys.stdin); assert b['incidents_ignored']==1, b"
@@ -461,7 +461,7 @@ echo "  an ignored resolved notification (no matching active incident) created n
 dup_resolve_fp="verify-incident-audit-dup-resolve-${RUN_ID}"
 post_alert firing "$dup_resolve_fp" "2026-04-01T09:00:00Z"
 [ "$POST_STATUS" = "200" ] || fail "setup firing for duplicate-resolution test returned $POST_STATUS"
-dup_resolve_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$dup_resolve_fp';" | head -1)"
+dup_resolve_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$dup_resolve_fp';" | sed -n '1p')"
 post_alert resolved "$dup_resolve_fp" "2026-04-01T09:00:00Z" "2026-04-01T09:30:00Z"
 [ "$POST_STATUS" = "200" ] || fail "first resolution returned $POST_STATUS"
 echo "$POST_BODY" | python3 -c "import json,sys; b=json.load(sys.stdin); assert b['incidents_resolved']==1, b"
@@ -615,7 +615,7 @@ pagination_base_iso() {
 
 post_alert firing "$PAGINATION_FP" "$(pagination_base_iso 0)"
 [ "$POST_STATUS" = "200" ] || fail "setup firing for pagination test returned $POST_STATUS: $POST_BODY"
-pagination_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$PAGINATION_FP';" | head -1)"
+pagination_id="$(psql_exec -t -A -c "SELECT id FROM reliability.incidents WHERE source='alertmanager' AND source_fingerprint='$PAGINATION_FP';" | sed -n '1p')"
 [ -n "$pagination_id" ] || fail "no row found for $PAGINATION_FP"
 
 # 20 further, strictly increasing-startsAt firing deliveries — each an
