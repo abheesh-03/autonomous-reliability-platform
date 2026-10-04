@@ -18,13 +18,16 @@ jobs:
     # real 5-minute rate() decay on recovery) alone measured ~8-9 minutes
     # locally, on top of the pre-existing Collector-outage gate and every
     # build/test step.
-    timeout-minutes: 35
+    # Raised from 35: Phase 5's own step adds a few more minutes on
+    # top of Phase 4's real multi-minute CheckoutServerErrors
+    # firing/recovery wait.
+    timeout-minutes: 40
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh
 
       - name: Verify Makefile is usable
         run: make help
@@ -75,6 +78,27 @@ jobs:
       - name: Run control-plane tests
         working-directory: services/control-plane
         run: pytest -v
+
+      # Phase 5: unit tests only -- httpx.MockTransport/fake client
+      # doubles and the deterministic StubProvider (see
+      # services/investigator-service/tests/), never a real network
+      # call and never a real, paid LLM API call. Reuses the same
+      # Python 3.13 setup above.
+      - name: Install investigator-service dependencies
+        working-directory: services/investigator-service
+        run: pip install -e ".[dev]"
+
+      - name: Run investigator-service tests
+        working-directory: services/investigator-service
+        run: pytest -v
+
+      # Phase 5 correction round (issue 4): scripts/verify-investigator.sh's
+      # on_exit provider-restoration logic, unit-tested in isolation
+      # with docker/wait_healthy/investigator_provider_mode stubbed.
+      # No Docker, Compose, or running stack needed -- see
+      # scripts/test-verify-investigator-restore.sh.
+      - name: Run investigator provider-restoration focused tests (Phase 5)
+        run: make test-verify-investigator-restore
 
       - name: Set up Go 1.27
         uses: actions/setup-go@v7
@@ -732,6 +756,15 @@ jobs:
       - name: Run alert lifecycle + ingestion + resolution + audit acceptance test
         run: VERIFY_INGESTION=true bash scripts/verify-alert-lifecycle.sh
 
+      # Phase 5 correction round: a timestamp checkpoint captured
+      # IMMEDIATELY BEFORE the Phase 4 step below, exported to every
+      # later step via $GITHUB_ENV. The Phase 5 step further down
+      # requires the incident it reuses to have a first_seen_at AFTER
+      # this checkpoint -- proving it was genuinely produced by THIS
+      # job's own Phase 4 run, not a stale incident from an earlier one.
+      - name: Capture Phase 5 freshness checkpoint
+        run: echo "PHASE5_FRESHNESS_CHECKPOINT=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())')" >> "$GITHUB_ENV"
+
       # Phase 4: real controlled failure injection against payment-service
       # and inventory-service (never postgres, never otel-collector).
       # Deliberately placed AFTER the Collector-outage gate above, so
@@ -747,12 +780,31 @@ jobs:
         timeout-minutes: 15
         run: bash scripts/verify-failure-simulation.sh
 
+      # Phase 5: the read-only AI investigator's real-evidence
+      # acceptance gate. Deliberately placed AFTER the Phase 4 gate
+      # above so it can reuse the real, already-persisted, resolved
+      # CheckoutServerErrors incident that run just produced, rather
+      # than causing another real outage. PHASE5_FRESHNESS_CHECKPOINT
+      # (captured above, before Phase 4 even ran) makes this a
+      # freshness-PROVEN reuse, not merely an assumed one. Forces
+      # INVESTIGATOR_LLM_PROVIDER=stub for this run only (captured
+      # original mode restored and verified afterward) so this
+      # exercises the real control-plane/Prometheus/Loki/Tempo evidence
+      # pipeline end-to-end without a real, paid LLM API key -- no
+      # credentials are configured or required in CI. See
+      # scripts/verify-investigator.sh and
+      # docs/architecture/phase-5-ai-investigator.md.
+      - name: Verify investigator (Phase 5)
+        timeout-minutes: 5
+        run: bash scripts/verify-investigator.sh
+
       - name: Show service logs
         if: always()
         run: |
           docker compose logs --tail=100 postgres
           docker compose logs --tail=100 control-plane
           docker compose logs --tail=100 checkout-service
+          docker compose logs --tail=100 investigator-service
           docker compose logs --tail=100 payment-service
           docker compose logs --tail=100 inventory-service
           docker compose logs --tail=100 notification-service

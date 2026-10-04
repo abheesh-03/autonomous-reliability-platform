@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation verify-investigator test-verify-investigator-restore investigate
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -29,6 +29,9 @@ help: ## Show available targets
 	@echo "  control-plane-build Build the control-plane Docker image"
 	@echo "  control-plane-test  Run control-plane unit tests on Python 3.13 (via Docker)"
 	@echo "  control-plane-logs  Show recent control-plane logs"
+	@echo "  investigator-build  Build the investigator-service Docker image"
+	@echo "  investigator-test   Run investigator-service unit tests on Python 3.13 (via Docker)"
+	@echo "  investigator-logs   Show recent investigator-service logs"
 	@echo "  verify-observability Bundled Phase 2A.1-2B.4 verification (starts Compose, checks everything, tears down)"
 	@echo "  verify-persistence  Phase 3A persistence verification (migrations, schema, constraints, restart persistence)"
 	@echo "  verify-control-plane Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)"
@@ -41,6 +44,9 @@ help: ## Show available targets
 	@echo "  simulate-inventory-outage Phase 4: deliberately stop inventory-service, verify safe 502 + short-circuit + recovery"
 	@echo "  test-failure-simulation Phase 4 focused tests: scenario selection, safety checks, restoration behavior (no Docker required)"
 	@echo "  verify-failure-simulation Phase 4 full acceptance: payment-outage (full alert/incident/audit chain) + inventory-outage, against the real stack"
+	@echo "  verify-investigator Phase 5 real-evidence acceptance: investigate a real persisted incident, verify no mutation"
+	@echo "  test-verify-investigator-restore Phase 5 focused tests: provider-restoration logic on_exit (no Docker required)"
+	@echo "  investigate         Request a real investigation: make investigate INCIDENT_ID=<existing incident UUID>"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -147,6 +153,22 @@ control-plane-test: ## Run control-plane unit tests on Python 3.13 (via Docker)
 control-plane-logs: ## Show recent control-plane logs
 	docker compose logs --tail=100 control-plane
 
+investigator-build: ## Build the investigator-service Docker image
+	docker compose build investigator-service
+
+# Same convention as control-plane-test: unit tests only, against
+# fake/stub doubles (httpx.MockTransport, FakeControlPlane/StubProvider
+# — see services/investigator-service/tests/conftest.py), never a real
+# network call and never a real, paid LLM API call. Run
+# `make verify-investigator` for the real, running-stack integration
+# check.
+investigator-test: ## Run investigator-service unit tests on Python 3.13 (via Docker)
+	docker run --rm -v "$(CURDIR)/services/investigator-service:/app" -w /app python:3.13-slim \
+		bash -c "pip install -q -e '.[dev]' && pytest"
+
+investigator-logs: ## Show recent investigator-service logs
+	docker compose logs --tail=100 investigator-service
+
 verify-observability: ## Bundled Phase 2A.1-2B.4 verification (starts Compose, checks everything, tears down)
 	./scripts/verify-observability.sh
 
@@ -226,3 +248,36 @@ test-failure-simulation: ## Phase 4 focused tests: scenario selection, safety ch
 # race or interfere with the Collector-outage gate's preconditions.
 verify-failure-simulation: ## Phase 4 full acceptance: payment-outage (full alert/incident/audit chain) + inventory-outage, against the real stack
 	./scripts/verify-failure-simulation.sh
+
+# Phase 5: the real-evidence acceptance gate. Deliberately placed
+# after verify-failure-simulation in both the Makefile ordering and
+# CI, so it can reuse an already-persisted real CheckoutServerErrors
+# incident from the Phase 4 gate above instead of causing another
+# 8-9 minute outage. See scripts/verify-investigator.sh and
+# docs/architecture/phase-5-ai-investigator.md.
+verify-investigator: ## Phase 5 real-evidence acceptance: investigate a real persisted incident, verify no mutation
+	./scripts/verify-investigator.sh
+
+# Phase 5 correction round (issue 4): on_exit's provider-restoration
+# logic, unit-tested in isolation with docker/wait_healthy/
+# investigator_provider_mode stubbed. No Docker, Compose, or running
+# stack needed -- see scripts/test-verify-investigator-restore.sh.
+test-verify-investigator-restore: ## Phase 5 focused tests: provider-restoration logic on_exit (no Docker required)
+	./scripts/test-verify-investigator-restore.sh
+
+# Requests one real investigation for an existing incident UUID, e.g.:
+#   make investigate INCIDENT_ID=9528f24d-c906-4770-bf8f-e0a499bf6372
+# Requires investigator-service running (`make db-up`) and reachable
+# at 127.0.0.1:8001. Prints the full structured JSON report. If
+# INVESTIGATOR_LLM_API_KEY is not configured, prints the explicit
+# "unavailable" response instead of a fabricated investigation — see
+# docs/architecture/phase-5-ai-investigator.md for how to configure a
+# real provider.
+investigate: ## Request a real investigation: make investigate INCIDENT_ID=<existing incident UUID>
+	@if [ -z "$(INCIDENT_ID)" ]; then \
+		echo "usage: make investigate INCIDENT_ID=<existing incident UUID>" >&2; \
+		exit 1; \
+	fi
+	curl -sS -X POST http://127.0.0.1:8001/api/v1/investigations \
+		-H "Content-Type: application/json" \
+		-d '{"incident_id": "$(INCIDENT_ID)"}' | python3 -m json.tool

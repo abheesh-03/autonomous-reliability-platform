@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "investigator-service"
+version = "0.1.0"
+description = "Read-only AI incident investigator for the Autonomous Production Reliability Platform (Phase 5). Retrieves an existing incident's real evidence from control-plane/Prometheus/Loki/Tempo and produces a structured, evidence-grounded investigation via a configurable LLM provider. Never mutates incident state; never calls a write-capable control-plane endpoint."
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi==0.142.2",
+    "uvicorn==0.54.0",
+    "pydantic==2.13.5",
+    "httpx==0.28.1",
+    "openai==3.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+]
+# OpenTelemetry zero-code auto-instrumentation, same convention as
+# payment-service/control-plane — installed but not activated unless
+# Docker Compose opts in via `opentelemetry-instrument`.
+observability = [
+    "opentelemetry-distro==0.65b0",
+    "opentelemetry-instrumentation-fastapi==0.65b0",
+    "opentelemetry-exporter-otlp-proto-http==1.44.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

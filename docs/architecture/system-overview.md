@@ -47,7 +47,14 @@ Prometheus → Alertmanager → incident → audit → recovery chain through
 a second, distinct real failure path (no second Collector outage) —
 see [Controlled failure injection and deterministic incident
 simulation](#controlled-failure-injection-and-deterministic-incident-simulation-phase-4)
-below.
+below. As of **Phase 5**, the repository also has a strictly
+read-only, sixth backend service — an AI incident investigator that,
+given an existing incident UUID, retrieves its real evidence
+(control-plane's existing GET APIs plus bounded, allowlisted,
+read-only Prometheus/Loki/Tempo queries) and produces a structured,
+evidence-grounded investigation via a configurable LLM, never
+mutating anything — see [Read-only AI incident
+investigator](#read-only-ai-incident-investigator-phase-5) below.
 Conceptually, the current demo
 application shape is:
 
@@ -343,6 +350,31 @@ Full inventory:
   `RestClientCustomizer` bean, with no change to any of the three
   downstream client classes. Full detail:
   [docs/architecture/phase-4-failure-simulation.md](phase-4-failure-simulation.md).
+- **Read-only AI incident investigator** (Phase 5,
+  `services/investigator-service`): a new, sixth backend application,
+  strictly read-only. Given an existing incident UUID
+  (`POST /api/v1/investigations`), it retrieves that incident's real
+  evidence — control-plane's existing `GET /api/v1/incidents/{id}` and
+  `GET /api/v1/incidents/{id}/events` (mandatory, fully paginated) plus
+  four allowlisted Prometheus range queries, one allowlisted Loki
+  query, and one allowlisted Tempo tag search (each best-effort,
+  scoped to the incident's own real time window, bounded in count/
+  length) — assembles a normalized, attributed evidence package
+  (`E1`, `E2`, ...), and passes it to a real, configurable LLM
+  (OpenAI by default; a `StubProvider` for tests and for
+  `scripts/verify-investigator.sh` only) to produce a structured
+  investigation: direct observations and unconfirmed hypotheses are
+  kept explicitly separate, every material claim must cite a real
+  evidence id (fabricated citations are stripped and recorded, not
+  trusted), missing/unavailable evidence is reported honestly (Tempo
+  results are "candidate traces", never a confirmed causal link —
+  Phase 2B.2's trace/span-ID-in-logs gap is still real), and only
+  read-only diagnostic suggestions are ever produced. It holds neither
+  of control-plane's write-capable Bearer tokens and no PostgreSQL
+  credentials; its control-plane client has exactly two `GET` methods,
+  confirmed by an AST-level test to never call a write HTTP verb. No
+  Flyway migration was added. Full detail:
+  [docs/architecture/phase-5-ai-investigator.md](phase-5-ai-investigator.md).
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.
@@ -852,8 +884,13 @@ safe, backed by a new watermark column added via
 mutation to this table, append-only and in the same transaction as
 the mutation — see
 [Incident audit trail](#incident-audit-trail-phase-3e) above. `V1` is
-still unchanged; `V2` and `V3` are both purely additive. **Still
-planned:** any agent reading from or writing to this table; additional
+still unchanged; `V2` and `V3` are both purely additive. As of
+**Phase 5**, a read-only AI investigator reads from this table
+indirectly, exclusively through control-plane's existing GET API —
+never a direct database connection, and never a write of any kind —
+see [Read-only AI incident
+investigator](#read-only-ai-incident-investigator-phase-5) above.
+**Still planned:** any agent *writing* to this table; additional
 tables for investigation history, decisions, and approvals (future
 migrations, not yet written).
 
@@ -861,9 +898,18 @@ migrations, not yet written).
 **Redis** for short-lived state such as in-flight workflow coordination.
 
 ### Agent runtime
-A **LangGraph**-based runtime responsible for investigation: gathering
-telemetry, forming hypotheses about root cause, and proposing remediation
-steps for human approval.
+A **LangGraph**-based runtime for *iterative, tool-using* investigation
+and, eventually, proposing remediation steps for human approval. As of
+**Phase 5**, a narrower, single-pass, strictly read-only, human-invoked
+predecessor already exists — the AI incident investigator
+(`services/investigator-service`, see [Read-only AI incident
+investigator](#read-only-ai-incident-investigator-phase-5) above):
+given one incident, it gathers real evidence once, calls an LLM once,
+and returns a report — no loop, no tool-calling, no autonomous
+decision to act. This planned runtime is what would add the ability to
+gather *more* evidence across multiple reasoning steps, use real tools
+to do so, and act on its own initiative (always still gated by human
+approval) — none of which Phase 5 implements.
 
 ### Infrastructure tool gateway
 A **Go** service that exposes a controlled, auditable set of operations for

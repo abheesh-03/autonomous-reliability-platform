@@ -72,6 +72,18 @@
 #     receiver is a real, authenticated webhook to control-plane's
 #     internal ingestion endpoint (see above) — no longer a no-op
 #     "null" sink. Still no email/Slack/PagerDuty integration.
+#   - investigator-service (Phase 5): a STRICTLY READ-ONLY sixth
+#     backend application. Given an existing incident UUID, it reads
+#     that incident's real evidence from control-plane's existing GET
+#     APIs plus read-only Prometheus/Loki/Tempo queries, and returns a
+#     structured, evidence-grounded AI investigation via a configurable
+#     LLM provider (OpenAI; absent an API key, it still starts and
+#     still serves evidence-only responses, but a real investigation
+#     request fails explicitly rather than faking one). It is never
+#     given CONTROL_PLANE_WEBHOOK_TOKEN or CONTROL_PLANE_LIFECYCLE_TOKEN
+#     (it has no use for either — it never calls a write-capable
+#     control-plane endpoint) and holds no PostgreSQL credentials at
+#     all.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -176,6 +188,56 @@ services:
     # payment-service's own healthcheck pattern below.
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=3)\" || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  investigator-service:
+    build:
+      context: ./services/investigator-service
+    restart: unless-stopped
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    environment:
+      # Read-only clients, pointed at this stack's own internal
+      # Compose DNS names. No PostgreSQL credentials and NEITHER of
+      # control-plane's write-capable Bearer tokens
+      # (CONTROL_PLANE_WEBHOOK_TOKEN / CONTROL_PLANE_LIFECYCLE_TOKEN)
+      # are given to this service — it has no use for either, since it
+      # never calls a write-capable control-plane endpoint (see
+      # services/investigator-service/src/investigator_service/clients/control_plane.py).
+      INVESTIGATOR_CONTROL_PLANE_URL: http://control-plane:8000
+      INVESTIGATOR_PROMETHEUS_URL: http://prometheus:9090
+      INVESTIGATOR_LOKI_URL: http://loki:3100
+      INVESTIGATOR_TEMPO_URL: http://tempo:3200
+      # Phase 5: the one real, configurable LLM provider (OpenAI).
+      # Defaults to empty so `docker compose config` and a clean
+      # startup both still work with no key ever set — this service
+      # still starts and still serves evidence-only responses;
+      # POST /api/v1/investigations instead returns an explicit 503
+      # for an actual investigation request. Never a real credential
+      # committed here; set INVESTIGATOR_LLM_API_KEY in your own
+      # gitignored .env to enable real AI investigation.
+      INVESTIGATOR_LLM_API_KEY: ${INVESTIGATOR_LLM_API_KEY:-}
+      INVESTIGATOR_LLM_MODEL: ${INVESTIGATOR_LLM_MODEL:-gpt-4o-mini}
+      INVESTIGATOR_LLM_BASE_URL: ${INVESTIGATOR_LLM_BASE_URL:-}
+      # "openai" (default) or "stub". Only scripts/verify-investigator.sh
+      # ever sets this to "stub", to exercise this service's real
+      # HTTP/evidence pipeline deterministically in CI without a real
+      # API key — see LLMSettings' own docstring. Never set this
+      # yourself for real use.
+      INVESTIGATOR_LLM_PROVIDER: ${INVESTIGATOR_LLM_PROVIDER:-openai}
+    # Bound to loopback only, like every other observability/infra port
+    # in this stack. No authentication exists yet, matching
+    # control-plane's own GET API (this service's read endpoints
+    # evaluate incident evidence, they do not expose anything more
+    # sensitive) — local-development-only.
+    ports:
+      - "127.0.0.1:8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health/live', timeout=3)\" || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 5
