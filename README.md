@@ -78,9 +78,8 @@ neither of control-plane's write-capable Bearer tokens and no database
 credentials at all. See [AI Incident
 Investigator](#ai-incident-investigator-phase-5) below and
 [docs/architecture/phase-5-ai-investigator.md](docs/architecture/phase-5-ai-investigator.md).
-The project is currently in **Phase 6 — RAG and Historical Incident
-Retrieval**, which EXTENDS Phase 5 rather than replacing anything in
-it: a new, seventh backend service (`services/retrieval-service`)
+**Phase 6 — RAG and Historical Incident Retrieval** is also now
+**closed**: a new, seventh backend service (`services/retrieval-service`)
 owns a real PostgreSQL + pgvector retrieval index
 (`reliability.retrieval_chunks`) over source-controlled operational
 knowledge (`knowledge/runbooks/*.md`) and real historical incidents
@@ -97,9 +96,34 @@ credentials; retrieval-service is the only new component with
 PostgreSQL access. See [RAG Retrieval](#rag-retrieval-phase-6) below
 and
 [docs/architecture/phase-6-rag-retrieval.md](docs/architecture/phase-6-rag-retrieval.md).
-No automated remediation, human-approval execution, investigation
-persistence, frontend, LangGraph, or deployment infrastructure has
-been added — see that document's known limitations. An OpenTelemetry
+
+The project is currently in **Phase 7 — Durable LangGraph Agent
+Runtime**, which wraps the existing, unmodified Phase 5/6 investigation
+pipeline in a small, real LangGraph `StateGraph`: an eighth backend
+service (`services/agent-runtime-service`) executes a durable
+`load_incident -> run_investigation -> evaluate_investigation ->
+finalize` graph, checkpointed to its own dedicated, least-privileged
+PostgreSQL role/schema (`agent_runtime`) after every node — never the
+shared application role, and never with access to
+`reliability.incidents`/`reliability.incident_events`/
+`reliability.retrieval_chunks` (proven by a real PostgreSQL test, not
+merely asserted). Every agent run gets its own UUID `run_id`
+(`incident_id` lives inside graph state, never as the thread id), is
+inspectable mid-flight and after completion
+(`GET /api/v1/agent-runs/{id}`, `.../history`), and survives a real
+process restart of agent-runtime-service byte-for-byte. Phase 7 is
+durable **read-only orchestration only**: it still calls only
+investigator-service's existing, already read-only
+`POST /api/v1/investigations` (never duplicating Phase 5/6's own
+evidence collection or RAG retrieval) and control-plane's existing
+read-only `GET`; it holds neither control-plane write-capable Bearer
+token, executes no remediation, and never calls LangGraph's
+`interrupt()`. See [Durable Agent Runtime](#durable-agent-runtime-phase-7)
+below and
+[docs/architecture/phase-7-durable-agent-runtime.md](docs/architecture/phase-7-durable-agent-runtime.md).
+No automated remediation, human-approval execution, frontend, or
+deployment infrastructure has been added — see that document's known
+limitations and explicit Phase 8 boundary. An OpenTelemetry
 Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
 services are instrumented, each its own idiomatic way: `checkout-service`
@@ -1040,6 +1064,100 @@ dedicated doc's known limitations):** a LangGraph runtime, autonomous/
 iterative retrieval, tool-calling by the LLM, a reranker, automated
 remediation, human-approval execution, investigation persistence, a
 frontend, and Kubernetes/Terraform/AWS deployment.
+
+## Durable Agent Runtime (Phase 7)
+
+A new, eighth backend service, `services/agent-runtime-service`
+(Python 3.13 / FastAPI / LangGraph), wrapping — never duplicating —
+Phase 5/6's existing investigation pipeline in a small, real,
+durable LangGraph `StateGraph`:
+`START -> load_incident -> run_investigation -> evaluate_investigation ->
+finalize -> END`. Full detail:
+[docs/architecture/phase-7-durable-agent-runtime.md](docs/architecture/phase-7-durable-agent-runtime.md).
+
+- **The caller holds a durable `run_id` before any fallible work
+  begins.** `POST /api/v1/agent-runs` seeds a durable initial
+  checkpoint only (`status="running"`, `resumable=true`) — it makes NO
+  control-plane/investigator-service call. `POST .../resume` is what
+  actually executes (or continues) the graph; this is the same real
+  LangGraph operation whether it's the run's first execution or a
+  crash recovery, so there is no second, hand-rolled workflow engine.
+- **Durable, not just in-process.** Every node's checkpoint is durably
+  committed to a real PostgreSQL-backed `AsyncPostgresSaver`
+  (`durability="sync"`) before the next node runs. A run's exact state
+  — completed OR still mid-flight — is retrievable byte-for-byte
+  identically after a real restart of agent-runtime-service, proven
+  against the real, running stack, not just in a unit test.
+- **A real transient dependency outage never permanently fails a run.**
+  `ControlPlaneUnavailableError`/`InvestigatorUnavailableError` are
+  deliberately left uncaught by the graph nodes, so the last
+  successfully committed checkpoint remains the resume point; the API
+  layer translates them into a safe, generic `503`
+  (`"...this agent run remains resumable"`) — never the raw exception,
+  never a persisted `"failed"` state. Proven against the real stack by
+  actually stopping investigator-service mid-run, confirming the `503`
+  and continued resumability, restarting agent-runtime-service while
+  the run is still incomplete, then restoring investigator-service and
+  resuming to completion without re-executing the already-committed
+  `load_incident` step.
+- **Dedicated, least-privileged database role — never the shared
+  application role, and fail-closed about it.** `scripts/init-agent-runtime-db.sh`
+  provisions a separate `agent_runtime` PostgreSQL role/schema
+  (hardened with `NOSUPERUSER`/`NOCREATEDB`/`NOCREATEROLE`/
+  `NOREPLICATION`/`NOBYPASSRLS`/`NOINHERIT`) on the same database.
+  `user`/`schema` are an architectural constant, not an operator
+  tuning knob: the service refuses to start if either is configured to
+  anything other than `agent_runtime`, and its own live connection
+  identity (`current_user`/`current_schema`/`search_path`) is
+  independently exposed via `/health/ready` and re-confirmed against
+  the real running process — not just at startup-config time. Proven,
+  by a real PostgreSQL test connecting AS that role: it can use its
+  own schema, and it is denied (`permission denied`) on `SELECT`/
+  `UPDATE`/`INSERT` against `reliability.incidents`/
+  `reliability.incident_events` and `SELECT` on
+  `reliability.retrieval_chunks`.
+- **`run_id` is the thread id; `incident_id` lives in state.** Every
+  agent run gets its own server-generated UUID `run_id`
+  (`== thread_id`) — never the incident id — so the same incident can
+  have many independent, separately-addressable runs.
+- **Free-text incident fields are bounded and redacted before they are
+  ever persisted.** `title`/`description` have no length bound in
+  `reliability.incidents`'s own schema; `load_incident` bounds them
+  (`AGENT_RUNTIME_MAX_INCIDENT_TEXT_LENGTH`) and redacts common
+  credential-shaped patterns before they enter durable graph state —
+  this service's own small, independently-tested equivalent of
+  investigator-service's own redaction discipline, not a shared
+  runtime dependency on it.
+- **Still read-only orchestration — proven structurally.** No write
+  HTTP verb anywhere in its control-plane or investigator-service
+  client code, no `CONTROL_PLANE_WEBHOOK_TOKEN`/
+  `CONTROL_PLANE_LIFECYCLE_TOKEN`, no `docker`/`subprocess`/
+  `kubernetes`/cloud-SDK import, no reference to control-plane's
+  lifecycle `PATCH` path or Alertmanager's webhook path anywhere in
+  the service — AST-checked, not just asserted. Shape-validation
+  failures from either upstream never leak the raw field value (never
+  `str(ValidationError)`, never the raw response body) into a raised
+  exception, `error_detail`, or the API response — only a fixed,
+  generic contract-violation message.
+- **Honest about its one real limitation.** At-least-once, not
+  exactly-once, external-call semantics around a crash (§10 of the
+  architecture doc) — safe today only because every Phase 7 node is
+  read-only/computational; this is exactly why Phase 8's remediation
+  work needs its own, separate idempotency design.
+
+```bash
+make agent-runtime-build     # builds the image (also built automatically by `make db-up`)
+make agent-runtime-test      # focused unit tests, no Docker/network needed
+make verify-agent-runtime    # real-evidence acceptance gate: durable runs, DB role isolation, restart persistence, no mutation
+make test-db-up-order        # static (no Docker) proof that db-up provisions the checkpoint credential before the container is created
+```
+
+**Not implemented in this phase (explicitly out of scope — see the
+dedicated doc's known limitations and Phase 8 boundary):** human
+approval, LangGraph `interrupt()`, any remediation execution, restart/
+rollback/scale actions against any application service, checkpoint
+retention/pruning policy, a frontend, and Kubernetes/Terraform/AWS
+deployment.
 
 ## Developer Commands
 
@@ -5807,3 +5925,342 @@ problem today.
     available in this environment. The Compose stack was left running
     with the real indexed corpus in place; no historical incident or
     audit row was touched by any step in this phase.
+
+### Phase 7 — Durable LangGraph Agent Runtime and Investigation Orchestration
+
+- **A new, eighth backend service, `services/agent-runtime-service`**
+  (Python 3.13 / FastAPI / LangGraph, same Dockerfile/pyproject
+  conventions as the other services), structured into `graph/`
+  (`state.py`'s explicit `TypedDict`, `nodes.py`'s four node
+  closures + deterministic `classify_investigation`, `build.py`'s
+  `StateGraph` wiring), `clients/` (one-method `control_plane.py`/
+  `investigator.py` doubles of control-plane's and investigator-
+  service's own response shapes, `extra="ignore"`), `checkpointer.py`
+  (`CheckpointStore`, owning the one real `AsyncPostgresSaver`
+  connection), `api/agent_runs.py` (the 4-endpoint contract) and
+  `api/health.py`.
+- **Exact, verified-not-guessed LangGraph versions**:
+  `langgraph==1.2.15`, `langgraph-checkpoint==4.3.0`,
+  `langgraph-checkpoint-postgres==3.2.0`, `psycopg[binary,pool]==3.3.6`
+  — confirmed mutually compatible by direct installation, confirmed
+  `AsyncPostgresSaver` is genuinely psycopg3-based (an initial
+  asyncpg-based assumption was wrong and corrected before any
+  application code was written) by reading its real source.
+- **A small, real four-node graph, never a fabricated architecture**:
+  `START -> load_incident -> run_investigation ->
+  evaluate_investigation -> finalize -> END`. `run_investigation` calls
+  investigator-service's existing, already read-only/computational
+  `POST /api/v1/investigations` — Phase 5/6's evidence collection and
+  RAG retrieval are never duplicated here.
+  `evaluate_investigation` is a deterministic classification
+  (well_supported/inconclusive/partial — renamed from "conclusive" in
+  the correction round below) over already-validated structured fields
+  the investigation already produced — never a second LLM call.
+- **`run_id` is the thread id — never `incident_id`.** Every agent
+  run gets its own server-generated UUID; the same incident can have
+  many independent, separately-addressable runs — proven directly
+  (two creation requests for the same incident return two distinct
+  `run_id`s).
+- **A dedicated, least-privileged PostgreSQL role/schema — never the
+  shared `POSTGRES_USER` role.** `scripts/init-agent-runtime-db.sh`
+  (idempotent, bash -n clean, never prints the generated password,
+  reuses rather than regenerates an existing one) provisions a real
+  `agent_runtime` role owning its own `agent_runtime` schema, with
+  `ALTER ROLE ... SET search_path TO agent_runtime` (so LangGraph's
+  own unqualified-name `setup()` tables land there, not `public`/
+  `reliability`) and explicit, defense-in-depth `REVOKE ALL` on the
+  `reliability` schema and its tables. Proven, by a real PostgreSQL
+  test connecting AS that role (`tests/test_db_privilege_boundary.py`,
+  real-database-gated, fails closed via `AGENT_RUNTIME_REQUIRE_REAL_DB`):
+  it CAN use its own `agent_runtime.checkpoints`; it is DENIED
+  (`permission denied`) on `SELECT`/`UPDATE reliability.incidents`,
+  `SELECT reliability.retrieval_chunks`, and any mutation of
+  `reliability.incident_events`.
+- **Real checkpoint durability, proven by destroying the Python
+  process, not just asserting it.** `tests/test_checkpoint_durability.py`
+  (real-database-gated, using the service's own real `build_graph`/
+  `compile_graph`): creates runtime instance A, runs the real graph far
+  enough to create real checkpoints, injects a genuinely unclassified
+  failure (an uncaught `RuntimeError` — exactly what a real process
+  crash looks like to LangGraph), destroys instance A completely
+  (`del` on every object), creates a brand-new runtime instance B
+  against the same PostgreSQL, resumes the same thread, and confirms
+  prior progress was recovered from durable PostgreSQL state alone
+  (instance A no longer exists) and the graph reaches completion.
+- **Resume is real LangGraph resume, precisely defined.** Resumability
+  is exactly the real checkpoint's own `next` tuple: non-empty (a
+  genuine mid-execution stop) is resumable via
+  `ainvoke(None, config, durability="sync")`; empty (a terminal
+  `finalize`, `completed` or `failed`) returns an explicit `409`
+  rather than silently relying on LangGraph's own safe no-op on a
+  completed thread — repeatable safely, never re-executes
+  `run_investigation` again.
+- **Safe API surface, closed Pydantic contracts throughout.**
+  `POST /api/v1/agent-runs` (`extra="forbid"` — a caller-supplied
+  `run_id`/`thread_id` is rejected with `422`),
+  `GET /api/v1/agent-runs/{id}`, `GET .../history` (bounded, safe
+  checkpoint metadata only — step/checkpoint id/node/status/timestamp/
+  next node(s), never a raw checkpoint blob), `POST .../resume`.
+  Unknown `run_id`: `404` across all three read/resume endpoints.
+- **Read-only/no-remediation boundary, proven structurally (AST),
+  not just documented.** No write HTTP verb anywhere in
+  `clients/control_plane.py` or `clients/investigator.py`; no
+  `CONTROL_PLANE_WEBHOOK_TOKEN`/`CONTROL_PLANE_LIFECYCLE_TOKEN`/
+  `POSTGRES_USER`/`POSTGRES_PASSWORD` string literal anywhere in the
+  service; no reference to control-plane's lifecycle `PATCH` path or
+  Alertmanager's webhook path; no `docker`/`subprocess`/`kubernetes`/
+  `boto3`/`botocore` import; no `asyncpg`/`sqlalchemy` import (its only
+  database access is `psycopg`, to its own schema); no real-code
+  string literal naming `reliability.incidents`/
+  `reliability.incident_events`/`reliability.retrieval_chunks`
+  anywhere in the service.
+- **`scripts/verify-agent-runtime.sh` / `make verify-agent-runtime`** —
+  sources `verify-rag.sh` (which itself sources
+  `verify-investigator.sh`) for its reusable helpers rather than
+  duplicating them; placed after the Phase 6 gate in CI, reusing the
+  same real incident and the same `PHASE5_FRESHNESS_CHECKPOINT`.
+  Run against the real stack in this environment: the dedicated
+  `agent_runtime` role/schema confirmed provisioned and usable; the
+  real privilege-boundary denial confirmed live (not just in pytest);
+  a real durable agent run created, reaching `completed` with real
+  Phase 6 RAG provenance (3 knowledge, 3 historical, `outcome="ok"`)
+  through the real control-plane + investigator-service pipeline
+  (deterministic stub LLM provider); safe execution history inspected
+  (6 real durable checkpoints); resuming the completed run rejected
+  (`409`, twice); unknown `run_id` confirmed `404` across GET/history/
+  resume; **`agent-runtime-service` container actually restarted**,
+  and the identical run/report/history confirmed retrievable
+  afterward, still refusing to re-execute; the reused incident's row
+  and complete audit trail, and global `reliability.incidents`
+  (79)/`reliability.incident_events` (153) row counts, confirmed
+  byte-for-byte/exactly unchanged throughout.
+  - **Final validation:** `make agent-runtime-test` — **53/53 passed,
+    7 skipped** (the 7 real-database-gated tests, correctly skipping
+    with no real database configured); the same suite with
+    `AGENT_RUNTIME_REQUIRE_REAL_DB=true` against the real stack —
+    **60/60 passed, 0 skipped**; `make investigator-test` —
+    **150/150 passed** (Phase 5 regression, unaffected);
+    `make retrieval-test` — **66/66 passed, 2 skipped** (Phase 6
+    regression, unaffected); `bash -n` on both new scripts;
+    `python3 -m py_compile` across every new/changed Python file;
+    `docker compose config`; `git diff --check`; a real
+    `make verify-agent-runtime` run — **passed**, in historical/local
+    mode (no `PHASE5_FRESHNESS_CHECKPOINT` set locally, since this was
+    run standalone rather than via the full CI job). The Compose stack
+    was left running; no historical incident or audit row was touched
+    by any step in this phase; investigator-service's provider mode
+    was restored to its original value and that restoration was
+    actively verified, not assumed.
+
+#### Phase 7 correction round
+
+An independent review of the Phase 7 source archive found 16 issues,
+all confirmed against the actual implementation and fixed in a single
+correction pass (nothing committed in between — Phase 7 remained fully
+uncommitted throughout both rounds):
+
+- **Fresh-start DB credential race, fixed.** `make db-up` previously
+  ran the FULL `docker compose up -d` (creating agent-runtime-service
+  with whatever password already happened to be in `.env`) before
+  `scripts/init-agent-runtime-db.sh` ever wrote the real one. Reordered:
+  `docker compose up -d postgres` → provision the role/password →
+  THEN the full `docker compose up -d`. `docker-compose.yml`'s own
+  comment, which incorrectly claimed this degrades to a graceful
+  not-ready state, is corrected: `main.py`'s `lifespan` awaits the
+  checkpoint connection directly and uncaught, so a bad credential
+  fails ASGI startup outright (deliberate fail-fast — durable
+  PostgreSQL is this service's core dependency). New static (no
+  Docker) regression test: `scripts/test-db-up-order.sh` /
+  `make test-db-up-order`.
+- **The core architectural fix: the caller now holds a durable
+  `run_id` BEFORE any fallible graph work begins.** `POST /api/v1/agent-runs`
+  previously executed the entire graph synchronously — a crash during
+  that first execution left a valid, resumable checkpoint the caller
+  could never learn the `run_id` for. Fixed by splitting creation from
+  execution: `create_agent_run` now seeds a durable initial checkpoint
+  only, via LangGraph's own `aupdate_state(config, state, as_node=START)`
+  (verified directly against the installed LangGraph version — no
+  external call happens, `next` correctly already points at
+  `load_incident`); `POST .../resume` is what actually executes/
+  continues the graph — the SAME real LangGraph operation for "run for
+  the first time" and "recover after a crash," so no second,
+  hand-rolled workflow engine was added.
+- **Transient dependency failures are now genuinely resumable, not
+  silently permanent.** `ControlPlaneUnavailableError`/
+  `InvestigatorUnavailableError` were previously caught and routed to a
+  terminal `finalize` — a transient outage permanently failed the run.
+  Fixed: both are now deliberately left UNCAUGHT by the graph nodes
+  (the last successfully committed checkpoint remains the resume
+  point), and translated ONLY at the API layer into a safe, generic,
+  fixed `503` (never the raw exception, never a persisted failure).
+  `IncidentNotFoundError` and the new `ControlPlaneOutputError`/
+  `InvestigatorOutputError` (a 2xx response with an incompatible
+  shape) remain terminal, by explicit, documented design.
+- **Raw control-plane incident text is now bounded and redacted before
+  persistence.** Independent review reproduced a 5000-character title
+  and an unredacted `"Bearer TOPSECRET"` description both being
+  persisted unchanged (`reliability.incidents` imposes no text-length
+  bound). Fixed via a new, locally-implemented, independently-tested
+  `text_safety.bound_and_redact` (never an import of
+  investigator-service's own redaction internals — separate
+  deployables), bounded by `AGENT_RUNTIME_MAX_INCIDENT_TEXT_LENGTH`.
+- **Pydantic `ValidationError` no longer leaks upstream field values.**
+  Independent review reproduced a fake `sk-...` secret appearing
+  verbatim in `str(InvestigatorOutputError)` (pydantic's own
+  `ValidationError.__str__` includes each failing field's
+  `input_value`). Fixed in both `clients/investigator.py` and
+  `clients/control_plane.py` (which previously had no shape-failure
+  handling at all): a fixed, generic message; only safe metadata
+  (exception class, error count, HTTP status) is ever logged.
+- **The dedicated DB role/schema identity now fails closed.**
+  `AGENT_RUNTIME_DB_USER=postgres` was previously silently accepted,
+  which could make the real privilege-boundary proof (always
+  hardcoded to `agent_runtime`) refer to a role the live service didn't
+  actually use. Fixed: `CheckpointDbSettings.from_env()` now refuses to
+  start if either `AGENT_RUNTIME_DB_USER`/`AGENT_RUNTIME_DB_SCHEMA` is
+  set to anything other than `agent_runtime`;
+  `scripts/init-agent-runtime-db.sh` rejects rather than preserves a
+  divergent existing value; and the RUNNING service's own live
+  connection identity is now independently exposed via
+  `/health/ready` (`checkpointer.CheckpointStore.identity()`) and
+  verified against the real stack.
+- **The REVOKE security claim is corrected; the role is further
+  hardened.** The init script previously claimed its `REVOKE`
+  statements guard against a future grant to `PUBLIC` — incorrect;
+  PostgreSQL privilege composition is additive, and a direct `REVOKE`
+  cannot override a grant arriving through `PUBLIC` or an inherited
+  role. The REVOKEs remain (real defense in depth against a direct
+  future grant); the claim about what they guarantee is corrected, and
+  the role now also gets explicit `NOSUPERUSER`/`NOCREATEDB`/
+  `NOCREATEROLE`/`NOREPLICATION`/`NOBYPASSRLS`/`NOINHERIT` attributes.
+- **The Phase 7 no-mutation proof is strengthened with real content
+  fingerprints.** `scripts/verify-agent-runtime.sh` previously compared
+  only the one selected incident byte-for-byte plus both tables' ROW
+  COUNTS — a mutation to some other row could in principle preserve
+  the count. Added: a real, deterministic full-content fingerprint
+  (`md5(string_agg(row_to_json(t)::text, '|' ORDER BY t.id))`) over
+  every row of `reliability.incidents`/`reliability.incident_events`,
+  captured before and after the entire run, required exactly equal.
+  (Phase 6's own script was explicitly NOT touched.)
+- **The real-stack acceptance now proves resumability through the
+  PUBLIC API, not just storage persistence.** Added: a real transient
+  investigator-service outage (stopped mid-run) proven resumable via
+  `resume` → `503` → `GET` still resumable, **agent-runtime-service
+  restarted while the run is still incomplete** and confirmed to
+  survive byte-for-byte, then investigator-service restored and the
+  same `run_id` resumed to completion with
+  `completed_nodes.count("load_incident") == 1` (no re-execution).
+- **`evaluate_investigation`'s classification no longer implies a
+  confirmed root cause.** `"conclusive"` could previously be reached by
+  any evidence-backed hypothesis regardless of the model's own declared
+  `confidence` (including `"low"`). Renamed to `well_supported` /
+  `inconclusive` / `partial`; `well_supported` now additionally
+  requires `confidence="high"` on the supporting hypothesis — this
+  remains orchestration metadata only and does not alter
+  investigator-service's own Phase 5/6 epistemic boundary.
+- **A real `INSERT` privilege-denial test was added** (the
+  architecture doc claimed it; only `UPDATE`/`DELETE` were previously
+  tested) — both in `test_db_privilege_boundary.py` and live against
+  the real stack.
+- **Connection-string encoding fixed.** A naive f-string/URI build
+  would silently break on a password containing `@`/`:`/`/`/`?`/`#`;
+  now built via `psycopg.conninfo.make_conninfo(...)`, verified to
+  round-trip every one of those reserved characters correctly.
+- **An overclaimed attempt-count recoverability statement was
+  corrected** in `graph/state.py`'s own docstring: checkpoint history
+  can only ever undercount node executions (never overcount), so it is
+  not, in general, a complete exact attempt counter — `attempt_counts`
+  remains correctly omitted, for a narrower, honest reason.
+- **Final validation after the correction round:** `make agent-runtime-test`
+  — **78/78 passed, 8 skipped** (isolated); the same suite with
+  `AGENT_RUNTIME_REQUIRE_REAL_DB=true` — **86/86 passed, 0 skipped**
+  (against the real stack); `make investigator-test` — **150/150
+  passed** (Phase 5 regression, unaffected); `make retrieval-test` —
+  **66/66 passed, 2 skipped** (Phase 6 regression, unaffected);
+  `make test-db-up-order` — **passed**; `bash scripts/verify-investigator.sh`
+  and `bash scripts/verify-rag.sh` — both **passed**, unmodified; a
+  real `make verify-agent-runtime` run (including the new transient-
+  outage/mid-flight-restart scenario and the content-fingerprint
+  proof) — **passed**, run twice for idempotency; `bash -n` on every
+  changed/new script; `python3 -m py_compile` across every
+  new/changed Python file; `docker compose config`; `git diff --check`;
+  `make help`. The Compose stack was left running (full stack, all 16
+  services healthy); no historical incident or audit row was touched;
+  investigator-service's provider mode was restored and that
+  restoration actively verified, not assumed.
+
+#### Phase 7 final small correction round
+
+A further independent review of the corrected source found 6 smaller
+remaining issues (plus 4 comment-only precision cleanups); all
+confirmed and fixed without touching the corrected architecture from
+the round above:
+
+- **Text bounds are now REAL hard bounds.** The truncation pattern
+  `redacted[:max_chars] + "...[truncated]"` appended its suffix AFTER
+  slicing — independent review reproduced `max_chars=2000` actually
+  persisting a 2014-character string. Fixed via a new, single,
+  independently-tested `text_safety.hard_bound` (reserves space for the
+  suffix first), used by both `text_safety.bound_and_redact` and
+  `graph/nodes.py::_safe_detail`. Tests now assert
+  `len(value) <= configured_max`, never `configured_max + len(suffix)`.
+- **`source`/`source_fingerprint` are now bounded/redacted too.** Only
+  `title`/`description` were covered; control-plane's Alertmanager
+  model requires a non-empty `source_fingerprint` but imposes no
+  maximum length, and independent review reproduced a `"Bearer
+  TOPSECRET"`-prefixed, 5000+ character fingerprint persisted
+  completely untouched. Fixed identically to `title`/`description`;
+  `id`/`status`/`severity`/timestamps remain deliberately untouched.
+- **`investigation_report` now has a hard serialized-SIZE ceiling.**
+  Phase 5/6 bound individual evidence/prompt fields but impose no
+  ceiling on the investigator's output as a whole. Added
+  `AGENT_RUNTIME_MAX_INVESTIGATION_REPORT_BYTES` (default 512 KiB,
+  clamped `[10_000, 5_000_000]`, chosen with ~25x headroom over a real
+  ~20.8 KB report measured against this environment's own live stack);
+  `graph/nodes.py::run_investigation` measures the validated report's
+  own `model_dump_json()` byte length and rejects an oversized one as
+  a TERMINAL failure (`error_code="investigator_output_too_large"`,
+  distinct from `InvestigatorUnavailableError` — a connectivity
+  success with an unacceptable persistence shape, not an outage) —
+  `error_detail` contains only byte counts, never the oversized
+  content.
+- **The real privilege-boundary test now uses safe conninfo building
+  too.** `test_db_privilege_boundary.py` still built its own connection
+  string with a naive f-string even after the application switched to
+  `psycopg.conninfo.make_conninfo` — a password with a reserved URI
+  character could make the TEST fail even though the real application
+  connection works. Fixed to use the same safe builder.
+- **Comment-only precision cleanups (no behavior change):**
+  `graph/state.py`'s `result_quality` comment still said `"conclusive"`
+  (now `"well_supported"`); `test_checkpoint_durability.py`'s own
+  docstring still described `InvestigatorUnavailableError` as routed to
+  a terminal failed state (now describes it as deliberately uncaught/
+  retryable, with the test's own raw `RuntimeError` injection
+  explained as simulating an unclassified crash specifically); that
+  same test's claim of proving survival across "a different Python
+  process" is corrected to describe exactly what it proves (object
+  destruction/recreation within the same test interpreter, with
+  `scripts/verify-agent-runtime.sh` named as the real separate-
+  process/container proof); the architecture doc's concurrency
+  limitation is widened from "multiple processes" to also cover
+  concurrent requests within one process.
+- **New, honest limitation documented (no fix, by design):** a run
+  whose durable seed commits successfully but whose HTTP response is
+  lost before the caller receives the `201` leaves an orphaned,
+  unresumable-by-the-caller checkpoint (no idempotency key, no listing
+  endpoint yet) — an ordinary distributed-systems edge case, explicitly
+  left for a future API/idempotency/operations phase.
+- **Final validation:** `make agent-runtime-test` — **87/87 passed, 8
+  skipped** (isolated); the same suite with
+  `AGENT_RUNTIME_REQUIRE_REAL_DB=true` — **95/95 passed, 0 skipped**
+  (against the real stack); `make investigator-test` — **150/150
+  passed** (Phase 5 regression, unaffected); `make retrieval-test` —
+  **66/66 passed, 2 skipped** (Phase 6 regression, unaffected); a real
+  `make verify-agent-runtime` run — **passed**, run twice for
+  idempotency; `bash scripts/verify-investigator.sh` and
+  `bash scripts/verify-rag.sh` — both **passed**, unmodified; `bash -n`
+  on every script; `python3 -m py_compile` across every changed Python
+  file; `docker compose config`; `git diff --check`; CI YAML parse;
+  `make help`. The Compose stack was left running; no historical
+  incident or audit row was touched; investigator-service's provider
+  mode was restored and that restoration actively verified.

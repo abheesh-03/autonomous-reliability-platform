@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-runtime-service"
+version = "0.1.0"
+description = "Phase 7 durable LangGraph agent runtime for the Autonomous Production Reliability Platform. Owns a small, explicit StateGraph (load_incident -> run_investigation -> evaluate_investigation -> finalize) backed by a real, durably-checkpointed PostgreSQL store (langgraph-checkpoint-postgres), under its own least-privileged database role/schema. Strictly read-only/computational orchestration: calls control-plane's existing GET APIs and investigator-service's existing POST /api/v1/investigations only -- never a control-plane write endpoint, never remediation, never shell/Docker/Kubernetes/AWS access."
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi==0.142.2",
+    "uvicorn==0.54.0",
+    "pydantic==2.13.5",
+    "httpx==0.28.1",
+    # Pinned together and confirmed mutually compatible (and compatible
+    # with this service's own fastapi/pydantic/httpx pins above) before
+    # being adopted -- see docs/architecture/phase-7-durable-agent-runtime.md's
+    # "why these exact versions" note. langgraph-checkpoint-postgres's
+    # own AsyncPostgresSaver is psycopg3-based (confirmed directly
+    # against its real source, not assumed) -- NOT asyncpg, unlike
+    # control-plane/retrieval-service's own database access.
+    "langgraph==1.2.15",
+    "langgraph-checkpoint==4.3.0",
+    "langgraph-checkpoint-postgres==3.2.0",
+    "psycopg[binary,pool]==3.3.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

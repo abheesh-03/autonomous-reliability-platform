@@ -24,13 +24,17 @@ jobs:
     # Raised from 40: Phase 6's own step (indexing + search + one more
     # RAG-integrated investigation) measured well under a minute
     # locally, but a generous margin is kept for CI runner variance.
-    timeout-minutes: 45
+    # Raised from 45: Phase 7 adds a real PostgreSQL checkpoint-
+    # durability/privilege-boundary test step plus its own real
+    # acceptance gate (agent run creation, restart, resume) -- measured
+    # well under two minutes combined locally, generous margin kept.
+    timeout-minutes: 50
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh
 
       - name: Verify Makefile is usable
         run: make help
@@ -42,6 +46,15 @@ jobs:
       # docker stubbed. See scripts/test-simulate-failure.sh.
       - name: Run failure-simulation focused tests (Phase 4)
         run: make test-failure-simulation
+
+      # Phase 7 correction round (finding #1): a static, no-Docker
+      # regression test proving db-up's recipe provisions
+      # agent-runtime-service's real checkpoint-database credential
+      # BEFORE the full `docker compose up -d` that actually CREATES
+      # that container -- see scripts/test-db-up-order.sh and the
+      # Makefile's own db-up ordering comment.
+      - name: Run db-up ordering focused test (Phase 7)
+        run: make test-db-up-order
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -119,6 +132,25 @@ jobs:
 
       - name: Run retrieval-service tests
         working-directory: services/retrieval-service
+        run: pytest -v
+
+      # Phase 7: unit tests only -- fake control-plane/investigator
+      # client doubles and InMemorySaver (Phase 7 §LANGGRAPH: allowed
+      # for focused unit tests where persistence is not under test;
+      # see services/agent-runtime-service/tests/), never a real
+      # database connection. Reuses the same Python 3.13 setup above.
+      # AGENT_RUNTIME_REQUIRE_REAL_DB is intentionally NOT set here, so
+      # the real-database tests (test_db_privilege_boundary.py,
+      # test_checkpoint_durability.py) skip cleanly -- PostgreSQL
+      # doesn't exist yet at this point in the job. See the dedicated
+      # real-database step further below, after Phase 3A migrations are
+      # applied and the agent_runtime role/schema are provisioned.
+      - name: Install agent-runtime-service dependencies
+        working-directory: services/agent-runtime-service
+        run: pip install -e ".[dev]"
+
+      - name: Run agent-runtime-service tests
+        working-directory: services/agent-runtime-service
         run: pytest -v
 
       - name: Set up Go 1.27
@@ -250,6 +282,39 @@ jobs:
       # own health waits, since it is independent of them.
       - name: Verify persistence (Phase 3A)
         run: ./scripts/verify-persistence.sh
+
+      # Phase 7: provisions the dedicated, least-privileged
+      # `agent_runtime` PostgreSQL role/schema (never the broad
+      # POSTGRES_USER/POSTGRES_PASSWORD role) -- see
+      # scripts/init-agent-runtime-db.sh. Requires PostgreSQL already
+      # healthy and the Flyway migrations already applied (the Phase 3A
+      # step just above), since this script issues real SQL via
+      # `docker compose exec`. Idempotent; safe to rerun.
+      - name: Initialize agent-runtime checkpoint database (Phase 7)
+        run: ./scripts/init-agent-runtime-db.sh
+
+      # Phase 7: a dedicated, REAL PostgreSQL proof -- never mocked --
+      # that (1) the agent_runtime role is genuinely denied SELECT/
+      # UPDATE on reliability.incidents, SELECT on
+      # reliability.retrieval_chunks, and any mutation of
+      # reliability.incident_events (test_db_privilege_boundary.py),
+      # and (2) a real LangGraph checkpoint survives destroying and
+      # recreating the Python runtime instance and resumes to
+      # completion from durable PostgreSQL state alone, not local
+      # process memory (test_checkpoint_durability.py). Uses the
+      # service's own real build_graph/compile_graph, not a toy graph.
+      # AGENT_RUNTIME_REQUIRE_REAL_DB=true makes this step FAIL
+      # outright (never silently skip) if the database is somehow
+      # unavailable here -- unlike the earlier "Run agent-runtime-
+      # service tests" step above, which runs before PostgreSQL even
+      # exists and is expected to skip these same tests.
+      - name: Verify real-database checkpoint durability and privilege boundary (Phase 7)
+        working-directory: services/agent-runtime-service
+        run: |
+          set -a
+          . ../../.env
+          set +a
+          AGENT_RUNTIME_REQUIRE_REAL_DB=true pytest tests/test_db_privilege_boundary.py tests/test_checkpoint_durability.py -v
 
       # Phase 6 correction round: a dedicated, REAL PostgreSQL
       # transaction-rollback regression -- never mocked -- proving
@@ -867,6 +932,23 @@ jobs:
         timeout-minutes: 10
         run: bash scripts/verify-rag.sh
 
+      # Phase 7: the durable LangGraph agent-runtime acceptance gate.
+      # Deliberately placed AFTER the Phase 6 gate above, reusing the
+      # exact same real, already-persisted, resolved
+      # CheckoutServerErrors incident (and the SAME
+      # PHASE5_FRESHNESS_CHECKPOINT captured once, before Phase 4) --
+      # no new outage, no new checkpoint mechanism. Sources
+      # scripts/verify-rag.sh (which itself sources
+      # scripts/verify-investigator.sh) for its reusable helpers rather
+      # than duplicating them. Uses the same deterministic stub LLM
+      # provider machinery as Phase 5/6 (forced temporarily, restored
+      # and verified afterward) -- no credentials configured or
+      # required in CI. See scripts/verify-agent-runtime.sh and
+      # docs/architecture/phase-7-durable-agent-runtime.md.
+      - name: Verify agent runtime (Phase 7)
+        timeout-minutes: 10
+        run: bash scripts/verify-agent-runtime.sh
+
       - name: Show service logs
         if: always()
         run: |
@@ -875,6 +957,7 @@ jobs:
           docker compose logs --tail=100 checkout-service
           docker compose logs --tail=100 investigator-service
           docker compose logs --tail=100 retrieval-service
+          docker compose logs --tail=100 agent-runtime-service
           docker compose logs --tail=100 payment-service
           docker compose logs --tail=100 inventory-service
           docker compose logs --tail=100 notification-service

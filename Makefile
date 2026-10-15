@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation verify-investigator test-verify-investigator-restore investigate
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -53,6 +53,11 @@ help: ## Show available targets
 	@echo "  verify-investigator Phase 5 real-evidence acceptance: investigate a real persisted incident, verify no mutation"
 	@echo "  test-verify-investigator-restore Phase 5 focused tests: provider-restoration logic on_exit (no Docker required)"
 	@echo "  investigate         Request a real investigation: make investigate INCIDENT_ID=<existing incident UUID>"
+	@echo "  agent-runtime-build Build the agent-runtime-service Docker image"
+	@echo "  agent-runtime-test  Run agent-runtime-service unit tests on Python 3.13 (via Docker)"
+	@echo "  agent-runtime-logs  Show recent agent-runtime-service logs"
+	@echo "  verify-agent-runtime Phase 7 real-evidence acceptance: durable LangGraph agent runs, dedicated DB role isolation, restart persistence, no mutation"
+	@echo "  test-db-up-order    Phase 7 focused test: db-up's recipe provisions the checkpoint DB credential before agent-runtime-service is created (no Docker required)"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -60,8 +65,36 @@ check: ## Verify local developer prerequisites
 compose-config: ## Validate docker-compose.yml
 	docker compose config
 
+# Phase 7 correction round (finding #1): agent-runtime-service's real
+# checkpoint-database credential (AGENT_RUNTIME_DB_PASSWORD) MUST exist
+# in .env BEFORE Docker Compose ever CREATES that container -- Compose
+# resolves a service's `environment:` at container-creation time, and
+# rewriting .env afterward does NOT change an already-created
+# container's environment (it would require recreating it). The
+# previous ordering (full `docker compose up -d` THEN
+# init-agent-runtime-db.sh) created agent-runtime-service with
+# whatever (possibly empty/stale) password happened to already be in
+# .env, which fails its startup outright on a fresh checkout (see
+# docker-compose.yml's own comment on agent-runtime-service for why
+# this fails fast rather than degrading gracefully). Corrected order:
+#   1. webhook/lifecycle secrets (host-file-only, no container involved)
+#   2. bring up ONLY postgres (the one real dependency
+#      init-agent-runtime-db.sh itself needs)
+#   3. provision the real agent_runtime role/password into .env
+#      (idempotent; this script's own bounded pg_isready loop is a
+#      belt-and-suspenders backstop, not the primary readiness
+#      mechanism -- step 2's `docker compose up -d postgres` already
+#      waits for Compose to report the container created, and the
+#      script polls pg_isready itself before running real SQL)
+#   4. bring up the REST of the stack -- by this point .env already
+#      has the real password, so agent-runtime-service is CREATED with
+#      it from the start
+# See scripts/test-db-up-order.sh for a static (no-Docker) regression
+# test proving this exact ordering in this target.
 db-up: ## Start the Compose environment (docker compose up -d)
 	./scripts/init-webhook-secret.sh
+	docker compose up -d postgres
+	./scripts/init-agent-runtime-db.sh
 	docker compose up -d
 	@echo "Compose environment started. Run 'make db-status' to check health before using it."
 
@@ -337,3 +370,31 @@ investigate: ## Request a real investigation: make investigate INCIDENT_ID=<exis
 	curl -sS -X POST http://127.0.0.1:8001/api/v1/investigations \
 		-H "Content-Type: application/json" \
 		-d '{"incident_id": "$(INCIDENT_ID)"}' | python3 -m json.tool
+
+agent-runtime-build: ## Build the agent-runtime-service Docker image
+	docker compose build agent-runtime-service
+
+# Same convention as investigator-test/retrieval-test: unit tests only,
+# against fake/stub client doubles and InMemorySaver (Phase 7 §LANGGRAPH:
+# allowed for focused unit tests where persistence is not under test) --
+# never a real database connection. Run `make verify-agent-runtime` for
+# the real, running-stack integration check (including the real,
+# dedicated-role PostgreSQL checkpoint durability proof).
+agent-runtime-test: ## Run agent-runtime-service unit tests on Python 3.13 (via Docker)
+	docker run --rm -v "$(CURDIR)/services/agent-runtime-service:/app" -w /app python:3.13-slim \
+		bash -c "pip install -q -e '.[dev]' && pytest"
+
+agent-runtime-logs: ## Show recent agent-runtime-service logs
+	docker compose logs --tail=100 agent-runtime-service
+
+# Phase 7: the real-evidence acceptance gate. Deliberately placed after
+# verify-rag in both the Makefile ordering and CI, so it can reuse the
+# exact same real, already-persisted, resolved CheckoutServerErrors
+# incident those gates already produced/verified. See
+# scripts/verify-agent-runtime.sh and
+# docs/architecture/phase-7-durable-agent-runtime.md.
+verify-agent-runtime: ## Phase 7 real-evidence acceptance: durable LangGraph agent runs, dedicated DB role isolation, restart persistence, no mutation
+	./scripts/verify-agent-runtime.sh
+
+test-db-up-order: ## Phase 7 focused test: db-up's recipe provisions the checkpoint DB credential before agent-runtime-service is created (no Docker required)
+	./scripts/test-db-up-order.sh

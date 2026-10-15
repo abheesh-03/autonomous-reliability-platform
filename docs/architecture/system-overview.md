@@ -408,6 +408,41 @@ Full inventory:
   every pre-existing incident/audit row confirmed byte-for-byte
   unchanged across the swap. Full detail:
   [docs/architecture/phase-6-rag-retrieval.md](phase-6-rag-retrieval.md).
+- **Durable LangGraph agent runtime** (Phase 7,
+  `services/agent-runtime-service`): a new, eighth backend application,
+  wrapping — never duplicating — Phase 5/6's existing investigation
+  pipeline in a small, real, durable LangGraph `StateGraph`
+  (`load_incident -> run_investigation -> evaluate_investigation ->
+  finalize`), checkpointed to PostgreSQL after every node
+  (`AsyncPostgresSaver`, `durability="sync"`). `run_investigation`
+  calls investigator-service's existing, already read-only
+  `POST /api/v1/investigations` — Phase 5/6's evidence collection and
+  RAG retrieval are not reimplemented here. Every agent run gets its
+  own server-generated UUID `run_id` (used directly as the LangGraph
+  `thread_id`; `incident_id` lives inside graph state, never as the
+  thread id), so one incident can have many independent runs.
+  `POST /api/v1/agent-runs` seeds a durable initial checkpoint only
+  (no external call yet — the caller holds a durable `run_id` before
+  any fallible work begins); `POST /api/v1/agent-runs/{id}/resume`
+  is what actually executes/continues the graph, using LangGraph's own
+  real resume semantics, rejecting an already-terminal run with `409`.
+  A transient control-plane/investigator-service outage mid-resume is
+  translated into a safe `503` (never a persisted failure) and the run
+  remains resumable. A new `GET /api/v1/agent-runs/{id}`/`.../history`
+  lets a run's state and safe checkpoint history be inspected.
+  agent-runtime-service holds its own dedicated, least-privileged
+  PostgreSQL role/schema (`agent_runtime`, startup fails closed if
+  misconfigured, its live connection identity independently verifiable
+  via `/health/ready`) — never the shared `POSTGRES_USER` role, and
+  proven, by a real PostgreSQL test connecting as that role, to have
+  no access at all to `reliability.incidents`/
+  `reliability.incident_events`/`reliability.retrieval_chunks`. A real
+  process restart of agent-runtime-service was proven, against the
+  real stack, to lose nothing — including for a run that is still
+  genuinely incomplete, not just a completed one. This remains durable
+  **read-only orchestration only** — no remediation, no human
+  approval, no LangGraph `interrupt()` (all Phase 8). Full detail:
+  [docs/architecture/phase-7-durable-agent-runtime.md](phase-7-durable-agent-runtime.md).
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.
@@ -939,10 +974,19 @@ predecessor already exists — the AI incident investigator
 investigator](#read-only-ai-incident-investigator-phase-5) above):
 given one incident, it gathers real evidence once, calls an LLM once,
 and returns a report — no loop, no tool-calling, no autonomous
-decision to act. This planned runtime is what would add the ability to
-gather *more* evidence across multiple reasoning steps, use real tools
-to do so, and act on its own initiative (always still gated by human
-approval) — none of which Phase 5 implements.
+decision to act. As of **Phase 7**, the *durable execution substrate*
+this runtime needs now exists — `services/agent-runtime-service` (see
+the durable LangGraph agent runtime entry above): a real LangGraph
+`StateGraph`, checkpointed to PostgreSQL after every node, with
+explicit run identity, inspectable history, and real resume-after-crash
+semantics. What Phase 7 deliberately does **not** add yet is the
+*iterative, tool-using* part this section describes: its graph is a
+small, fixed, four-node sequence (not an LLM-directed loop), it never
+gathers additional evidence across multiple reasoning steps, it never
+calls a tool the LLM itself selected, and it never proposes or executes
+a remediation action — those remain this section's and Phase 8's
+future work, now with a durable foundation to build them on rather than
+from scratch.
 
 ### Infrastructure tool gateway
 A **Go** service that exposes a controlled, auditable set of operations for
