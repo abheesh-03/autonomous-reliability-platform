@@ -253,12 +253,20 @@ graph state instead. This means:
 ## 7. Checkpoint persistence
 
 The real runtime (`main.py`, via `checkpointer.py::CheckpointStore`)
-opens exactly one `AsyncPostgresSaver` via `from_conn_string(...)`
-(an `@asynccontextmanager` wrapping one `psycopg.AsyncConnection`,
-`autocommit=True`, `prepare_threshold=0`, `row_factory=dict_row`) and
-calls `.setup()` once at startup — idempotent, creates
-`checkpoint_migrations` / `checkpoints` / `checkpoint_blobs` /
-`checkpoint_writes` under this service's own dedicated schema (§8).
+owns a small, real `psycopg_pool.AsyncConnectionPool` (see the pool
+resilience fix below), passed directly to `AsyncPostgresSaver(pool)`
+— confirmed, by reading the installed, pinned
+`langgraph-checkpoint-postgres==3.2.0` source before adopting this,
+that `AsyncPostgresSaver.__init__`'s own `conn` parameter is typed as
+`AsyncConnection[DictRow] | AsyncConnectionPool[AsyncConnection[DictRow]]`
+and explicitly branches on `isinstance(conn, AsyncConnectionPool)` —
+real, intended, upstream-supported usage, never a hack. `.setup()` is
+called once at startup — idempotent, creates `checkpoint_migrations` /
+`checkpoints` / `checkpoint_blobs` / `checkpoint_writes` under this
+service's own dedicated schema (§8). Every connection the pool ever
+creates uses `autocommit=True`, `prepare_threshold=0`,
+`row_factory=dict_row` — the exact same connection kwargs the prior,
+single-connection design used.
 
 Every `ainvoke()` call (both the first real execution via `resume` and
 any later resume) passes `durability="sync"` — the strongest of
@@ -268,7 +276,53 @@ committed to PostgreSQL before the next node starts.
 back via `aget_state_history(...)` — not a single in-memory snapshot —
 and returns only safe metadata (step, checkpoint id, node, status,
 timestamp, next node(s)); it never exposes a raw checkpoint blob, a
-database internal, or a secret.
+database internal, or a secret. None of this changed by the pool fix
+below: `durability="sync"`, `run_id`/`thread_id` identity, create/
+resume behavior, and checkpoint history are all unchanged.
+
+**The checkpoint connection now survives a real PostgreSQL restart
+without restarting agent-runtime-service itself** (post-commit fix,
+GitHub Actions run #33). An earlier version opened exactly ONE
+`psycopg.AsyncConnection` via `AsyncPostgresSaver.from_conn_string(...)`
+and held it for the process's entire lifetime — not resilient to a
+real PostgreSQL restart, and this platform already performs one in
+normal acceptance operation: Phase 3E's own audit-durability
+verification runs a genuine `docker compose restart postgres` while
+agent-runtime-service is already running (unrelated to Phase 7, never
+reopened or modified here). `/health/live` correctly never depends on
+PostgreSQL, so the process stayed "alive"; but the one checkpoint
+connection was permanently killed
+(`psycopg.errors.AdminShutdown: terminating connection due to
+administrator command`), and `/health/ready` failed forever afterward
+— recoverable only by restarting agent-runtime-service itself, which
+CI #33 hit directly (`scripts/verify-agent-runtime.sh`'s very first
+`/health/ready` check returned `503` against a service that had been
+sitting next to an already-restarted `postgres` since the Compose
+stack came up). Fixed by replacing the single connection with the
+small `AsyncConnectionPool` above (`CheckpointDbSettings.pool_min_size`/
+`pool_max_size`, default 1/4, clamped `[1, 10]`,
+`AGENT_RUNTIME_DB_POOL_MIN_SIZE`/`AGENT_RUNTIME_DB_POOL_MAX_SIZE`,
+plus a bounded `pool_open_timeout_seconds`, default 10s,
+`AGENT_RUNTIME_DB_POOL_OPEN_TIMEOUT_SECONDS`) — `psycopg_pool`'s own
+pool already detects and discards a dead connection on its next
+checkout and transparently provides a fresh one; this is its own
+built-in resilience, never a custom reconnection framework written
+here. `ping()`/`identity()` were updated to draw a connection from
+`self._pool.connection()` (the pool's own public API) rather than
+reaching into `self.saver.conn.cursor()` directly, since `saver.conn`
+is now the pool itself, not a single connection.
+
+This is an intentionally **small** pool — Phase 7 is not a scalability
+phase, and this is not a claim of production-grade/horizontally-scaled
+connection pooling (§14). Empirically proven, against the real running
+stack, before and as part of this fix: killing the real `agent_runtime`
+role's own live backend (`pg_terminate_backend`, and separately a full
+`docker compose restart postgres`) reproduces the exact `AdminShutdown`
+CI #33 hit on the very next use, and the checkout immediately after
+that succeeds with a fresh, healthy connection — transparently, with
+no process restart — proven by
+`tests/test_checkpoint_pool_recovery.py` (real-database-gated) and
+live against the Compose stack (§13).
 
 **Startup is deliberately fail-fast, not degrade-gracefully**
 (correction round, finding #1). `main.py`'s `lifespan` awaits
@@ -610,15 +664,34 @@ per-request outcome, not a process-readiness concern.
 ## 13. Acceptance proof
 
 - **Unit tests** (`services/agent-runtime-service/tests/`, isolated,
-  no real database): **87 passed, 8 skipped** (the 8 skips are the
+  no real database): **90 passed, 9 skipped** (the 9 skips are the
   real-database-gated tests, correctly skipping when no real database
   is configured).
 - **Real PostgreSQL gate** (`AGENT_RUNTIME_REQUIRE_REAL_DB=true`,
-  against the live stack): **95 passed, 0 failed, 0 skipped** —
+  against the live stack): **99 passed, 0 failed, 0 skipped** —
   includes the full privilege-boundary proof (§8, now including a real
   `INSERT` denial and the live-identity-matches-settings proof,
   connecting via the same safe `make_conninfo` builder the real
-  application uses) and the full checkpoint durability proof below.
+  application uses), the full checkpoint durability proof below, and
+  the pool-recovery proof below.
+- **Checkpoint-pool recovery proof** (post-commit fix, GitHub Actions
+  run #33): `tests/test_checkpoint_pool_recovery.py` opens a real
+  `CheckpointStore` (its real pool, its real saver), confirms
+  `ping()`/`identity()` work and a real checkpoint can be written/read,
+  terminates the real `agent_runtime` role's own live PostgreSQL
+  backend (`pg_terminate_backend`, a genuine PostgreSQL "backend
+  restart" — reproducing the exact `AdminShutdown` CI #33 hit), and
+  proves -- using the SAME `CheckpointStore` object throughout, never
+  recreated, never a new Python process -- that readiness recovers
+  within a bounded retry, the recovered connection is still the
+  dedicated `agent_runtime` identity, the pre-existing checkpoint is
+  still readable, and a new checkpoint can still be written afterward.
+  Independently re-proven live against the real Docker Compose stack:
+  a real `docker compose restart postgres` while agent-runtime-service
+  kept running (same container, never recreated) produced the exact
+  `AdminShutdown` in its logs, `/health/ready` returned `503` once,
+  then `200` two seconds later with the correct identity — with no
+  manual intervention.
 - **Hard-bound proof** (follow-up finding #1): `tests/test_text_safety.py`
   proves `text_safety.hard_bound`'s own invariant directly (an
   over-max input never returns more than `max_chars`, including any
@@ -660,21 +733,28 @@ per-request outcome, not a process-readiness concern.
   `RuntimeError`.
 - **Process-restart + public-API resumability acceptance**
   (`scripts/verify-agent-runtime.sh`, against the real Docker Compose
-  stack, stub LLM mode, no paid API key): creates a durable agent run
-  (seed only, §9), stops investigator-service to force a REAL transient
-  outage, confirms `resume` returns a safe `503` and the run remains
-  resumable via `GET`, **restarts the real `agent-runtime-service`
-  container while the run is still genuinely incomplete** and confirms
-  its exact state survives byte-for-byte, restores investigator-service,
-  resumes the SAME `run_id` to completion through the real
-  control-plane + investigator-service + Phase 6 RAG pipeline
-  (confirming `load_incident` was never re-executed —
-  `completed_nodes.count("load_incident") == 1`), inspects safe
-  history, confirms `409` on resuming a completed run (twice), and
-  confirms `404` on an unknown run across GET/history/resume. Also
-  independently re-confirms the live service's own checkpoint
-  connection identity via `/health/ready` (§8) and the real `INSERT`
-  denial (§8) against this exact running stack.
+  stack, stub LLM mode, no paid API key): verifies readiness via a
+  **bounded retry** (`wait_agent_runtime_ready`, up to 20 attempts, 2s
+  apart — post-commit fix, GitHub Actions run #33: a single immediate
+  check is too strict for a real, reconnecting pool, and the acceptance
+  gate must never mask a permanently broken database either, hence the
+  bound), requiring a real `200` with `status=ready`,
+  `checkpoint_store.reachable=true`, AND the dedicated `agent_runtime`
+  identity — never merely `/health/live`. Then: creates a durable agent
+  run (seed only, §9), stops investigator-service to force a REAL
+  transient outage, confirms `resume` returns a safe `503` and the run
+  remains resumable via `GET`, **restarts the real
+  `agent-runtime-service` container while the run is still genuinely
+  incomplete** and confirms its exact state survives byte-for-byte,
+  restores investigator-service, resumes the SAME `run_id` to
+  completion through the real control-plane + investigator-service +
+  Phase 6 RAG pipeline (confirming `load_incident` was never
+  re-executed — `completed_nodes.count("load_incident") == 1`),
+  inspects safe history, confirms `409` on resuming a completed run
+  (twice), and confirms `404` on an unknown run across GET/history/
+  resume. Also independently re-confirms the live service's own
+  checkpoint connection identity via `/health/ready` (§8) and the real
+  `INSERT` denial (§8) against this exact running stack.
 - **No-mutation proof, two layers** (correction round, finding #8):
   the reused incident's row and its complete, fully-paginated audit
   event list are captured before the agent run and compared
@@ -735,6 +815,13 @@ per-request outcome, not a process-readiness concern.
   PostgreSQL-level locking provides some protection, but this remains
   an untested area, not a proven-safe one. There is also no horizontal
   scaling story yet — one `agent-runtime-service` process is assumed.
+- **The checkpoint connection pool (§7) is intentionally small and is
+  not a scalability feature.** Default `pool_min_size=1`/
+  `pool_max_size=4`, clamped `[1, 10]` — chosen to make one process
+  resilient to a real PostgreSQL restart/backend termination, not to
+  serve meaningfully more concurrent load. This is not a claim of
+  horizontal-scaling support, and does not change the concurrent-
+  resume-of-one-thread limitation immediately above.
 - **A created-but-unknown-to-the-caller run can become an orphan**
   (follow-up, finding #6). If `POST /api/v1/agent-runs` durably seeds a
   run but the HTTP response is lost before the caller receives it

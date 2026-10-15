@@ -1088,6 +1088,17 @@ finalize -> END`. Full detail:
   — completed OR still mid-flight — is retrievable byte-for-byte
   identically after a real restart of agent-runtime-service, proven
   against the real, running stack, not just in a unit test.
+- **The checkpoint connection survives a real PostgreSQL restart
+  without restarting agent-runtime-service itself.** A small, real
+  `psycopg_pool.AsyncConnectionPool` backs `AsyncPostgresSaver` (never
+  a single process-lifetime connection) — PostgreSQL's own existing
+  Phase 3E restart-acceptance behavior killing agent-runtime-service's
+  connection out from under it, with no way to recover except
+  restarting the service, was a real gap this closes. Proven both by a
+  real PostgreSQL backend-termination regression test and live against
+  the Compose stack (an actual `docker compose restart postgres`):
+  `/health/ready` reports `503` while the pool reconnects, then `200`
+  again within seconds, with no manual intervention.
 - **A real transient dependency outage never permanently fails a run.**
   `ControlPlaneUnavailableError`/`InvestigatorUnavailableError` are
   deliberately left uncaught by the graph nodes, so the last
@@ -6264,3 +6275,74 @@ the round above:
   `make help`. The Compose stack was left running; no historical
   incident or audit row was touched; investigator-service's provider
   mode was restored and that restoration actively verified.
+
+#### Phase 7 post-commit fix: real PostgreSQL restart resilience (GitHub Actions run #33)
+
+GitHub Actions run #33 (after commit `67874bd`, the previous fix)
+proved the fresh-database init-script fix worked — every gate passed
+except `Verify agent runtime (Phase 7)`, which failed at its very
+first check: `GET /health/ready` returned `503`, with
+`psycopg.errors.AdminShutdown: terminating connection due to
+administrator command` in agent-runtime-service's own logs.
+
+- **Root cause confirmed.** `CheckpointStore` held exactly ONE
+  process-lifetime `psycopg.AsyncConnection`
+  (`AsyncPostgresSaver.from_conn_string(...)`). Phase 3E's own
+  existing acceptance step (unrelated to Phase 7, never reopened or
+  modified) performs a genuine `docker compose restart postgres` while
+  agent-runtime-service is already running. `/health/live` correctly
+  never depends on PostgreSQL, so Docker kept reporting the process
+  healthy — but that one checkpoint connection was permanently killed,
+  and `/health/ready` failed forever afterward, recoverable only by
+  restarting agent-runtime-service itself.
+- **The fix.** `CheckpointStore` now owns a small, real
+  `psycopg_pool.AsyncConnectionPool`, passed directly to
+  `AsyncPostgresSaver(pool)` — confirmed, by reading the installed,
+  pinned `langgraph-checkpoint-postgres==3.2.0` source before adopting
+  this, that this is real, upstream-supported usage (`AsyncPostgresSaver.__init__`'s
+  `conn` parameter explicitly accepts either a single connection or a
+  pool). `psycopg_pool`'s own pool already detects and replaces a dead
+  connection on its next checkout — no custom reconnection framework
+  was written. `ping()`/`identity()` now draw a connection from
+  `self._pool.connection()` (the pool's own public API) instead of
+  reaching into the LangGraph saver's internals.
+  `AGENT_RUNTIME_DB_POOL_MIN_SIZE`/`AGENT_RUNTIME_DB_POOL_MAX_SIZE`
+  (default 1/4, clamped `[1, 10]`) keep this intentionally small —
+  Phase 7 is not a scalability phase.
+- **`scripts/verify-agent-runtime.sh` now retries readiness with a
+  bound** (`wait_agent_runtime_ready`, up to 20 attempts, 2s apart) —
+  a single immediate check is too strict for a real, reconnecting pool,
+  but the bound still fails CI outright if the database is genuinely,
+  permanently unavailable.
+- **New real regression test:** `tests/test_checkpoint_pool_recovery.py`
+  (real-database-gated) opens a real `CheckpointStore`, writes/reads a
+  real checkpoint, terminates the real `agent_runtime` role's own live
+  PostgreSQL backend (`pg_terminate_backend` — a genuine PostgreSQL
+  "backend restart", reproducing the exact `AdminShutdown`), and
+  proves — using the SAME `CheckpointStore` object throughout, never
+  recreated, never a new process — that readiness recovers within a
+  bounded retry, the recovered identity is still `agent_runtime`, the
+  pre-existing checkpoint is still readable, and a new checkpoint can
+  still be written afterward.
+- **Independently re-proven live against the real Compose stack:** a
+  real `docker compose restart postgres` while agent-runtime-service
+  kept running (same container throughout, confirmed via its
+  unchanged `CREATED AT` timestamp) produced the exact `AdminShutdown`
+  in its logs, `/health/ready` returned `503` once, then `200` two
+  seconds later with the correct `agent_runtime` identity — with no
+  manual intervention or service restart.
+- **Final validation:** `make agent-runtime-test` — **90/90 passed, 9
+  skipped** (isolated); the same suite with
+  `AGENT_RUNTIME_REQUIRE_REAL_DB=true` — **99/99 passed, 0 skipped**
+  (against the real stack, including the new pool-recovery test);
+  `make investigator-test` — **150/150 passed** (Phase 5 regression,
+  unaffected); `make retrieval-test` — **66/66 passed, 2 skipped**
+  (Phase 6 regression, unaffected); `bash scripts/verify-investigator.sh`
+  and `bash scripts/verify-rag.sh` — both **passed**, unmodified; a
+  real `make verify-agent-runtime` run (now with the bounded readiness
+  retry) — **passed**; `bash -n` on every script; `python3 -m py_compile`
+  across every changed Python file; `docker compose config`;
+  `git diff --check`; CI YAML parse; `make help`. The Compose stack
+  was left running; no historical incident or audit row was touched;
+  investigator-service's provider mode was restored and that
+  restoration actively verified.

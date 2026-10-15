@@ -141,8 +141,9 @@ jobs:
       # database connection. Reuses the same Python 3.13 setup above.
       # AGENT_RUNTIME_REQUIRE_REAL_DB is intentionally NOT set here, so
       # the real-database tests (test_db_privilege_boundary.py,
-      # test_checkpoint_durability.py) skip cleanly -- PostgreSQL
-      # doesn't exist yet at this point in the job. See the dedicated
+      # test_checkpoint_durability.py, test_checkpoint_pool_recovery.py)
+      # skip cleanly -- PostgreSQL doesn't exist yet at this point in
+      # the job. See the dedicated
       # real-database step further below, after Phase 3A migrations are
       # applied and the agent_runtime role/schema are provisioned.
       - name: Install agent-runtime-service dependencies
@@ -316,10 +317,15 @@ jobs:
       # UPDATE on reliability.incidents, SELECT on
       # reliability.retrieval_chunks, and any mutation of
       # reliability.incident_events (test_db_privilege_boundary.py),
-      # and (2) a real LangGraph checkpoint survives destroying and
+      # (2) a real LangGraph checkpoint survives destroying and
       # recreating the Python runtime instance and resumes to
       # completion from durable PostgreSQL state alone, not local
-      # process memory (test_checkpoint_durability.py). Uses the
+      # process memory (test_checkpoint_durability.py), and (3) --
+      # post-commit fix, GitHub Actions run #33 -- the SAME
+      # CheckpointStore (never recreated) recovers readiness after a
+      # real PostgreSQL backend termination, with pre-existing
+      # checkpoint data still readable and a new checkpoint still
+      # writable afterward (test_checkpoint_pool_recovery.py). Uses the
       # service's own real build_graph/compile_graph, not a toy graph.
       # AGENT_RUNTIME_REQUIRE_REAL_DB=true makes this step FAIL
       # outright (never silently skip) if the database is somehow
@@ -332,7 +338,7 @@ jobs:
           set -a
           . ../../.env
           set +a
-          AGENT_RUNTIME_REQUIRE_REAL_DB=true pytest tests/test_db_privilege_boundary.py tests/test_checkpoint_durability.py -v
+          AGENT_RUNTIME_REQUIRE_REAL_DB=true pytest tests/test_db_privilege_boundary.py tests/test_checkpoint_durability.py tests/test_checkpoint_pool_recovery.py -v
 
       # Phase 6 correction round: a dedicated, REAL PostgreSQL
       # transaction-rollback regression -- never mocked -- proving

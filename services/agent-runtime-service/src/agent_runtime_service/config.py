@@ -90,6 +90,19 @@ class CheckpointDbSettings:
     password: str
     database: str
     schema: str
+    # Post-commit fix (GitHub Actions run #33): a genuinely small,
+    # bounded psycopg_pool.AsyncConnectionPool -- replaces the prior
+    # single process-lifetime connection, which a real `docker compose
+    # restart postgres` (an existing Phase 3E acceptance behavior, not
+    # new) permanently killed, leaving /health/ready AdminShutdown-ing
+    # forever until agent-runtime-service itself was restarted. A pool
+    # detects and replaces a dead connection on its own; this is
+    # psycopg_pool's own built-in resilience, not custom reconnection
+    # logic (see checkpointer.py). Intentionally small -- Phase 7 is
+    # not a scalability phase and this is not a production-sized pool.
+    pool_min_size: int
+    pool_max_size: int
+    pool_open_timeout_seconds: float
 
     @classmethod
     def from_env(cls) -> "CheckpointDbSettings":
@@ -107,6 +120,15 @@ class CheckpointDbSettings:
                 f"{REQUIRED_CHECKPOINT_DB_SCHEMA!r} -- refusing to start rather than silently create "
                 "LangGraph's checkpoint tables somewhere else"
             )
+        pool_min_size = _clamped_int_env("AGENT_RUNTIME_DB_POOL_MIN_SIZE", 1, 1, 10)
+        pool_max_size = _clamped_int_env("AGENT_RUNTIME_DB_POOL_MAX_SIZE", 4, 1, 10)
+        if pool_max_size < pool_min_size:
+            logger.warning(
+                "AGENT_RUNTIME_DB_POOL_MAX_SIZE=%s is below AGENT_RUNTIME_DB_POOL_MIN_SIZE=%s; raising max to match min",
+                pool_max_size,
+                pool_min_size,
+            )
+            pool_max_size = pool_min_size
         return cls(
             host=os.environ.get("AGENT_RUNTIME_DB_HOST", os.environ.get("POSTGRES_HOST", "postgres")),
             port=_int_env("AGENT_RUNTIME_DB_PORT", _int_env("POSTGRES_INTERNAL_PORT", 5432)),
@@ -114,6 +136,9 @@ class CheckpointDbSettings:
             password=os.environ.get("AGENT_RUNTIME_DB_PASSWORD", ""),
             database=os.environ.get("POSTGRES_DB", ""),
             schema=schema,
+            pool_min_size=pool_min_size,
+            pool_max_size=pool_max_size,
+            pool_open_timeout_seconds=_float_env("AGENT_RUNTIME_DB_POOL_OPEN_TIMEOUT_SECONDS", 10.0),
         )
 
     def conn_string(self) -> str:

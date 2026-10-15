@@ -99,3 +99,34 @@ def test_runtime_bounds_clamps_incident_text_bound(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MAX_INCIDENT_TEXT_LENGTH", "50")
     bounds = RuntimeBounds.from_env()
     assert bounds.max_incident_text_chars == 100  # clamped to the minimum
+
+
+# --- Post-commit fix (GitHub Actions run #33): a small, bounded
+# connection pool replaces the prior single process-lifetime
+# connection. ------------------------------------------------------
+
+
+def test_checkpoint_db_settings_pool_defaults_are_small_and_bounded():
+    settings = CheckpointDbSettings.from_env()
+    assert settings.pool_min_size == 1
+    assert settings.pool_max_size == 4
+    assert settings.pool_open_timeout_seconds == 10.0
+
+
+def test_checkpoint_db_settings_pool_size_is_clamped(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_DB_POOL_MIN_SIZE", "999")
+    monkeypatch.setenv("AGENT_RUNTIME_DB_POOL_MAX_SIZE", "0")
+    settings = CheckpointDbSettings.from_env()
+    assert settings.pool_min_size == 10  # clamped to the maximum
+    assert settings.pool_max_size == 10  # clamped to the minimum (1), then raised to match min_size (10)
+
+
+def test_checkpoint_db_settings_pool_max_never_below_min(monkeypatch):
+    """A configured max smaller than min is a sane-default fallback
+    (raise max to match min), never a silently-broken pool (max < min
+    would make psycopg_pool itself refuse to construct)."""
+    monkeypatch.setenv("AGENT_RUNTIME_DB_POOL_MIN_SIZE", "5")
+    monkeypatch.setenv("AGENT_RUNTIME_DB_POOL_MAX_SIZE", "2")
+    settings = CheckpointDbSettings.from_env()
+    assert settings.pool_min_size == 5
+    assert settings.pool_max_size == 5

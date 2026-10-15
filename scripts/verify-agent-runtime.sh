@@ -62,6 +62,46 @@ agent_runtime_get() {
   curl -s --connect-timeout 2 --max-time 15 -w '\n%{http_code}' "$AGENT_RUNTIME_URL$1"
 }
 
+# Post-commit fix (GitHub Actions run #33): a single, immediate
+# /health/ready check is too strict now that CheckpointStore owns a
+# real, reconnecting connection pool -- a pool recovering from even a
+# brief prior disruption (this script's own earlier
+# `docker compose restart agent-runtime-service` in section 9, or any
+# other real transient PostgreSQL hiccup) may legitimately need a
+# moment to report ready again, exactly as proven by
+# test_checkpoint_pool_recovery.py. Bounded retry (never unbounded --
+# a permanently broken database must still fail CI, not hang it):
+# up to 20 attempts, 2s apart (~40s), each requiring a REAL 200 with
+# status=ready, checkpoint_store.reachable=true, AND the dedicated
+# agent_runtime identity -- never merely /health/live, which proves
+# nothing about the checkpoint database at all.
+wait_agent_runtime_ready() {
+  local attempts=20
+  local body
+  for i in $(seq 1 "$attempts"); do
+    body="$(curl -s --connect-timeout 2 --max-time 10 -w '\n%{http_code}' "$AGENT_RUNTIME_URL/health/ready")"
+    status="$(echo "$body" | tail -1)"
+    json="$(echo "$body" | sed '$d')"
+    if [ "$status" = "200" ] && echo "$json" | python3 -c "
+import json, sys
+body = json.load(sys.stdin)
+assert body['status'] == 'ready', body
+assert body['checkpoint_store']['reachable'] is True, body
+identity = body['checkpoint_store']['identity']
+assert identity is not None, 'expected a live identity block in /health/ready'
+assert identity['current_user'] == 'agent_runtime', identity
+assert identity['current_schema'] == 'agent_runtime', identity
+assert identity['search_path'] == 'agent_runtime', identity
+" 2>/dev/null; then
+      echo "$json"
+      return 0
+    fi
+    echo "  attempt $i/$attempts: /health/ready not yet confirmed ready (http=$status)" >&2
+    sleep 2
+  done
+  return 1
+}
+
 # Real, deterministic, full-content fingerprints (Phase 7 correction
 # round, finding #8) -- never just a row count. Canonical PostgreSQL
 # JSON representation (row_to_json) of every row, deterministically
@@ -95,26 +135,9 @@ wait_healthy investigator-service 20 || fail "investigator-service is not health
 wait_healthy retrieval-service 20 || fail "retrieval-service is not healthy"
 wait_healthy agent-runtime-service 20 || fail "agent-runtime-service is not healthy"
 
-section "1. Verify agent-runtime-service readiness AND its own live checkpoint-connection identity"
-ready_body="$(curl -fsS --connect-timeout 2 --max-time 10 "$AGENT_RUNTIME_URL/health/ready")"
+section "1. Verify agent-runtime-service readiness AND its own live checkpoint-connection identity (bounded retry)"
+ready_body="$(wait_agent_runtime_ready)" || fail "/health/ready never confirmed ready (status=ready, checkpoint_store.reachable=true, agent_runtime identity) within the bounded retry window -- never merely /health/live, which proves nothing about the checkpoint database"
 echo "  /health/ready: $ready_body"
-echo "$ready_body" | python3 -c "
-import json, sys
-body = json.load(sys.stdin)
-assert body['status'] == 'ready', body
-assert body['checkpoint_store']['reachable'] is True, body
-# Phase 7 correction round (finding #6): proves the RUNNING service's
-# OWN live connection -- not a separately-opened probe connection --
-# is genuinely using the dedicated agent_runtime role/schema. Config-
-# level validation (CheckpointDbSettings.from_env) already fails
-# closed at startup if misconfigured; this independently re-confirms
-# it against the real, live process.
-identity = body['checkpoint_store']['identity']
-assert identity is not None, 'expected a live identity block in /health/ready'
-assert identity['current_user'] == 'agent_runtime', identity
-assert identity['current_schema'] == 'agent_runtime', identity
-assert identity['search_path'] == 'agent_runtime', identity
-"
 echo "  confirmed: the live service's own checkpoint connection is current_user=agent_runtime current_schema=agent_runtime"
 
 section "2. Verify the dedicated agent_runtime role/schema exist and are usable"

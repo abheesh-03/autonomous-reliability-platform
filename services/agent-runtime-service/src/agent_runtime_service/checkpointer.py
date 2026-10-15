@@ -1,31 +1,62 @@
 """Owns the real, durable LangGraph PostgreSQL checkpoint connection
-(Phase 7 §LANGGRAPH/§CHECKPOINT DURABILITY PROOF).
+pool (Phase 7 §LANGGRAPH/§CHECKPOINT DURABILITY PROOF).
 
-`AsyncPostgresSaver.from_conn_string(...)` is itself an async context
-manager wrapping exactly ONE `psycopg.AsyncConnection` (confirmed
-directly against its real source before this was adopted, not
-assumed) -- for a long-running service, that context is entered ONCE
-at process startup (this module's `CheckpointStore.open()`, called
-from main.py's lifespan) and held for the process's lifetime, not
-re-opened per request. `setup()` is called once after opening --
-idempotent (`CREATE TABLE IF NOT EXISTS`/`CREATE INDEX CONCURRENTLY IF
-NOT EXISTS`), safe to run on every startup.
+Post-commit fix (GitHub Actions run #33): an earlier version of this
+module opened exactly ONE `psycopg.AsyncConnection` via
+`AsyncPostgresSaver.from_conn_string(...)` and held it for the
+process's entire lifetime. That connection is NOT resilient to a real
+PostgreSQL restart -- and this platform already has one, in normal
+acceptance operation: Phase 3E's own audit-durability verification
+performs a genuine `docker compose restart postgres` while
+agent-runtime-service is already running. `/health/live` correctly
+never depends on PostgreSQL, so the process stayed "alive"; but the
+one checkpoint connection was permanently killed
+(`psycopg.errors.AdminShutdown: terminating connection due to
+administrator command`), and `/health/ready` failed forever afterward
+-- recoverable only by restarting agent-runtime-service itself, which
+is not an acceptable resilience story for a "durable" runtime.
 
-This is a single connection, not a connection pool -- an honest,
-documented characteristic of this intentionally small Phase 7 runtime
-(see docs/architecture/phase-7-durable-agent-runtime.md's known
-limitations), not a claim of production-grade connection pooling.
+Fixed by replacing the single connection with a small, officially
+supported `psycopg_pool.AsyncConnectionPool`, passed directly to
+`AsyncPostgresSaver(pool)` (confirmed directly against the installed,
+pinned `langgraph-checkpoint-postgres==3.2.0` source before adopting
+this -- `AsyncPostgresSaver.__init__`'s own `conn` parameter is typed
+as `AsyncConnection[DictRow] | AsyncConnectionPool[AsyncConnection[DictRow]]`,
+and it explicitly branches on `isinstance(conn, AsyncConnectionPool)`,
+so this is real, intended, upstream-supported usage -- not a hack).
+`psycopg_pool`'s own pool already detects and replaces a dead/bad
+connection on next use; this is its own built-in resilience, never a
+custom reconnection framework written here. Empirically proven before
+this was adopted: killing this exact role's live backend via
+`pg_terminate_backend` reproduces the exact `AdminShutdown` CI saw on
+the very next pool checkout, and the checkout immediately after that
+succeeds with a fresh, healthy connection -- transparently, with no
+process restart.
+
+This is an intentionally SMALL pool
+(`CheckpointDbSettings.pool_min_size`/`pool_max_size`, default 1/4,
+clamped) -- an honest, documented characteristic of this intentionally
+small Phase 7 runtime (see
+docs/architecture/phase-7-durable-agent-runtime.md's known
+limitations), not a claim of production-grade/horizontally-scaled
+connection pooling, and not a change to LangGraph durability semantics:
+`durability="sync"` checkpoint commits, run_id/thread_id identity,
+create/resume behavior, and checkpoint history are all unchanged by
+this fix.
 
 The connecting role is the dedicated, least-privileged `agent_runtime`
 role (see config.CheckpointDbSettings and
 scripts/init-agent-runtime-db.sh) -- never the shared application
-POSTGRES_USER/POSTGRES_PASSWORD credential.
+POSTGRES_USER/POSTGRES_PASSWORD credential. EVERY connection the pool
+ever creates uses this exact same conninfo/role; the pool cannot widen
+this service's own least-privileged boundary in any way.
 """
 
 import logging
-from contextlib import AsyncExitStack
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from agent_runtime_service.config import CheckpointDbSettings
 
@@ -35,32 +66,52 @@ logger = logging.getLogger("agent_runtime_service.checkpointer")
 class CheckpointStore:
     def __init__(self, settings: CheckpointDbSettings) -> None:
         self._settings = settings
-        self._stack: AsyncExitStack | None = None
+        self._pool: AsyncConnectionPool | None = None
         self.saver: AsyncPostgresSaver | None = None
 
     async def open(self) -> AsyncPostgresSaver:
-        self._stack = AsyncExitStack()
-        self.saver = await self._stack.enter_async_context(
-            AsyncPostgresSaver.from_conn_string(self._settings.conn_string())
+        # `open=False` + an explicit, bounded `await self._pool.open(...)`
+        # below -- the modern psycopg_pool pattern (implicit opening in
+        # the constructor is deprecated upstream); `wait=True` with a
+        # real timeout means startup fails fast and clearly if
+        # PostgreSQL is genuinely unreachable, rather than silently
+        # returning before any connection actually exists.
+        self._pool = AsyncConnectionPool(
+            self._settings.conn_string(),
+            open=False,
+            min_size=self._settings.pool_min_size,
+            max_size=self._settings.pool_max_size,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
         )
+        await self._pool.open(wait=True, timeout=self._settings.pool_open_timeout_seconds)
+
+        self.saver = AsyncPostgresSaver(self._pool)
         await self.saver.setup()
-        logger.info("LangGraph checkpoint store ready (schema=%s)", self._settings.schema)
+        logger.info(
+            "LangGraph checkpoint pool ready (schema=%s, pool_size=%s-%s)",
+            self._settings.schema,
+            self._settings.pool_min_size,
+            self._settings.pool_max_size,
+        )
         return self.saver
 
     async def close(self) -> None:
-        if self._stack is not None:
-            await self._stack.aclose()
+        if self._pool is not None:
+            await self._pool.close()
         self.saver = None
-        self._stack = None
+        self._pool = None
 
     async def ping(self) -> bool:
         """Readiness check only -- a trivial round-trip against this
         service's OWN schema, never reliability.* (it has no access to
-        those at all -- see scripts/init-agent-runtime-db.sh)."""
-        if self.saver is None:
+        those at all -- see scripts/init-agent-runtime-db.sh). Uses the
+        pool CheckpointStore itself owns (`self._pool.connection()`,
+        psycopg_pool's own public API) -- never reaches into the
+        LangGraph saver's internals merely to run a health query."""
+        if self._pool is None:
             return False
         try:
-            async with self.saver.lock, self.saver.conn.cursor() as cur:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute("SELECT 1")
                 await cur.fetchone()
             return True
@@ -70,22 +121,23 @@ class CheckpointStore:
 
     async def identity(self) -> dict | None:
         """Phase 7 correction round (finding #6): reports the ACTUAL
-        live identity of the one real checkpoint connection this
-        process holds -- current_user/current_schema/search_path --
-        using the connection itself, never a separately-opened probe
-        connection. This is what lets an external acceptance gate
-        (scripts/verify-agent-runtime.sh) prove the RUNNING service is
-        genuinely using the dedicated agent_runtime role/schema, not
-        merely that config.py's from_env() validation would have
-        rejected a misconfiguration (belt-and-suspenders: that
-        validation already fails closed at startup, see config.py).
-        Returns None (never raises) if the connection isn't open or
-        the query fails -- safe metadata only, no secrets, this is
-        never a database password or connection string."""
-        if self.saver is None:
+        live identity of a real connection drawn from this pool --
+        current_user/current_schema/search_path -- never a password or
+        connection string. This is what lets an external acceptance
+        gate (scripts/verify-agent-runtime.sh) prove the RUNNING
+        service is genuinely using the dedicated agent_runtime
+        role/schema, not merely that config.py's from_env() validation
+        would have rejected a misconfiguration (belt-and-suspenders:
+        that validation already fails closed at startup, see
+        config.py). Every connection the pool can ever hand out was
+        created with the exact same conninfo, so any one of them
+        proves the whole pool's identity. Returns None (never raises)
+        if the pool isn't open or the query fails -- safe metadata
+        only."""
+        if self._pool is None:
             return None
         try:
-            async with self.saver.lock, self.saver.conn.cursor() as cur:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
                 # Explicit, non-reserved aliases -- never relies on
                 # PostgreSQL's own default column-naming for an
                 # unaliased `current_user`/`current_schema()` (reserved

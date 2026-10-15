@@ -154,6 +154,9 @@ async def db_settings():
             password=runtime_password,
             database=database,
             schema="agent_runtime",
+            pool_min_size=1,
+            pool_max_size=4,
+            pool_open_timeout_seconds=10.0,
         )
     else:
         _unavailable(
