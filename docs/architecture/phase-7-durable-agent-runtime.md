@@ -319,7 +319,9 @@ database or server):
 - explicit `REVOKE ALL ON SCHEMA reliability` /
   `REVOKE ALL ON ALL TABLES IN SCHEMA reliability FROM agent_runtime` —
   real, useful defense in depth against a future **direct** grant to
-  this role. **Corrected claim (correction round, finding #7):** this
+  this role, applied **only when the `reliability` schema already
+  exists** (post-commit fix, GitHub Actions run #32 — see below).
+  **Corrected claim (correction round, finding #7):** this
   is **not**, and this document no longer claims it is, a guarantee
   against a future grant to `PUBLIC` or to some other role this role
   might someday be made a member of. PostgreSQL privilege composition
@@ -328,9 +330,36 @@ database or server):
   to any role it is a member of — so a plain `REVOKE ... FROM agent_runtime`
   removes only a direct grant to `agent_runtime` itself; it is not a
   negative "DENY" that overrides a grant arriving some other way. The
-  real, authoritative guarantee is, and remains, the fact that no such
-  grant exists anywhere in `database/migrations/` today, re-proven
-  against the real database on every CI run (see the table below);
+  real, authoritative guarantee is, and remains, the fact that **default
+  PostgreSQL privileges grant this brand-new role no access to
+  `reliability.*` at all**, and that no explicit grant to it exists
+  anywhere in `database/migrations/` today — re-proven against the real
+  database, **after Flyway has created the real `reliability` schema**,
+  on every CI run (see the table below). The later real
+  privilege-boundary test, not these REVOKEs, remains the authoritative
+  proof of the final state.
+
+**`reliability` is Flyway-owned; this script never creates it, and the
+REVOKEs above are now conditional on it actually existing** (post-commit
+fix, GitHub Actions run #32). CI run #32 failed with
+`ERROR: schema "reliability" does not exist` at exactly this point:
+`scripts/init-agent-runtime-db.sh` is intentionally provisioned BEFORE
+the full `docker compose up -d` (§7, finding #1) — on a genuinely fresh
+runner's PostgreSQL volume, that means it also runs BEFORE Flyway has
+ever applied a migration, so `reliability` legitimately does not exist
+yet at that point. The REVOKEs used to reference it unconditionally,
+which fails outright on a database that has never been migrated — a
+condition hidden locally by a developer's preserved volume that already
+has `reliability` from earlier phases. Fixed: the script now checks
+`pg_namespace` for the schema's existence using psql's own native
+`\gset`/`\if` scripting (never shell-parsed SQL output, never
+dynamically concatenated SQL) and skips the REVOKEs, explicitly and
+safely, when it does not exist yet — the absence is treated as a
+legitimate, expected state on a fresh database, never an error. The
+script still never creates, owns, or assumes the existence of
+`reliability` either way. Proven by
+`scripts/test-init-agent-runtime-db-fresh.sh` / `make test-init-agent-runtime-db-fresh`
+(§13) against a real, isolated, temporary PostgreSQL instance.
 - role-attribute hardening, re-applied on every run:
   `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT`
   — the first five are already PostgreSQL's own defaults for a plain
@@ -669,6 +698,23 @@ per-request outcome, not a process-readiness concern.
   proves `make db-up`'s recipe provisions `AGENT_RUNTIME_DB_PASSWORD`
   into `.env` BEFORE the full `docker compose up -d` that actually
   creates `agent-runtime-service` — see §7 and §8.
+- **Fresh-database init-script regression test** (post-commit fix,
+  GitHub Actions run #32): `scripts/test-init-agent-runtime-db-fresh.sh` /
+  `make test-init-agent-runtime-db-fresh` runs the REAL, unmodified
+  `scripts/init-agent-runtime-db.sh` against a real, but completely
+  isolated and temporary PostgreSQL instance (its own
+  `COMPOSE_PROJECT_NAME`/`POSTGRES_PORT`, cleaned up via its own EXIT
+  trap — never the developer's own persistent `postgres_data` volume)
+  and proves, in order: (1) the instance genuinely has no `reliability`
+  schema; (2) the script succeeds anyway and explicitly reports
+  skipping the REVOKEs; (3) the script did not create `reliability`
+  itself; (4) the `agent_runtime` role/schema were still provisioned
+  correctly regardless; (5) after the real Flyway migrations are
+  applied (so `reliability` now genuinely exists), rerunning the SAME
+  script picks the REVOKEs back up, observably, in its own output.
+  Deliberately does NOT re-prove the actual privilege boundary itself
+  (§8's table) — that remains `test_db_privilege_boundary.py`'s job,
+  unweakened and run after this same migration point in CI.
 
 ## 14. Known limitations (honest, not hidden)
 

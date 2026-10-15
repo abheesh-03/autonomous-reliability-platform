@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -58,6 +58,7 @@ help: ## Show available targets
 	@echo "  agent-runtime-logs  Show recent agent-runtime-service logs"
 	@echo "  verify-agent-runtime Phase 7 real-evidence acceptance: durable LangGraph agent runs, dedicated DB role isolation, restart persistence, no mutation"
 	@echo "  test-db-up-order    Phase 7 focused test: db-up's recipe provisions the checkpoint DB credential before agent-runtime-service is created (no Docker required)"
+	@echo "  test-init-agent-runtime-db-fresh Phase 7 regression test: init-agent-runtime-db.sh succeeds on a genuinely fresh database (no reliability schema yet), against a real isolated/temporary PostgreSQL"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -398,3 +399,16 @@ verify-agent-runtime: ## Phase 7 real-evidence acceptance: durable LangGraph age
 
 test-db-up-order: ## Phase 7 focused test: db-up's recipe provisions the checkpoint DB credential before agent-runtime-service is created (no Docker required)
 	./scripts/test-db-up-order.sh
+
+# Post-commit fix (GitHub Actions run #32): test-db-up-order above is
+# static text analysis and never caught the real regression (the
+# init script's REVOKEs unconditionally referencing a Flyway-owned
+# schema that does not exist yet on a fresh database). This target
+# runs the REAL, unmodified scripts/init-agent-runtime-db.sh against a
+# real, but completely isolated and temporary PostgreSQL instance
+# (distinct COMPOSE_PROJECT_NAME/POSTGRES_PORT -- never the developer's
+# own persistent postgres_data volume), proving it succeeds before
+# Flyway has ever run and correctly resumes its defense-in-depth
+# REVOKEs once Flyway creates the real reliability schema.
+test-init-agent-runtime-db-fresh: ## Phase 7 regression test: init-agent-runtime-db.sh succeeds on a genuinely fresh database (no reliability schema yet), against a real isolated/temporary PostgreSQL
+	./scripts/test-init-agent-runtime-db-fresh.sh

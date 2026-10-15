@@ -21,12 +21,26 @@
 # anything in the `reliability` schema (reliability.incidents,
 # reliability.incident_events, reliability.retrieval_chunks, or any
 # other application-owned table) -- a brand-new PostgreSQL role has NO
-# privileges on another role's existing objects by default (no GRANT
-# to PUBLIC was ever issued anywhere in database/migrations/). This
-# boundary is PROVEN, not just asserted -- see
+# privileges on another role's existing objects by default (default
+# PostgreSQL privileges grant the dedicated role no application-table
+# access at all; no GRANT to PUBLIC was ever issued anywhere in
+# database/migrations/ either). This boundary is PROVEN, not just
+# asserted -- see
 # services/agent-runtime-service/tests/test_db_privilege_boundary.py,
-# which connects AS the agent_runtime role itself and confirms each of
-# those operations is actually rejected by PostgreSQL.
+# which connects AS the agent_runtime role itself, AFTER Flyway has
+# created the real `reliability` schema/objects, and confirms each of
+# those operations is actually rejected by PostgreSQL. THAT test is
+# the authoritative proof of the final state, not the REVOKEs below.
+#
+# Post-commit fix (GitHub Actions run #32): on a genuinely fresh
+# PostgreSQL volume (e.g. a new CI runner), this script runs BEFORE
+# Flyway has ever applied a migration -- the Flyway-owned `reliability`
+# schema legitimately does not exist yet at that point. This script
+# must never create, own, or assume the existence of that
+# application-owned schema; the REVOKEs below are made conditional on
+# it actually existing (see the DEFENSE-IN-DEPTH comment further down)
+# so a fresh database is handled honestly rather than treated as an
+# error.
 #
 # Phase 7 correction round (finding #7): the REVOKEs below are REAL,
 # useful defense in depth against a DIRECT future GRANT to this role --
@@ -223,13 +237,44 @@ ALTER ROLE $DB_ROLE SET search_path TO $DB_SCHEMA;
 -- Defense-in-depth ONLY against a future DIRECT grant to this role
 -- (Phase 7 correction round, finding #7 -- see this file's own header
 -- comment for exactly what this does and does NOT guarantee: it is
--- NOT a override of a hypothetical future grant to PUBLIC or to an
+-- NOT an override of a hypothetical future grant to PUBLIC or to an
 -- inherited role). The REAL, authoritative guarantee is that no such
 -- grant exists anywhere in database/migrations/ today, re-proven by
--- test_db_privilege_boundary.py against the real database on every
--- CI run. "IF EXISTS" equivalents aren't needed: REVOKE on privileges
--- that were never granted is a harmless no-op in PostgreSQL.
+-- test_db_privilege_boundary.py against the real database -- AFTER
+-- Flyway has created the real reliability schema/objects -- on every
+-- CI run. That test, not these REVOKEs, is the authoritative proof of
+-- the final privilege state.
+--
+-- Post-commit fix (GitHub Actions run #32): the reliability schema is
+-- Flyway-owned, and this script must never create it, assume it
+-- exists, or otherwise take ownership of it. On a genuinely fresh
+-- PostgreSQL volume this script runs BEFORE Flyway ever applies a
+-- migration (see the Makefile's own db-up ordering), so the schema
+-- legitimately does not exist yet -- that is not an error. A real
+-- catalog existence check (pg_namespace), evaluated natively by psql
+-- itself via gset/if meta-commands -- never shell-parsed SQL output,
+-- never dynamically concatenated SQL -- decides whether to run the
+-- REVOKEs at all: if the reliability schema exists, they run exactly
+-- as before; if it does not, they are skipped safely and explicitly
+-- (default PostgreSQL privileges already grant this brand-new role no
+-- access to a schema that doesn't even exist). IF EXISTS equivalents
+-- on the REVOKE statements themselves aren't needed when the schema
+-- DOES exist: REVOKE on privileges that were never granted is a
+-- harmless no-op in PostgreSQL.
+--
+-- NOTE for future editors: this heredoc is UNQUOTED (<<SQL, not
+-- <<'SQL') so $DB_ROLE/$DB_SCHEMA interpolate -- which also means
+-- bash performs backtick/$() substitution on this ENTIRE SQL body.
+-- Never use a backtick in any comment below this point.
+SELECT EXISTS (
+  SELECT 1 FROM pg_namespace WHERE nspname = 'reliability'
+) AS reliability_schema_exists \gset
+\if :reliability_schema_exists
 REVOKE ALL ON SCHEMA reliability FROM $DB_ROLE;
 REVOKE ALL ON ALL TABLES IN SCHEMA reliability FROM $DB_ROLE;
+\echo 'reliability schema exists -- revoked agent_runtime access from it (defense in depth; see comment above)'
+\else
+\echo 'reliability schema does not exist yet (fresh database, Flyway has not run) -- skipping the REVOKEs; default PostgreSQL privileges already grant agent_runtime no access to it'
+\endif
 SQL
-echo "agent_runtime role/schema ready in PostgreSQL (search_path=$DB_SCHEMA; reliability.* access explicitly revoked)"
+echo "agent_runtime role/schema ready in PostgreSQL (search_path=$DB_SCHEMA; see psql output above for whether reliability.* REVOKEs ran or were skipped -- the real privilege-boundary test, run after migrations exist, is the authoritative proof either way)"
