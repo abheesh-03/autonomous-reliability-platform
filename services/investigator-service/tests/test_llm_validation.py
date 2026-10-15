@@ -390,6 +390,145 @@ def test_extra_unexpected_top_level_field_is_rejected():
         parse_and_validate(raw, VALID_IDS)
 
 
+VALID_CONTEXT_IDS = frozenset({"K1", "H1"})
+
+
+def test_hypothesis_with_valid_evidence_and_valid_context_retains_both():
+    """Phase 6 §12/§13: a hypothesis with real E support MAY also cite
+    retrieved context -- both survive together."""
+    raw = json.dumps(
+        {
+            "summary": "s",
+            "observations": [],
+            "hypotheses": [
+                {
+                    "statement": "h",
+                    "supporting_evidence_ids": ["E1"],
+                    "conflicting_evidence_ids": [],
+                    "supporting_context_ids": ["K1"],
+                    "conflicting_context_ids": ["H1"],
+                    "confidence": "medium",
+                }
+            ],
+            "missing_evidence": [],
+            "suggested_checks": [],
+        }
+    )
+    output, notes = parse_and_validate(raw, VALID_IDS, VALID_CONTEXT_IDS)
+    assert len(output.hypotheses) == 1
+    hyp = output.hypotheses[0]
+    assert hyp.supporting_evidence_ids == ["E1"]
+    assert hyp.supporting_context_ids == ["K1"]
+    assert hyp.conflicting_context_ids == ["H1"]
+    assert not any("removed fabricated context" in note for note in notes)
+
+
+def test_hypothesis_with_only_context_support_and_no_evidence_is_still_dropped():
+    """Phase 6 §12 core rule: K/H alone is NEVER enough to create a
+    root-cause hypothesis about the current incident -- a hypothesis
+    with real context support but zero real E support is dropped
+    exactly like one with no support at all."""
+    raw = json.dumps(
+        {
+            "summary": "s",
+            "observations": [],
+            "hypotheses": [
+                {
+                    "statement": "payment-service caused this, per a similar historical incident",
+                    "supporting_evidence_ids": [],
+                    "conflicting_evidence_ids": [],
+                    "supporting_context_ids": ["H1"],
+                    "conflicting_context_ids": [],
+                    "confidence": "high",
+                }
+            ],
+            "missing_evidence": [],
+            "suggested_checks": [],
+        }
+    )
+    output, notes = parse_and_validate(raw, VALID_IDS, VALID_CONTEXT_IDS)
+    assert output.hypotheses == []
+    assert any("dropped hypothesis" in note and "cited no supporting evidence" in note for note in notes)
+
+
+def test_fabricated_context_citation_is_stripped_but_does_not_sink_an_evidence_backed_hypothesis():
+    """A fabricated K/H id is sanitized exactly like a fabricated E id
+    -- stripped and recorded -- but because real E support still
+    exists, the hypothesis itself survives (context never gates
+    retention)."""
+    raw = json.dumps(
+        {
+            "summary": "s",
+            "observations": [],
+            "hypotheses": [
+                {
+                    "statement": "h",
+                    "supporting_evidence_ids": ["E1"],
+                    "conflicting_evidence_ids": [],
+                    "supporting_context_ids": ["K1", "K_FAKE"],
+                    "conflicting_context_ids": ["H_FAKE"],
+                    "confidence": "low",
+                }
+            ],
+            "missing_evidence": [],
+            "suggested_checks": [],
+        }
+    )
+    output, notes = parse_and_validate(raw, VALID_IDS, VALID_CONTEXT_IDS)
+    assert len(output.hypotheses) == 1
+    hyp = output.hypotheses[0]
+    assert hyp.supporting_context_ids == ["K1"]
+    assert hyp.conflicting_context_ids == []
+    assert any("K_FAKE" in note and "H_FAKE" in note for note in notes)
+
+
+def test_context_ids_validated_against_shown_set_not_a_larger_one():
+    """Same IMPORTANT principle as evidence (Phase 5 correction round
+    #1), extended to context: a context id that exists in a larger
+    retrieved set but was never actually shown to the model is exactly
+    as fabricated as one that never existed."""
+    shown_context_ids = frozenset({"K1"})  # H1 was retrieved but never shown
+    raw = json.dumps(
+        {
+            "summary": "s",
+            "observations": [],
+            "hypotheses": [
+                {
+                    "statement": "h",
+                    "supporting_evidence_ids": ["E1"],
+                    "conflicting_evidence_ids": [],
+                    "supporting_context_ids": ["H1"],
+                    "conflicting_context_ids": [],
+                    "confidence": "low",
+                }
+            ],
+            "missing_evidence": [],
+            "suggested_checks": [],
+        }
+    )
+    output, notes = parse_and_validate(raw, VALID_IDS, shown_context_ids)
+    assert output.hypotheses[0].supporting_context_ids == []
+    assert any("H1" in note for note in notes)
+
+
+def test_observation_cannot_cite_context_ids():
+    """Phase 6 §12: observations may cite ONLY E ids. A K/H-looking id
+    placed in evidence_ids is exactly as fabricated as any other
+    unknown id and causes the observation to be dropped."""
+    raw = json.dumps(
+        {
+            "summary": "s",
+            "observations": [{"statement": "claim", "evidence_ids": ["K1"]}],
+            "hypotheses": [],
+            "missing_evidence": [],
+            "suggested_checks": [],
+        }
+    )
+    output, notes = parse_and_validate(raw, VALID_IDS, VALID_CONTEXT_IDS)
+    assert output.observations == []
+    assert any("K1" in note for note in notes)
+
+
 def test_validation_uses_only_shown_ids_not_a_larger_collected_set():
     """IMPORTANT (Phase 5 correction round #1): an id that genuinely
     exists in the larger collected package but was never actually

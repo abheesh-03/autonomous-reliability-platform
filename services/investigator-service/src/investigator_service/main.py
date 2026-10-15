@@ -27,8 +27,9 @@ from investigator_service.api.investigations import router as investigations_rou
 from investigator_service.clients.control_plane import ControlPlaneClient
 from investigator_service.clients.loki import LokiClient
 from investigator_service.clients.prometheus import PrometheusClient
+from investigator_service.clients.retrieval import RetrievalClient
 from investigator_service.clients.tempo import TempoClient
-from investigator_service.config import EvidenceBounds, LLMSettings, TelemetrySettings
+from investigator_service.config import EvidenceBounds, LLMSettings, RagBounds, RetrievalSettings, TelemetrySettings
 from investigator_service.evidence_collector import EvidenceCollector
 from investigator_service.investigator import Investigator
 from investigator_service.llm.provider import LLMProvider, OpenAIProvider, StubProvider
@@ -70,6 +71,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     telemetry = TelemetrySettings.from_env()
     llm_settings = LLMSettings.from_env()
     bounds = EvidenceBounds.from_env()
+    retrieval_settings = RetrievalSettings.from_env()
+    rag_bounds = RagBounds.from_env()
 
     control_plane = ControlPlaneClient(
         telemetry.control_plane_url, telemetry.connect_timeout_seconds, telemetry.request_timeout_seconds
@@ -83,8 +86,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     collector = EvidenceCollector(control_plane, prometheus, loki, tempo, bounds)
     provider = _build_provider(llm_settings)
 
+    # Phase 6: retrieval is OPTIONAL -- a blank INVESTIGATOR_RETRIEVAL_URL
+    # (the default) disables it entirely, same non-blocking-startup
+    # philosophy as the LLM provider above. Investigation still works
+    # using Phase 5 evidence alone either way (Phase 6 §16).
+    retrieval_client = (
+        RetrievalClient(
+            retrieval_settings.url,
+            retrieval_settings.connect_timeout_seconds,
+            retrieval_settings.request_timeout_seconds,
+        )
+        if retrieval_settings.url
+        else None
+    )
+
     app.state.llm_settings = llm_settings
-    app.state.investigator = Investigator(collector, provider, bounds)
+    app.state.investigator = Investigator(collector, provider, bounds, retrieval_client, rag_bounds)
     yield
 
 

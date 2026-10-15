@@ -31,6 +31,15 @@ Four distinct outcomes, handled differently:
     analysis, and is never surfaced. (conflicting_evidence_ids is
     still sanitized the same way but never gates retention by itself —
     only supporting evidence does.)
+  - Phase 6 context citations: `supporting_context_ids`/
+    `conflicting_context_ids` on a hypothesis are validated against
+    the set of K<n>/H<n> ids ACTUALLY SHOWN, exactly like evidence --
+    a fabricated context id is stripped and recorded, never silently
+    kept. Unlike evidence, a fabricated/empty context citation never
+    gates a hypothesis's retention by itself (retention is governed
+    SOLELY by real evidence support, above) -- retrieved context may
+    only ever ADD to an already evidence-supported hypothesis, never
+    substitute for evidence.
   - The free-text `summary` (Phase 5 correction round #3): the
     provider's own free-text summary is NEVER retained, full stop —
     not even when some observations/hypotheses survive validation.
@@ -80,7 +89,11 @@ def _strip_markdown_fence(text: str) -> str:
     return stripped
 
 
-def parse_and_validate(raw_text: str, shown_evidence_ids: frozenset[str]) -> tuple[LLMInvestigationOutput, list[str]]:
+def parse_and_validate(
+    raw_text: str,
+    shown_evidence_ids: frozenset[str],
+    shown_context_ids: frozenset[str] = frozenset(),
+) -> tuple[LLMInvestigationOutput, list[str]]:
     cleaned = _strip_markdown_fence(raw_text)
     try:
         data = json.loads(cleaned)
@@ -126,7 +139,12 @@ def parse_and_validate(raw_text: str, shown_evidence_ids: frozenset[str]) -> tup
             # because it never cited any support in the first place.
             # Lowering confidence alone is not enough -- an
             # unconfirmed hypothesis is still allowed to exist, but
-            # only when something real actually motivates it.
+            # only when something real actually motivates it. Phase 6:
+            # this check is UNCHANGED by context citations -- a
+            # hypothesis supported only by supporting_context_ids
+            # (K/H) and no real evidence is exactly as invalid as one
+            # with no support at all; retrieved context never
+            # substitutes for evidence.
             if dropped_support:
                 notes.append(
                     f"dropped hypothesis {hyp.statement[:60]!r}: every supporting evidence id "
@@ -142,8 +160,26 @@ def parse_and_validate(raw_text: str, shown_evidence_ids: frozenset[str]) -> tup
                 f"hypothesis {hyp.statement[:60]!r}"
             )
 
+        # Phase 6: context citations are sanitized the same way as
+        # evidence, but a fabricated/absent context citation never
+        # gates retention -- only real evidence support (above) does.
+        kept_support_ctx, dropped_support_ctx = _filter_ids(hyp.supporting_context_ids, shown_context_ids)
+        kept_conflict_ctx, dropped_conflict_ctx = _filter_ids(hyp.conflicting_context_ids, shown_context_ids)
+        dropped_ctx = dropped_support_ctx + dropped_conflict_ctx
+        if dropped_ctx:
+            notes.append(
+                f"removed fabricated context id(s) {dropped_ctx} cited by hypothesis {hyp.statement[:60]!r}"
+            )
+
         sanitized_hypotheses.append(
-            hyp.model_copy(update={"supporting_evidence_ids": kept_support, "conflicting_evidence_ids": kept_conflict})
+            hyp.model_copy(
+                update={
+                    "supporting_evidence_ids": kept_support,
+                    "conflicting_evidence_ids": kept_conflict,
+                    "supporting_context_ids": kept_support_ctx,
+                    "conflicting_context_ids": kept_conflict_ctx,
+                }
+            )
         )
 
     # Phase 5 correction round #3: NEVER retain the provider's own
@@ -196,7 +232,9 @@ def _build_summary(observations: list, hypotheses: list) -> str:
     if hypotheses:
         rendered = " ".join(
             f"{hyp.statement} (confidence: {hyp.confidence}; supporting evidence: "
-            f"{', '.join(hyp.supporting_evidence_ids)})."
+            f"{', '.join(hyp.supporting_evidence_ids)}"
+            + (f"; supporting context: {', '.join(hyp.supporting_context_ids)}" if hyp.supporting_context_ids else "")
+            + ")."
             for hyp in hypotheses
         )
         parts.append(

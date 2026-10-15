@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from investigator_service.domain.evidence import EvidenceItem, SourceOutcome
 from investigator_service.domain.incident_snapshot import Status
+from investigator_service.domain.retrieval import RetrievalContext
 
 
 class InvestigationRequest(BaseModel):
@@ -32,13 +33,25 @@ class Observation(BaseModel):
 class Hypothesis(BaseModel):
     """A plausible, UNCONFIRMED explanation. Never presented as fact —
     see llm/prompt.py's explicit instruction that the model must never
-    state an unverified root cause as confirmed."""
+    state an unverified root cause as confirmed.
+
+    Phase 6 §12/§13: `supporting_context_ids`/`conflicting_context_ids`
+    cite RETRIEVED knowledge/historical-incident context (K<n>/H<n>
+    ids) -- never current-incident evidence. A hypothesis MAY
+    additionally cite context, but citing context alone is never
+    sufficient: `supporting_evidence_ids` (real E ids) must still be
+    non-empty for this hypothesis to survive validation (see
+    llm/validation.py) -- historical similarity never proves
+    recurrence on its own.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     statement: str
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     conflicting_evidence_ids: list[str] = Field(default_factory=list)
+    supporting_context_ids: list[str] = Field(default_factory=list)
+    conflicting_context_ids: list[str] = Field(default_factory=list)
     confidence: Literal["low", "medium", "high"] = "low"
 
 
@@ -96,5 +109,6 @@ class InvestigationReport(BaseModel):
     suggested_checks: list[SuggestedCheck]
     evidence: list[EvidenceItem]
     source_outcomes: list[SourceOutcome]
+    retrieval_context: RetrievalContext
     provider: ProviderMetadata
     validation_notes: list[str] = Field(default_factory=list)

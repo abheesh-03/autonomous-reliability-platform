@@ -59,8 +59,8 @@ persisted incident → restoration → real recovery → genuine automatic
 resolution → correctly-attributed audit history. See [Failure
 Simulation](#failure-simulation-phase-4) below and
 [docs/architecture/phase-4-failure-simulation.md](docs/architecture/phase-4-failure-simulation.md).
-Phase 4 is now **closed**. The project is currently in **Phase 5 —
-Read-Only AI Incident Investigator**: a new, strictly read-only sixth
+Phase 4 is now **closed**. **Phase 5 — Read-Only AI Incident
+Investigator** is also now **closed**: a strictly read-only sixth
 backend service (`services/investigator-service`) that, given an
 existing incident UUID, retrieves that incident's real evidence
 (control-plane's existing GET APIs, plus allowlisted, bounded,
@@ -78,8 +78,27 @@ neither of control-plane's write-capable Bearer tokens and no database
 credentials at all. See [AI Incident
 Investigator](#ai-incident-investigator-phase-5) below and
 [docs/architecture/phase-5-ai-investigator.md](docs/architecture/phase-5-ai-investigator.md).
+The project is currently in **Phase 6 — RAG and Historical Incident
+Retrieval**, which EXTENDS Phase 5 rather than replacing anything in
+it: a new, seventh backend service (`services/retrieval-service`)
+owns a real PostgreSQL + pgvector retrieval index
+(`reliability.retrieval_chunks`) over source-controlled operational
+knowledge (`knowledge/runbooks/*.md`) and real historical incidents
+(indexed only through control-plane's existing GET APIs). Its HTTP
+API is search-only — all writes happen through a separate, explicit,
+offline indexer (`make rag-index`), never as a side effect of a
+request. investigator-service can now retrieve bounded knowledge/
+historical-incident context (cited as `K<n>`/`H<n>`, strictly
+separate from current-incident evidence's own `E<n>` ids) to enrich a
+hypothesis, but a hypothesis still requires real current-incident
+evidence to survive at all — retrieved context can never substitute
+for it. investigator-service itself still holds zero database
+credentials; retrieval-service is the only new component with
+PostgreSQL access. See [RAG Retrieval](#rag-retrieval-phase-6) below
+and
+[docs/architecture/phase-6-rag-retrieval.md](docs/architecture/phase-6-rag-retrieval.md).
 No automated remediation, human-approval execution, investigation
-persistence, frontend, LangGraph/RAG, or deployment infrastructure has
+persistence, frontend, LangGraph, or deployment infrastructure has
 been added — see that document's known limitations. An OpenTelemetry
 Collector, Prometheus, and
 Grafana run via Docker Compose (Phase 2A.1). All four application
@@ -947,10 +966,80 @@ make verify-investigator                          # real-evidence acceptance gat
 ```
 
 **Not implemented in this phase (explicitly out of scope — see the
-dedicated doc's known limitations):** Phase 6 RAG/vector retrieval, a
-LangGraph runtime, automated remediation, human-approval execution,
-investigation persistence, a frontend, Kubernetes/Terraform/AWS
-deployment, and any additional chaos scenarios.
+dedicated doc's known limitations):** a LangGraph runtime, automated
+remediation, human-approval execution, investigation persistence, a
+frontend, Kubernetes/Terraform/AWS deployment, and any additional
+chaos scenarios. RAG/vector retrieval is Phase 6 — see below.
+
+## RAG Retrieval (Phase 6)
+
+A new, seventh backend service, `services/retrieval-service` (Python
+3.13 / FastAPI), EXTENDING — never weakening — Phase 5. It owns a
+real PostgreSQL + pgvector retrieval index
+(`reliability.retrieval_chunks`, `database/migrations/V5__create_retrieval_index.sql`)
+over source-controlled operational knowledge (`knowledge/runbooks/*.md`)
+and real historical incidents (indexed only through control-plane's
+existing GET APIs, never a direct `reliability.incidents` read). Full
+detail: [docs/architecture/phase-6-rag-retrieval.md](docs/architecture/phase-6-rag-retrieval.md).
+
+- **Search-only HTTP API, write-only explicit indexer.**
+  `POST /api/v1/retrieval/search` never writes anything — the only
+  code path allowed to write the retrieval table is the separate,
+  offline `python -m retrieval_service.indexer` (`make rag-index`),
+  confirmed structurally (AST-level), never a side effect of an HTTP
+  request. Idempotent: a second immediate run with unchanged sources
+  produces the exact same chunk count, proven against the real
+  database.
+- **Two embedding providers, isolated by embedding space.** A
+  deterministic, offline LEXICAL feature-hashing provider (default —
+  explicitly NOT a neural/semantic model, needs no credential, used
+  by all tests/CI) and a real, configurable OpenAI embedding provider
+  (a credential DISTINCT from investigator-service's own LLM key).
+  Every row records `"<provider>:<model>:<dimension>"`; every search
+  filters on it first, so vectors from an incompatible provider/model
+  are structurally excluded from ever being compared.
+- **PostgreSQL image change, data safety proven.** The `postgres`
+  Compose service moved from `postgres:18` to the pgvector-maintained
+  `pgvector/pgvector:pg18` image — same PostgreSQL version, same
+  volume/data-directory layout, confirmed empirically. The existing,
+  real, accumulated `postgres_data` volume was reused unmodified;
+  every pre-existing `reliability.incidents`/`reliability.incident_events`
+  row was confirmed byte-for-byte unchanged (content-hash fingerprint
+  compared before/after) across the image swap. `V1`–`V4` are
+  untouched; `V5` is purely additive.
+- **E vs. K vs. H, enforced structurally.** Current-incident evidence
+  (`E<n>`) and retrieved context (`K<n>` knowledge, `H<n>` historical
+  incidents) are rendered in separate prompt sections under separate
+  id namespaces. A direct observation can only cite `E<n>` — there is
+  no field for it to cite context with. A hypothesis MAY additionally
+  cite `K<n>`/`H<n>`, but retention is governed solely by real `E<n>`
+  support: a hypothesis backed only by retrieved context, with zero
+  real evidence, is dropped exactly like one with no support at all.
+- **Graceful degradation.** If retrieval-service is unreachable, the
+  investigation still proceeds using Phase 5 evidence alone
+  (`retrieval_context.outcome="unavailable"`) — never a fabricated
+  historical fallback. Zero real matches is reported as `"no_data"`,
+  a distinct, honest case. investigator-service's own readiness never
+  depends on retrieval-service.
+- **Current-incident evidence still has first claim on the prompt
+  budget.** Phase 5's hard character ceiling is unweakened; retrieved
+  context only spends whatever room evidence selection leaves, with
+  its own count/excerpt/total-character sub-bounds, and is trimmed
+  before evidence is ever touched again.
+
+```bash
+make retrieval-build                              # builds the image (also built automatically by `make db-up`)
+make retrieval-test                               # focused unit tests, no Docker/network needed
+make rag-index                                    # index source-controlled knowledge + current historical incidents (idempotent)
+make rag-search QUERY="checkout payment failures" # real cosine-distance search against the index
+make verify-rag                                   # real-evidence RAG acceptance gate, reusing the real Phase 4/5 incident
+```
+
+**Not implemented in this phase (explicitly out of scope — see the
+dedicated doc's known limitations):** a LangGraph runtime, autonomous/
+iterative retrieval, tool-calling by the LLM, a reranker, automated
+remediation, human-approval execution, investigation persistence, a
+frontend, and Kubernetes/Terraform/AWS deployment.
 
 ## Developer Commands
 
@@ -5576,3 +5665,145 @@ problem today.
      credential is available in this environment. The Compose stack
      was torn down afterward (`docker compose down`, volumes
      preserved; no historical incident or audit row touched).
+
+### Phase 6 — RAG and Historical Incident Retrieval
+
+- **A new, seventh backend service, `services/retrieval-service`**
+  (Python 3.13 / FastAPI, same Dockerfile/pyproject conventions as the
+  other services), structured into `api/` (search + health only),
+  `clients/control_plane.py` (read-only, fully-paginated list/detail/
+  events — used only by the indexer, never the HTTP app),
+  `embeddings/provider.py` (the local-lexical and OpenAI providers),
+  `chunking.py`, `knowledge.py`, `historical.py`, `db.py` (the one
+  module allowed to touch `reliability.retrieval_chunks`),
+  `indexer.py` (the explicit, offline write path), and `search.py`
+  (the read-only HTTP search path). `POST /api/v1/retrieval/search` is
+  the only non-health endpoint; it never writes.
+- **`pgvector/pgvector:pg18` replaces `postgres:18`.** Confirmed
+  empirically before adopting it: identical PostgreSQL version
+  (`18.6`), identical `PGDATA`/volume-mount layout. The real,
+  pre-existing `postgres_data` volume (79 incidents, 153 audit events
+  accumulated from earlier phases in this environment) was reused
+  unmodified; a `md5()` content fingerprint of every row in both
+  tables was captured before the image swap and confirmed byte-for-
+  byte identical after it. One real, expected artifact of the base-OS
+  change (a PostgreSQL collation-version warning, from the two
+  images' different glibc versions) was resolved with `ALTER DATABASE
+  ... REFRESH COLLATION VERSION` — a catalog-metadata-only operation,
+  reported honestly here rather than hidden. `flyway info` confirmed
+  V1–V4 already applied and untouched before V5 was written.
+- **`V5__create_retrieval_index.sql`** — purely additive, never
+  touching V1–V4: `CREATE EXTENSION vector` plus one new table,
+  `reliability.retrieval_chunks` (`source_type` CHECK-constrained to
+  `knowledge`/`historical_incident`, a `UNIQUE(source_type, source_key,
+  chunk_index, embedding_space)` constraint that makes indexing
+  idempotent, a `content_hash` CHECK-constrained to a real sha256 hex
+  shape, an HNSW cosine-distance index). A real finding during
+  implementation: pgvector's `CREATE EXTENSION` installs into
+  whichever schema the connecting client's `search_path` resolves to
+  — for this repository's Flyway config, that's `reliability`, not
+  `public` — so `db.py` explicitly sets `search_path=reliability,public`
+  on every connection it opens.
+- **Two embedding providers, isolated by embedding space.**
+  `LocalLexicalEmbeddingProvider` (default): deterministic
+  `hashlib.sha256`-based feature hashing (never Python's randomized
+  builtin `hash()` — confirmed by comparing output across two
+  separate interpreter processes), fixed 1536-dimension, L2-normalized,
+  explicitly documented as lexical, not semantic. `OpenAIEmbeddingProvider`:
+  real `text-embedding-3-small` by default, a credential
+  (`RETRIEVAL_EMBEDDING_API_KEY`) distinct from investigator-service's
+  own `INVESTIGATOR_LLM_API_KEY`, `dimensions=1536` forced explicitly
+  on every call, missing-key selection raises an explicit startup
+  error rather than silently falling back to the local provider for
+  the indexer, and any provider error exposes only the exception's
+  type name. Every row's `embedding_space` (`"<provider>:<model>:<dimension>"`)
+  is filtered on before any cosine-distance comparison.
+- **Four real runbooks, one per existing alert rule**
+  (`knowledge/runbooks/`): `CheckoutServerErrors`,
+  `CheckoutHighLatency`, `TelemetryPipelineUnavailable`,
+  `CollectorRefusingTelemetry` — each grounded in this repository's
+  own real PromQL expressions, real Prometheus/Loki/Tempo evidence
+  shapes and limitations (already documented elsewhere in this
+  README), and real checkout-service call order. READ-ONLY
+  investigation guidance only; no invented infrastructure or tooling.
+- **Deterministic chunking and an allowlisted-root-only loader.**
+  `chunk_text` is Markdown-heading-aware, bounded, overlap-bounded,
+  and stable; `load_knowledge_documents` reads only from one
+  explicitly configured root (never a request parameter) and refuses
+  a symlink that resolves outside it.
+- **Historical incidents indexed only through control-plane's
+  existing GET APIs** — `GET /api/v1/incidents` (fully paginated),
+  `GET /api/v1/incidents/{id}`, `GET /api/v1/incidents/{id}/events`
+  (fully paginated) — never a direct `reliability.incidents` read, and
+  the indexer never calls a control-plane write endpoint (confirmed
+  structurally: its control-plane client has no write method at all).
+  An incident with zero audit events renders an explicit, honest
+  "(no audit events recorded)" line, never invented history.
+- **The explicit indexer is the ONLY write path, confirmed
+  structurally.** `python -m retrieval_service.indexer` (`make
+  rag-index`) is never reachable from an HTTP handler — an AST-level
+  test confirms `search.py`/`api/search.py`/`api/health.py`/`main.py`
+  never reference any of `db.py`'s write-capable function names.
+  Idempotent: running it twice against the real stack with unchanged
+  sources produced the identical total chunk count (104) both times.
+- **`POST /api/v1/retrieval/search`** — bounded (query length, result
+  limits, UUID, no arbitrary extra field — closed Pydantic contract),
+  no per-request provider selection, parameterized queries throughout.
+  `similarity` is documented explicitly as a retrieval ranking score
+  only, never a probability or LLM confidence value. `exclude_incident_id`
+  is enforced via a real `source_key <> $N` predicate — proven against
+  the real database that the excluded incident never appears in its
+  own historical results.
+- **E vs. K vs. H, enforced structurally, not just documented.**
+  `Observation` has only an `evidence_ids` field — there is no field
+  for it to cite `K<n>`/`H<n>` with. `Hypothesis` gained
+  `supporting_context_ids`/`conflicting_context_ids`, sanitized the
+  same way evidence is (fabricated ids stripped and recorded), but
+  retention is governed SOLELY by real `supporting_evidence_ids` — a
+  hypothesis backed only by historical/knowledge context is dropped
+  exactly like one with zero support at all. Current-incident evidence
+  keeps first claim on the entire `max_prompt_chars` budget (Phase 5's
+  hard ceiling, unweakened); retrieved context spends only whatever
+  room remains, under its own count/excerpt/total-character
+  sub-bounds, and is trimmed before evidence is ever touched again —
+  with the in-prompt omission note itself bounded, so it can never be
+  what pushes the prompt over the ceiling.
+- **Graceful degradation.** retrieval-service unreachable ->
+  `retrieval_context.outcome="unavailable"`, investigation still
+  succeeds on Phase 5 evidence alone. Zero real matches ->
+  `"no_data"`, a distinct, honest case. investigator-service's own
+  `/health/ready` never depends on retrieval-service.
+- **`scripts/verify-rag.sh` / `make verify-rag`** — sources
+  `verify-investigator.sh` for its reusable helpers rather than
+  duplicating them; placed after both the Phase 4 and Phase 5 gates in
+  CI, reusing the same real incident and the same
+  `PHASE5_FRESHNESS_CHECKPOINT` rather than causing another outage or
+  inventing a second checkpoint mechanism. Run against the real stack
+  in this environment: V5/pgvector confirmed applied; real indexing
+  (4 knowledge docs -> 21 chunks; 79 real historical incidents -> 83
+  chunks); a second run proved idempotent; a real cosine-distance
+  search for "checkout 5xx payment dependency unavailable" retrieved
+  `runbooks/checkout-server-errors.md`; a real historical search
+  correctly excluded the current incident from its own results; a
+  real, RAG-integrated investigation (deterministic stub LLM provider)
+  returned real K/H provenance with every E/K/H citation independently
+  re-verified; the current incident and its complete audit trail were
+  confirmed byte-for-byte unchanged throughout.
+  - **Final validation:** `make retrieval-test` — **66/66 passed**
+    (chunking determinism/bounds, allowlisted-root/symlink-escape
+    refusal, local-embedding determinism across separate processes/
+    dimension/normalization, OpenAI missing-key/error-secrecy,
+    historical-text bounding/redaction/empty-history handling, search
+    request validation, indexer call-shape idempotency, read-only
+    structural guarantees, and the deterministic retrieval-quality
+    smoke test against the real runbooks); `make investigator-test` —
+    **150/150 passed** (was 121; new RAG prompt/validation/integration
+    tests added, zero Phase 5 tests weakened); `bash -n` on the new
+    verifier; `docker compose config`; a real `flyway migrate` applying
+    V5 against the real, pre-existing database; a real
+    `make verify-rag` run — **passed**, in historical/local mode (no
+    `PHASE5_FRESHNESS_CHECKPOINT` set locally). The real OpenAI
+    embedding path remains **not** smoke-tested — no credential is
+    available in this environment. The Compose stack was left running
+    with the real indexed corpus in place; no historical incident or
+    audit row was touched by any step in this phase.

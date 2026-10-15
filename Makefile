@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation verify-investigator test-verify-investigator-restore investigate
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation verify-investigator test-verify-investigator-restore investigate
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -32,6 +32,12 @@ help: ## Show available targets
 	@echo "  investigator-build  Build the investigator-service Docker image"
 	@echo "  investigator-test   Run investigator-service unit tests on Python 3.13 (via Docker)"
 	@echo "  investigator-logs   Show recent investigator-service logs"
+	@echo "  retrieval-build     Build the retrieval-service Docker image"
+	@echo "  retrieval-test      Run retrieval-service unit tests on Python 3.13 (via Docker)"
+	@echo "  retrieval-logs      Show recent retrieval-service logs"
+	@echo "  rag-index           Phase 6: index source-controlled knowledge + current historical incidents (idempotent)"
+	@echo "  verify-rag          Phase 6 real-evidence acceptance: pgvector schema, indexing, search, RAG-integrated investigation, no mutation"
+	@echo "  rag-search          Phase 6: search the retrieval index: make rag-search QUERY=\"checkout payment failures\""
 	@echo "  verify-observability Bundled Phase 2A.1-2B.4 verification (starts Compose, checks everything, tears down)"
 	@echo "  verify-persistence  Phase 3A persistence verification (migrations, schema, constraints, restart persistence)"
 	@echo "  verify-control-plane Phase 3B control-plane integration verification (real PostgreSQL, real HTTP API)"
@@ -168,6 +174,56 @@ investigator-test: ## Run investigator-service unit tests on Python 3.13 (via Do
 
 investigator-logs: ## Show recent investigator-service logs
 	docker compose logs --tail=100 investigator-service
+
+retrieval-build: ## Build the retrieval-service Docker image
+	docker compose build retrieval-service
+
+# Same convention as investigator-test: unit tests only, against
+# fake/stub doubles (httpx.MockTransport, monkeypatched db.py
+# functions, the deterministic LocalLexicalEmbeddingProvider -- see
+# services/retrieval-service/tests/), never a real database connection
+# and never a real, paid embedding API call. The second mount makes
+# the REAL source-controlled knowledge/runbooks/ corpus available at
+# /knowledge for the deterministic retrieval-quality smoke test
+# (Phase 6 §18) -- a read-only mount, never written to by tests. Run
+# `make verify-rag` for the real, running-stack integration check.
+retrieval-test: ## Run retrieval-service unit tests on Python 3.13 (via Docker)
+	docker run --rm \
+		-v "$(CURDIR)/services/retrieval-service:/app" \
+		-v "$(CURDIR)/knowledge:/knowledge:ro" \
+		-e RETRIEVAL_TEST_KNOWLEDGE_ROOT=/knowledge \
+		-w /app python:3.13-slim \
+		bash -c "pip install -q -e '.[dev]' && pytest"
+
+retrieval-logs: ## Show recent retrieval-service logs
+	docker compose logs --tail=100 retrieval-service
+
+# Phase 6: the explicit, offline indexer (python -m
+# retrieval_service.indexer) -- the ONLY code allowed to write
+# reliability.retrieval_chunks. Requires retrieval-service (and
+# control-plane) already running and healthy (`make db-up`). Safe to
+# run repeatedly: idempotent by construction (see db.py's own ON
+# CONFLICT upsert target) -- a second immediate run with unchanged
+# sources creates no duplicates.
+rag-index: ## Phase 6: index source-controlled knowledge + current historical incidents (idempotent)
+	docker compose exec -T retrieval-service python -m retrieval_service.indexer
+
+verify-rag: ## Phase 6 real-evidence acceptance: pgvector schema, indexing, search, RAG-integrated investigation, no mutation
+	./scripts/verify-rag.sh
+
+# Bound/safely JSON-encoded via python3 -c, never naive shell string
+# concatenation -- a QUERY containing a double quote or backslash
+# still produces valid JSON. Requires retrieval-service running
+# (`make db-up`) and reachable at 127.0.0.1:8002.
+rag-search: ## Phase 6: search the retrieval index: make rag-search QUERY="checkout payment failures"
+	@if [ -z "$(QUERY)" ]; then \
+		echo "usage: make rag-search QUERY=\"<search text>\"" >&2; \
+		exit 1; \
+	fi
+	@body="$$(python3 -c 'import json, sys; print(json.dumps({"query": sys.argv[1], "knowledge_limit": 3, "historical_incident_limit": 3}))' "$(QUERY)")"; \
+	curl -sS -X POST http://127.0.0.1:8002/api/v1/retrieval/search \
+		-H "Content-Type: application/json" \
+		-d "$$body" | python3 -m json.tool
 
 verify-observability: ## Bundled Phase 2A.1-2B.4 verification (starts Compose, checks everything, tears down)
 	./scripts/verify-observability.sh

@@ -375,6 +375,39 @@ Full inventory:
   confirmed by an AST-level test to never call a write HTTP verb. No
   Flyway migration was added. Full detail:
   [docs/architecture/phase-5-ai-investigator.md](phase-5-ai-investigator.md).
+- **RAG and historical incident retrieval** (Phase 6,
+  `services/retrieval-service`): a new, seventh backend application,
+  EXTENDING Phase 5 rather than replacing anything in it. Owns a real
+  PostgreSQL + pgvector retrieval index (`reliability.retrieval_chunks`,
+  `database/migrations/V5__create_retrieval_index.sql` — purely
+  additive, V1-V4 untouched) over source-controlled operational
+  knowledge (`knowledge/runbooks/*.md`) and real historical incidents,
+  the latter indexed only through control-plane's existing `GET`
+  APIs, never a direct `reliability.incidents` read. Its HTTP API
+  (`POST /api/v1/retrieval/search`) is search-only; all writes happen
+  through a separate, explicit, offline indexer
+  (`python -m retrieval_service.indexer` / `make rag-index`), never as
+  a side effect of a request — confirmed structurally. Two embedding
+  providers (a deterministic, offline lexical hashing provider used by
+  default/tests/CI, and a real, configurable OpenAI provider behind a
+  credential distinct from investigator-service's own LLM key) are
+  isolated from each other by an `embedding_space` column every search
+  filters on first. investigator-service can now retrieve bounded
+  knowledge/historical-incident context (`K<n>`/`H<n>` ids, strictly
+  separate from current-incident evidence's own `E<n>` ids) to enrich
+  a hypothesis, but a hypothesis still requires real current-incident
+  evidence to survive validation at all — retrieved context can never
+  substitute for it. investigator-service itself still holds zero
+  PostgreSQL credentials and neither of control-plane's write-capable
+  Bearer tokens; retrieval-service is the only new component with
+  database access, and only to its own one table. The `postgres`
+  Compose service moved from `postgres:18` to the pgvector-maintained
+  `pgvector/pgvector:pg18` image (same PostgreSQL version, same data-
+  directory/volume layout, confirmed empirically) — the existing,
+  real, accumulated `postgres_data` volume was reused unmodified, with
+  every pre-existing incident/audit row confirmed byte-for-byte
+  unchanged across the swap. Full detail:
+  [docs/architecture/phase-6-rag-retrieval.md](phase-6-rag-retrieval.md).
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.

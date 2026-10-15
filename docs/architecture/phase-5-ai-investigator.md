@@ -14,6 +14,19 @@ agent.** It cannot create, modify, or resolve an incident; it cannot
 execute anything; it has no tools, no shell, no database access, and
 no Docker access.
 
+> **Phase 6 note:** everything below describes Phase 5 exactly as it
+> shipped — nothing here has been rewritten. Phase 6
+> (`docs/architecture/phase-6-rag-retrieval.md`) later EXTENDS this
+> same service with an additional, optional retrieval step (real
+> source-controlled knowledge and historical-incident context, via a
+> new, separate `retrieval-service`) before the single LLM call this
+> document describes. Every guarantee below — the hard prompt
+> character ceiling, fabricated-citation rejection, the deterministic
+> validated-only summary, zero PostgreSQL credentials, zero
+> write-capable control-plane tokens — remains true after Phase 6; see
+> that document for what was added and how it was kept from weakening
+> any of this.
+
 ## 1. Architecture
 
 A new, sixth backend service, `services/investigator-service`

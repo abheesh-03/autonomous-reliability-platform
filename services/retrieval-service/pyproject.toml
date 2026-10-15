@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retrieval-service"
+version = "0.1.0"
+description = "Phase 6 RAG retrieval index for the Autonomous Production Reliability Platform. Owns a PostgreSQL + pgvector retrieval table (reliability.retrieval_chunks) holding source-controlled knowledge and historical-incident chunks. Its HTTP API is search-only (read-only); writes happen only via its explicit, offline indexer (python -m retrieval_service.indexer / make rag-index). Historical incidents are indexed through control-plane's existing GET APIs only -- never a direct read of reliability.incidents, and it never writes an incident, an incident event, or calls any control-plane write endpoint."
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi==0.142.2",
+    "uvicorn==0.54.0",
+    "pydantic==2.13.5",
+    "httpx==0.28.1",
+    "asyncpg==0.31.0",
+    "openai==3.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

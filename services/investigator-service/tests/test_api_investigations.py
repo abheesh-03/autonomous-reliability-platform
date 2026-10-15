@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from investigator_service.clients.control_plane import ControlPlaneUnavailableError, IncidentNotFoundError
 from investigator_service.domain.evidence import EvidenceItem, EvidencePackage, SourceOutcome
 from investigator_service.domain.investigation import InvestigationReport, ProviderMetadata
+from investigator_service.domain.retrieval import RetrievalContext
 from investigator_service.investigator import ProviderNotConfiguredError
 from investigator_service.llm.provider import ProviderError
 from investigator_service.llm.validation import ProviderOutputError
@@ -48,6 +49,7 @@ def _report() -> InvestigationReport:
         suggested_checks=[],
         evidence=[EvidenceItem(id="E1", source="control_plane", summary="s", detail="d")],
         source_outcomes=[SourceOutcome(source="control_plane", status="ok", detail="d")],
+        retrieval_context=RetrievalContext(outcome="unavailable", detail="retrieval-service is not configured"),
         provider=ProviderMetadata(configured=True, provider="stub", model="stub-deterministic-v1"),
     )
 

@@ -82,6 +82,30 @@ class TelemetrySettings:
 
 
 @dataclass(frozen=True)
+class RetrievalSettings:
+    """Phase 6 §11: the read-only RAG retrieval client. `url` is a
+    plain HTTP URL to retrieval-service's search-only API -- the same
+    trust boundary as Prometheus/Loki/Tempo's URLs above, never a
+    PostgreSQL credential (this service still holds none). A blank
+    `url` disables retrieval entirely (same non-blocking-startup
+    philosophy as LLMSettings): the investigation still proceeds using
+    Phase 5 evidence alone, with retrieval_context.outcome reported as
+    "unavailable" (Phase 6 §16)."""
+
+    url: str
+    connect_timeout_seconds: float
+    request_timeout_seconds: float
+
+    @classmethod
+    def from_env(cls) -> "RetrievalSettings":
+        return cls(
+            url=os.environ.get("INVESTIGATOR_RETRIEVAL_URL", "").strip(),
+            connect_timeout_seconds=_float_env("INVESTIGATOR_RETRIEVAL_CONNECT_TIMEOUT_SECONDS", 3.0),
+            request_timeout_seconds=_float_env("INVESTIGATOR_RETRIEVAL_REQUEST_TIMEOUT_SECONDS", 8.0),
+        )
+
+
+@dataclass(frozen=True)
 class LLMSettings:
     """The one real, configurable LLM provider (Phase 5 §6): OpenAI's
     Chat Completions API, selected via INVESTIGATOR_LLM_API_KEY being
@@ -194,4 +218,38 @@ class EvidenceBounds:
             evidence_window_after_seconds=_clamped_int_env("INVESTIGATOR_WINDOW_AFTER_SECONDS", 900, 60, 86400),
             max_prompt_evidence_items=_clamped_int_env("INVESTIGATOR_MAX_PROMPT_EVIDENCE_ITEMS", 80, 5, 500),
             max_prompt_chars=_clamped_int_env("INVESTIGATOR_MAX_PROMPT_CHARS", 40_000, 2_000, 200_000),
+        )
+
+
+@dataclass(frozen=True)
+class RagBounds:
+    """Phase 6 §14: separate, practical bounds for retrieved context --
+    deliberately independent of EvidenceBounds above, which governs
+    current-incident evidence only. Retrieved context always competes
+    for space INSIDE the existing `max_prompt_chars` hard ceiling
+    (never a separate, additional ceiling that could let the overall
+    prompt exceed it) and is always the lowest-priority material: see
+    llm/prompt.py's `build_prompts`, which gives current-incident
+    evidence first claim on the whole budget and only spends what's
+    left on retrieved context, trimming retrieved context first (never
+    evidence) if the two together would exceed the ceiling.
+
+    `max_rag_context_chars` is a further, usually-tighter sub-budget
+    within whatever room is left after evidence -- it exists so
+    retrieved context has its own small, predictable footprint even
+    when the overall prompt ceiling is generously sized.
+    """
+
+    max_knowledge_contexts: int
+    max_historical_contexts: int
+    max_context_excerpt_chars: int
+    max_rag_context_chars: int
+
+    @classmethod
+    def from_env(cls) -> "RagBounds":
+        return cls(
+            max_knowledge_contexts=_clamped_int_env("INVESTIGATOR_MAX_KNOWLEDGE_CONTEXTS", 3, 0, 20),
+            max_historical_contexts=_clamped_int_env("INVESTIGATOR_MAX_HISTORICAL_CONTEXTS", 3, 0, 20),
+            max_context_excerpt_chars=_clamped_int_env("INVESTIGATOR_MAX_CONTEXT_EXCERPT_CHARS", 500, 50, 5000),
+            max_rag_context_chars=_clamped_int_env("INVESTIGATOR_MAX_RAG_CONTEXT_CHARS", 6000, 0, 100_000),
         )

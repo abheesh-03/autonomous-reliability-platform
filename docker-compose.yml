@@ -90,8 +90,23 @@
 # .env is gitignored and must never be committed.
 
 services:
+  # Phase 6: swapped from the official postgres:18 image to
+  # pgvector/pgvector:pg18 -- a pgvector-maintained image built FROM
+  # PostgreSQL 18 (confirmed empirically: identical PG_VERSION/PGDATA
+  # path/volume mount as the official image; this is an additive
+  # capability swap, never a downgrade) that bundles the pgvector
+  # extension (confirmed: vector.control default_version 0.8.7) so
+  # V5__create_retrieval_index.sql's `CREATE EXTENSION vector` has
+  # something to load. The existing named volume (postgres_data) is
+  # reused UNCHANGED -- confirmed locally, before this phase was
+  # considered complete, that real pre-existing reliability.incidents/
+  # reliability.incident_events rows survive this exact image swap
+  # byte-for-byte (see docs/architecture/phase-6-rag-retrieval.md's
+  # "Data safety during PostgreSQL image change" section for the full
+  # before/after proof) -- never docker compose down -v, never a
+  # manually recreated volume.
   postgres:
-    image: postgres:18
+    image: pgvector/pgvector:pg18
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -193,6 +208,56 @@ services:
       retries: 5
       start_period: 15s
 
+  # Phase 6: owns the pgvector-backed retrieval index
+  # (reliability.retrieval_chunks). Unlike investigator-service, this
+  # service DOES hold PostgreSQL credentials (it is the only
+  # application besides control-plane that does) -- it never reads
+  # CONTROL_PLANE_WEBHOOK_TOKEN/CONTROL_PLANE_LIFECYCLE_TOKEN, and its
+  # control-plane client (used only by its offline indexer, never by
+  # its HTTP app) has no write method at all. Its HTTP API
+  # (POST /api/v1/retrieval/search) is read-only; writes happen only
+  # via the separate `python -m retrieval_service.indexer` / `make
+  # rag-index`, run explicitly, never from an HTTP handler. The
+  # source-controlled knowledge/ directory is mounted read-only and is
+  # the ONLY filesystem root the indexer will ever read from.
+  retrieval-service:
+    build:
+      context: ./services/retrieval-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      control-plane:
+        condition: service_healthy
+    volumes:
+      - ./knowledge:/knowledge:ro
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      RETRIEVAL_CONTROL_PLANE_URL: http://control-plane:8000
+      RETRIEVAL_KNOWLEDGE_ROOT: /knowledge
+      # "local" (default) uses the deterministic, offline lexical
+      # hashing provider -- always available, no credential, what
+      # normal CI and scripts/verify-rag.sh both use. "openai" uses a
+      # real embedding model and REQUIRES RETRIEVAL_EMBEDDING_API_KEY
+      # -- a credential DISTINCT from investigator-service's own
+      # INVESTIGATOR_LLM_API_KEY; this service has no reason to ever
+      # see that one. Never a real credential committed here.
+      RETRIEVAL_EMBEDDING_PROVIDER: ${RETRIEVAL_EMBEDDING_PROVIDER:-local}
+      RETRIEVAL_EMBEDDING_API_KEY: ${RETRIEVAL_EMBEDDING_API_KEY:-}
+      RETRIEVAL_EMBEDDING_MODEL: ${RETRIEVAL_EMBEDDING_MODEL:-text-embedding-3-small}
+      RETRIEVAL_EMBEDDING_BASE_URL: ${RETRIEVAL_EMBEDDING_BASE_URL:-}
+    ports:
+      - "127.0.0.1:8002:8002"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health/live', timeout=3)\" || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   investigator-service:
     build:
       context: ./services/investigator-service
@@ -212,6 +277,14 @@ services:
       INVESTIGATOR_PROMETHEUS_URL: http://prometheus:9090
       INVESTIGATOR_LOKI_URL: http://loki:3100
       INVESTIGATOR_TEMPO_URL: http://tempo:3200
+      # Phase 6: the read-only RAG retrieval client (Phase 6 §11).
+      # NEITHER a PostgreSQL credential NOR retrieval-service's own
+      # database access -- this is a plain HTTP URL to
+      # retrieval-service's search-only API, same trust boundary as
+      # the Prometheus/Loki/Tempo URLs above. Retrieval unavailability
+      # degrades gracefully (Phase 6 §16): investigation still
+      # succeeds using Phase 5 evidence alone.
+      INVESTIGATOR_RETRIEVAL_URL: http://retrieval-service:8002
       # Phase 5: the one real, configurable LLM provider (OpenAI).
       # Defaults to empty so `docker compose config` and a clean
       # startup both still work with no key ever set — this service
