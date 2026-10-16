@@ -21,9 +21,11 @@ recreated, never a new Python process -- recovers readiness after a
 real connection-killing event, with pre-existing checkpoint data still
 readable and a new checkpoint still writable afterward.
 
-Connection-killing mechanism: `pg_terminate_backend` against the real
-`agent_runtime` role's own live backend PID(s), from a separate real
-admin connection (the existing `POSTGRES_USER` superuser -- never the
+Connection-killing mechanism: `pg_terminate_backend` against the ONE
+specific real backend PID this test's own `CheckpointStore`/pool is
+actually using -- captured via `SELECT pg_backend_pid()` through that
+exact pool BEFORE terminating anything -- from a separate real admin
+connection (the existing `POSTGRES_USER` superuser -- never the
 least-privileged `agent_runtime` role itself, which has no privilege
 to terminate any backend). This is a real PostgreSQL "backend
 restart" in PostgreSQL's own terminology -- one of the two mechanisms
@@ -33,6 +35,20 @@ this test never disrupts other tests/services sharing the same CI
 PostgreSQL instance) -- and empirically reproduces the EXACT
 `AdminShutdown` error CI #33 hit, on the very next use of that
 connection.
+
+Deliberately scoped to that ONE captured PID, never to "every backend
+connected as agent_runtime" (ultrareview finding, post-commit
+follow-up): by the time this real-database-gated test runs in CI, the
+real `agent-runtime-service` container from "Start Compose environment"
+is already up and holds its OWN pooled connection(s) under the exact
+same `agent_runtime` role. A blanket
+`SELECT pid FROM pg_stat_activity WHERE usename = 'agent_runtime'` would
+also enumerate and terminate THAT container's connection(s) as
+collateral damage -- an unintended, uncontrolled side effect on an
+unrelated, already-running service, and it would let this test's own
+`killed >= 1`-style assertion pass even if the test's own connection
+was never among those actually terminated, proving nothing about the
+object under test.
 
 Real-database-gated exactly like test_db_privilege_boundary.py /
 test_checkpoint_durability.py: gracefully SKIPPED when no real
@@ -81,10 +97,29 @@ def _admin_conn_kwargs() -> dict:
     }
 
 
-async def _kill_agent_runtime_backends() -> int:
-    """Connects as the real superuser and terminates every live backend
-    currently connected as the dedicated `agent_runtime` role. Returns
-    the number of backends killed."""
+async def _backend_pid_of_pool(pool) -> int:
+    """Returns the real PostgreSQL backend PID of a connection actually
+    drawn from `pool` -- this is what lets the kill below be scoped to
+    exactly the test's own pooled connection, never any other session
+    (e.g. a live agent-runtime-service container) that happens to share
+    the same `agent_runtime` role. `pool` is this test's own
+    `CheckpointStore._pool` -- an intentional, test-only reach into a
+    private attribute, purely for this introspection; production code
+    never does this."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT pg_backend_pid() AS pid")
+        row = await cur.fetchone()
+    return row["pid"]
+
+
+async def _terminate_backend(pid: int) -> bool:
+    """Connects as the real superuser and terminates EXACTLY the given
+    backend PID -- never discovers or kills any other session, so this
+    can never disrupt an unrelated connection (e.g. the real, already-
+    running agent-runtime-service container in CI, which shares the
+    same `agent_runtime` role but is a completely different process's
+    own connection). Returns pg_terminate_backend's own real result:
+    True only if a termination signal was actually sent to that PID."""
     admin = _admin_conn_kwargs()
     conn = await psycopg.AsyncConnection.connect(
         f"postgresql://{admin['user']}:{admin['password']}@{admin['host']}:{admin['port']}/{admin['dbname']}",
@@ -92,11 +127,13 @@ async def _kill_agent_runtime_backends() -> int:
     )
     try:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT pid FROM pg_stat_activity WHERE usename = 'agent_runtime'")
-            pids = [row[0] async for row in cur]
-            for pid in pids:
-                await cur.execute("SELECT pg_terminate_backend(%s)", (pid,))
-        return len(pids)
+            # This admin connection uses psycopg's own default tuple row
+            # factory (never dict_row -- that's only configured on the
+            # TEST POOL's own connections, see the fixture below), so
+            # row[0] here, not a dict key.
+            await cur.execute("SELECT pg_terminate_backend(%s)", (pid,))
+            row = await cur.fetchone()
+        return bool(row[0])
     finally:
         await conn.close()
 
@@ -169,11 +206,17 @@ async def test_checkpoint_store_pool_recovers_after_real_backend_termination(che
     # 4: confirm readiness genuinely works before the kill.
     assert await checkpoint_store.ping() is True
 
-    # 5/6: cause the underlying connection(s) to become invalid via a
-    # REAL PostgreSQL backend termination -- the exact mechanism this
-    # fix's own requirements name, reproducing CI #33's AdminShutdown.
-    killed = await _kill_agent_runtime_backends()
-    assert killed >= 1, "expected at least one live agent_runtime backend to terminate -- is the pool actually open?"
+    # 5/6: cause the underlying connection to become invalid via a REAL
+    # PostgreSQL backend termination -- the exact mechanism this fix's
+    # own requirements name, reproducing CI #33's AdminShutdown.
+    # Scoped to EXACTLY this test's own pooled connection: capture its
+    # real backend PID first, then terminate only that PID -- never a
+    # blanket sweep of every `agent_runtime` session, which in CI would
+    # also hit the already-running agent-runtime-service container's
+    # own connection(s) sharing that same role.
+    target_pid = await _backend_pid_of_pool(checkpoint_store._pool)  # noqa: SLF001 -- test-only introspection
+    terminated = await _terminate_backend(target_pid)
+    assert terminated, f"expected backend pid {target_pid} (this test's own pooled connection) to terminate"
 
     # 7: nothing was "stopped" (only a backend was killed), so there is
     # nothing separate to "restore" here -- the pool itself must detect

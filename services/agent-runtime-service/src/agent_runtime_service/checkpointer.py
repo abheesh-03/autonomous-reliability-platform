@@ -25,13 +25,27 @@ as `AsyncConnection[DictRow] | AsyncConnectionPool[AsyncConnection[DictRow]]`,
 and it explicitly branches on `isinstance(conn, AsyncConnectionPool)`,
 so this is real, intended, upstream-supported usage -- not a hack).
 `psycopg_pool`'s own pool already detects and replaces a dead/bad
-connection on next use; this is its own built-in resilience, never a
-custom reconnection framework written here. Empirically proven before
-this was adopted: killing this exact role's live backend via
-`pg_terminate_backend` reproduces the exact `AdminShutdown` CI saw on
-the very next pool checkout, and the checkout immediately after that
-succeeds with a fresh, healthy connection -- transparently, with no
-process restart.
+connection; this is its own built-in resilience, never a custom
+reconnection framework written here. Empirically proven before this
+was adopted: killing this exact role's live backend via
+`pg_terminate_backend` reproduces the exact `AdminShutdown` CI saw.
+
+Ultrareview follow-up fix: the pool is constructed with
+`check=AsyncConnectionPool.check_connection` -- confirmed, by reading
+the installed, pinned `psycopg_pool==3.3.3` source, to be a real
+`@staticmethod` the library itself documents as "available for client
+usage ... as a `check` callback when a pool is created", and to run on
+every checkout via `_getconn_with_check_loop`/`_check_connection`:
+if the check fails, the pool discards that connection and transparently
+retries with another BEFORE ever handing one to the caller. Without
+this, a caller could still receive a stale, already-dead connection
+after a restart and see `AdminShutdown` directly -- not just
+`ping()`/`identity()` (which already treat any failure as "not ready"
+regardless), but a REAL LangGraph checkpoint write/read
+(`saver.aput`/`aget_tuple`) during an actual agent run. With `check=`
+configured, the dead connection is caught and replaced inside the pool
+itself, so even that first post-restart checkpoint operation gets a
+healthy connection transparently.
 
 This is an intentionally SMALL pool
 (`CheckpointDbSettings.pool_min_size`/`pool_max_size`, default 1/4,
@@ -82,6 +96,16 @@ class CheckpointStore:
             min_size=self._settings.pool_min_size,
             max_size=self._settings.pool_max_size,
             kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+            # Ultrareview follow-up fix: validates a connection on every
+            # checkout (a trivial `execute("")`) before handing it to
+            # any caller -- discards and transparently replaces a
+            # stale/dead one (e.g. after a real PostgreSQL restart)
+            # instead of letting a real caller (ping()/identity(), or a
+            # genuine LangGraph checkpoint write/read) observe
+            # AdminShutdown directly. Real, upstream-documented usage,
+            # not custom reconnection logic -- see this module's own
+            # docstring.
+            check=AsyncConnectionPool.check_connection,
         )
         await self._pool.open(wait=True, timeout=self._settings.pool_open_timeout_seconds)
 

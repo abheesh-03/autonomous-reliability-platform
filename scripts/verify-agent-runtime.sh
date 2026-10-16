@@ -71,32 +71,63 @@ agent_runtime_get() {
 # moment to report ready again, exactly as proven by
 # test_checkpoint_pool_recovery.py. Bounded retry (never unbounded --
 # a permanently broken database must still fail CI, not hang it):
-# up to 20 attempts, 2s apart (~40s), each requiring a REAL 200 with
-# status=ready, checkpoint_store.reachable=true, AND the dedicated
-# agent_runtime identity -- never merely /health/live, which proves
-# nothing about the checkpoint database at all.
+# up to 20 attempts, 2s apart (~40s).
+#
+# Ultrareview follow-up fix: a REAL 200 whose reported identity is NOT
+# current_user=current_schema=search_path=agent_runtime is a
+# deterministic security-boundary violation (Phase 7 correction round
+# finding #6), never a transient condition that more waiting could
+# possibly fix -- it must fail IMMEDIATELY, with the full diagnostic
+# visible, rather than being retried blindly for ~40s and then
+# reported as a generic, undiagnosable "never confirmed ready" timeout
+# (which is what an earlier version of this function did, piping the
+# assertion's own detail to /dev/null on every attempt). Everything
+# else genuinely transient (non-200, or 200 but not yet
+# status=ready/reachable=true/identity not yet populated) still
+# retries exactly as before.
+_agent_runtime_ready_check_py='
+import json, sys
+body = json.load(sys.stdin)
+if body.get("status") != "ready" or body.get("checkpoint_store", {}).get("reachable") is not True:
+    print("not yet ready (status/reachable)", file=sys.stderr)
+    sys.exit(1)
+identity = body.get("checkpoint_store", {}).get("identity")
+if identity is None:
+    print("ready but no identity reported yet", file=sys.stderr)
+    sys.exit(1)
+expected = "agent_runtime"
+mismatches = []
+for k in ("current_user", "current_schema", "search_path"):
+    actual = identity.get(k)
+    if actual != expected:
+        mismatches.append(k + "=" + repr(actual) + " (expected " + repr(expected) + ")")
+if mismatches:
+    print("IDENTITY_MISMATCH: " + "; ".join(mismatches), file=sys.stderr)
+    sys.exit(2)
+'
 wait_agent_runtime_ready() {
   local attempts=20
-  local body
+  local body status json diagnostic py_exit
   for i in $(seq 1 "$attempts"); do
     body="$(curl -s --connect-timeout 2 --max-time 10 -w '\n%{http_code}' "$AGENT_RUNTIME_URL/health/ready")"
     status="$(echo "$body" | tail -1)"
     json="$(echo "$body" | sed '$d')"
-    if [ "$status" = "200" ] && echo "$json" | python3 -c "
-import json, sys
-body = json.load(sys.stdin)
-assert body['status'] == 'ready', body
-assert body['checkpoint_store']['reachable'] is True, body
-identity = body['checkpoint_store']['identity']
-assert identity is not None, 'expected a live identity block in /health/ready'
-assert identity['current_user'] == 'agent_runtime', identity
-assert identity['current_schema'] == 'agent_runtime', identity
-assert identity['search_path'] == 'agent_runtime', identity
-" 2>/dev/null; then
-      echo "$json"
-      return 0
+    if [ "$status" = "200" ]; then
+      diagnostic="$(echo "$json" | python3 -c "$_agent_runtime_ready_check_py" 2>&1)" && py_exit=0 || py_exit=$?
+      if [ "$py_exit" -eq 0 ]; then
+        echo "$json"
+        return 0
+      fi
+      if [ "$py_exit" -eq 2 ]; then
+        echo "FAIL: /health/ready returned 200 but with an INCORRECT checkpoint identity -- a deterministic security-boundary violation (Phase 7 correction round finding #6), never a transient readiness gap, so this is NEVER retried:" >&2
+        echo "  $diagnostic" >&2
+        echo "  full response body: $json" >&2
+        return 2
+      fi
+      echo "  attempt $i/$attempts: /health/ready returned 200 but not yet fully ready ($diagnostic)" >&2
+    else
+      echo "  attempt $i/$attempts: /health/ready not yet confirmed ready (http=$status)" >&2
     fi
-    echo "  attempt $i/$attempts: /health/ready not yet confirmed ready (http=$status)" >&2
     sleep 2
   done
   return 1
@@ -136,7 +167,7 @@ wait_healthy retrieval-service 20 || fail "retrieval-service is not healthy"
 wait_healthy agent-runtime-service 20 || fail "agent-runtime-service is not healthy"
 
 section "1. Verify agent-runtime-service readiness AND its own live checkpoint-connection identity (bounded retry)"
-ready_body="$(wait_agent_runtime_ready)" || fail "/health/ready never confirmed ready (status=ready, checkpoint_store.reachable=true, agent_runtime identity) within the bounded retry window -- never merely /health/live, which proves nothing about the checkpoint database"
+ready_body="$(wait_agent_runtime_ready)" || fail "/health/ready never confirmed ready (status=ready, checkpoint_store.reachable=true, agent_runtime identity) -- either the bounded retry window was exhausted, or a deterministic identity mismatch failed it immediately (see the diagnostic above); never merely /health/live, which proves nothing about the checkpoint database"
 echo "  /health/ready: $ready_body"
 echo "  confirmed: the live service's own checkpoint connection is current_user=agent_runtime current_schema=agent_runtime"
 
