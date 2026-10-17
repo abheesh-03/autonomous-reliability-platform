@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -59,6 +59,14 @@ help: ## Show available targets
 	@echo "  verify-agent-runtime Phase 7 real-evidence acceptance: durable LangGraph agent runs, dedicated DB role isolation, restart persistence, no mutation"
 	@echo "  test-db-up-order    Phase 7 focused test: db-up's recipe provisions the checkpoint DB credential before agent-runtime-service is created (no Docker required)"
 	@echo "  test-init-agent-runtime-db-fresh Phase 7 regression test: init-agent-runtime-db.sh succeeds on a genuinely fresh database (no reliability schema yet), against a real isolated/temporary PostgreSQL"
+	@echo "  tool-gateway-build  Build the tool-gateway Docker image"
+	@echo "  tool-gateway-test   Run tool-gateway gofmt/vet/test/build on Go 1.27 (via Docker)"
+	@echo "  tool-gateway-logs   Show recent tool-gateway logs"
+	@echo "  remediation-secret-init Generate/verify the six Phase 8 remediation Bearer tokens in .env (idempotent)"
+	@echo "  verify-remediation  Phase 8 real-evidence acceptance: human-approved remediation, tool-gateway execution, real recovery"
+	@echo "  test-remediation-cleanup-resilience  Phase 8 correction-round focused test: EXIT cleanup tolerates a simulated payment_fault_get failure (no Docker required)"
+	@echo "  remediation-approve Approve a pending remediation proposal: make remediation-approve PROPOSAL_ID=<uuid> [COMMENT=\"...\"]"
+	@echo "  remediation-reject  Reject a pending remediation proposal: make remediation-reject PROPOSAL_ID=<uuid> [COMMENT=\"...\"]"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -94,6 +102,7 @@ compose-config: ## Validate docker-compose.yml
 # test proving this exact ordering in this target.
 db-up: ## Start the Compose environment (docker compose up -d)
 	./scripts/init-webhook-secret.sh
+	./scripts/init-remediation-secrets.sh
 	docker compose up -d postgres
 	./scripts/init-agent-runtime-db.sh
 	docker compose up -d
@@ -412,3 +421,77 @@ test-db-up-order: ## Phase 7 focused test: db-up's recipe provisions the checkpo
 # REVOKEs once Flyway creates the real reliability schema.
 test-init-agent-runtime-db-fresh: ## Phase 7 regression test: init-agent-runtime-db.sh succeeds on a genuinely fresh database (no reliability schema yet), against a real isolated/temporary PostgreSQL
 	./scripts/test-init-agent-runtime-db-fresh.sh
+
+tool-gateway-build: ## Build the tool-gateway Docker image
+	docker compose build tool-gateway
+
+# Go isn't installed locally for this repo; running gofmt/vet/test/build
+# inside golang:1.27 keeps results reproducible and consistent with CI,
+# same convention as inventory-test. `go build` is included (unlike
+# inventory-test) because this is this target's own fastest path to a
+# full, real compile check -- `make tool-gateway-build` above already
+# does the same compile as part of the real Docker image.
+tool-gateway-test: ## Run tool-gateway gofmt/vet/test/build on Go 1.27 (via Docker)
+	docker run --rm -v "$(CURDIR)/services/tool-gateway:/build" -w /build golang:1.27 \
+		bash -c 'test -z "$$(gofmt -l .)" && go vet ./... && go test ./... && CGO_ENABLED=0 GOOS=linux go build -o /tmp/tool-gateway ./cmd/tool-gateway'
+
+tool-gateway-logs: ## Show recent tool-gateway logs
+	docker compose logs --tail=100 tool-gateway
+
+# Phase 8: generates/verifies the six remediation Bearer tokens this
+# phase introduces (see scripts/init-remediation-secrets.sh's own
+# docstring). `make db-up` already calls this itself, before any
+# container that reads one of these tokens is ever created (the same
+# startup-ordering lesson Phase 7 learned the hard way) -- this target
+# exists for running it standalone, e.g. after a manual `docker compose
+# up -d` that bypassed `make db-up`.
+remediation-secret-init: ## Generate/verify the six Phase 8 remediation Bearer tokens in .env (idempotent)
+	./scripts/init-remediation-secrets.sh
+
+# Phase 8: the real-evidence acceptance gate. Deliberately placed after
+# verify-agent-runtime in both the Makefile ordering and CI -- it
+# creates its OWN fresh incident (never reuses an already-resolved one)
+# and exercises the full human-approval/remediation/recovery path
+# against the real running stack. See scripts/verify-remediation.sh and
+# docs/architecture/phase-8-human-approval-remediation.md.
+verify-remediation: ## Phase 8 real-evidence acceptance: human-approved remediation, tool-gateway execution, real recovery
+	./scripts/verify-remediation.sh
+
+test-remediation-cleanup-resilience: ## Phase 8 correction-round focused test: EXIT cleanup tolerates a simulated payment_fault_get failure (no Docker required)
+	./scripts/test-remediation-cleanup-resilience.sh
+
+# Human approve/reject helpers -- read CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN
+# from .env directly; NEVER print it (the token appears only inside the
+# curl Authorization header, never in echoed output). COMMENT is
+# optional in both.
+remediation-approve: ## Approve a pending remediation proposal: make remediation-approve PROPOSAL_ID=<uuid> [COMMENT="..."]
+	@if [ -z "$(PROPOSAL_ID)" ]; then \
+		echo "usage: make remediation-approve PROPOSAL_ID=<uuid> [COMMENT=\"...\"]" >&2; \
+		exit 1; \
+	fi
+	@token="$$(grep -E '^CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN=' .env 2>/dev/null | head -1 | cut -d= -f2-)"; \
+	if [ -z "$$token" ]; then \
+		echo "CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN is not set in .env -- run 'make remediation-secret-init' first" >&2; \
+		exit 1; \
+	fi; \
+	body="$$(COMMENT='$(COMMENT)' python3 -c 'import json, os; c = os.environ.get("COMMENT", ""); print(json.dumps({"expected_status": "pending_approval", "decision": "approve", **({"comment": c} if c else {})}))')"; \
+	curl -sS -X POST "http://127.0.0.1:8000/api/v1/remediation-proposals/$(PROPOSAL_ID)/decision" \
+		-H "Authorization: Bearer $$token" \
+		-H "Content-Type: application/json" \
+		-d "$$body" | python3 -m json.tool
+
+remediation-reject: ## Reject a pending remediation proposal: make remediation-reject PROPOSAL_ID=<uuid> [COMMENT="..."]
+	@if [ -z "$(PROPOSAL_ID)" ]; then \
+		echo "usage: make remediation-reject PROPOSAL_ID=<uuid> [COMMENT=\"...\"]" >&2; \
+		exit 1; \
+	fi
+	@token="$$(grep -E '^CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN=' .env 2>/dev/null | head -1 | cut -d= -f2-)"; \
+	if [ -z "$$token" ]; then \
+		echo "CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN is not set in .env -- run 'make remediation-secret-init' first" >&2; \
+		exit 1; \
+	fi; \
+	body="$$(COMMENT='$(COMMENT)' python3 -c 'import json, os; c = os.environ.get("COMMENT", ""); print(json.dumps({"expected_status": "pending_approval", "decision": "reject", **({"comment": c} if c else {})}))')"; \
+	curl -sS -X POST "http://127.0.0.1:8000/api/v1/remediation-proposals/$(PROPOSAL_ID)/decision" \
+		-H "Authorization: Bearer $$token" \
+		-H "Content-Type: application/json" \
+		-d "$$body" | python3 -m json.tool

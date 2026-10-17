@@ -1,24 +1,38 @@
-"""Bearer-token authentication dependencies for this service's two
-trusted internal write endpoints:
+"""Bearer-token authentication dependencies for this service's trusted
+internal write endpoints:
 
 - `require_webhook_token` — POST /internal/v1/alertmanager/webhook
   (Phase 3C). Checked against CONTROL_PLANE_WEBHOOK_TOKEN.
 - `require_lifecycle_token` — PATCH /api/v1/incidents/{id}/status
   (Phase 3D). Checked against CONTROL_PLANE_LIFECYCLE_TOKEN.
+- `require_remediation_proposal_token` — POST
+  /internal/v1/remediation-proposals (Phase 8). Held ONLY by
+  agent-runtime-service. Checked against
+  CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN.
+- `require_remediation_approver_token` — POST
+  /api/v1/remediation-proposals/{id}/decision (Phase 8). Held ONLY by a
+  human/operator (or a CI acceptance script simulating one). Checked
+  against CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN.
+- `require_remediation_executor_token` — POST
+  /internal/v1/remediation-proposals/{id}/execution/{start,result}
+  (Phase 8). Held ONLY by tool-gateway. Checked against
+  CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN.
 
-These are deliberately TWO SEPARATE secrets, not one shared token:
+These are deliberately FIVE SEPARATE secrets, never interchangeable:
 Alertmanager must never be able to invoke the human/operator lifecycle
-endpoint (it only ever receives the webhook token, via
-observability/alertmanager/secrets/webhook-token — see
-scripts/init-webhook-secret.sh), and an operator's lifecycle credential
-must never double as something an automated alert source could present.
-Both share the exact same constant-time comparison logic (via
-`_require_token` below) so that guarantee is enforced identically and
-isn't duplicated/able to drift between the two.
+endpoint; agent-runtime-service must never be able to approve/reject a
+proposal or record an execution result; tool-gateway must never be
+able to create or approve a proposal; and a human approver's credential
+must never double as anything an automated service could present (see
+docs/architecture/phase-8-human-approval-remediation.md's credential
+boundary table, and tests/test_remediation.py's explicit cross-token
+rejection tests). All five share the exact same constant-time
+comparison logic (via `_require_token` below) so that guarantee is
+enforced identically and isn't duplicated/able to drift between them.
 
 Every other route in this service — GET /api/v1/*, GET /health/* —
 remains unauthenticated, loopback-only local-dev read access, unchanged
-by either phase (see docs/api/control-plane.md's security-limitations
+by any phase (see docs/api/control-plane.md's security-limitations
 section).
 """
 
@@ -66,3 +80,12 @@ def _require_token(
 
 require_webhook_token = _require_token(state_attr="webhook_token", env_var_name="CONTROL_PLANE_WEBHOOK_TOKEN")
 require_lifecycle_token = _require_token(state_attr="lifecycle_token", env_var_name="CONTROL_PLANE_LIFECYCLE_TOKEN")
+require_remediation_proposal_token = _require_token(
+    state_attr="remediation_proposal_token", env_var_name="CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN"
+)
+require_remediation_approver_token = _require_token(
+    state_attr="remediation_approver_token", env_var_name="CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN"
+)
+require_remediation_executor_token = _require_token(
+    state_attr="remediation_executor_token", env_var_name="CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN"
+)

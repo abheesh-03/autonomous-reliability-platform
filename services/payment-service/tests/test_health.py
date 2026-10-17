@@ -1,11 +1,4 @@
-from fastapi.testclient import TestClient
-
-from payment_service.main import app
-
-client = TestClient(app)
-
-
-def test_health_returns_200_with_expected_body():
+def test_health_returns_200_with_expected_body(client):
     response = client.get("/health")
 
     assert response.status_code == 200

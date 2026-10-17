@@ -12,6 +12,16 @@
 # regression fail loudly and immediately, with no Compose stack
 # needed.
 #
+# Phase 8 extends this same check to
+# scripts/init-remediation-secrets.sh: those six tokens must likewise
+# exist in .env before the full 'docker compose up -d' that actually
+# CREATES control-plane/agent-runtime-service/tool-gateway/
+# payment-service -- otherwise those containers resolve
+# ${CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN:-} etc. to empty at
+# creation time and never pick up the real value without being
+# manually recreated, exactly the fresh-checkout race Phase 7 already
+# learned to avoid for the checkpoint DB credential.
+#
 # Pure text/ordering check against the real Makefile -- never executes
 # `make db-up` itself (that would need a real Docker stack; see
 # scripts/verify-agent-runtime.sh for the real, running-stack proof).
@@ -51,6 +61,7 @@ line_of() {
 }
 
 webhook_line="$(line_of "init-webhook-secret.sh" "the webhook/lifecycle secret init step")"
+remediation_secrets_line="$(line_of "init-remediation-secrets.sh" "the Phase 8 remediation secret init step")"
 postgres_only_line="$(line_of "docker compose up -d postgres" "'docker compose up -d postgres' (postgres-only, BEFORE the agent-runtime DB init)")"
 agent_db_init_line="$(line_of "init-agent-runtime-db.sh" "the agent-runtime checkpoint DB init step")"
 
@@ -62,7 +73,9 @@ full_up_line="$(echo "$recipe" | grep -nE '^\s*docker compose up -d\s*$' | head 
 [ -n "$full_up_line" ] || fail "db-up's recipe does not contain a final, full 'docker compose up -d' (no service argument) step"
 
 [ "$webhook_line" -lt "$postgres_only_line" ] || fail "init-webhook-secret.sh must run BEFORE 'docker compose up -d postgres'"
+[ "$remediation_secrets_line" -lt "$postgres_only_line" ] || fail "init-remediation-secrets.sh must run BEFORE 'docker compose up -d postgres' -- it does not need PostgreSQL at all, and the six tokens it writes must exist in .env before the full 'docker compose up -d' below creates every container that reads one of them"
 [ "$postgres_only_line" -lt "$agent_db_init_line" ] || fail "'docker compose up -d postgres' must run BEFORE init-agent-runtime-db.sh (postgres must exist for that script's own pg_isready wait to make sense)"
 [ "$agent_db_init_line" -lt "$full_up_line" ] || fail "init-agent-runtime-db.sh (which writes AGENT_RUNTIME_DB_PASSWORD into .env) must run BEFORE the full 'docker compose up -d' that actually CREATES agent-runtime-service -- otherwise that container is created with an empty/stale password"
+[ "$remediation_secrets_line" -lt "$full_up_line" ] || fail "init-remediation-secrets.sh must run BEFORE the full 'docker compose up -d' that actually CREATES control-plane/agent-runtime-service/tool-gateway/payment-service -- otherwise those containers are created with empty/stale remediation tokens"
 
-echo "PASS: db-up's recipe order is: webhook/lifecycle secrets -> 'docker compose up -d postgres' -> init-agent-runtime-db.sh -> full 'docker compose up -d'"
+echo "PASS: db-up's recipe order is: webhook/lifecycle secrets -> Phase 8 remediation secrets -> 'docker compose up -d postgres' -> init-agent-runtime-db.sh -> full 'docker compose up -d'"

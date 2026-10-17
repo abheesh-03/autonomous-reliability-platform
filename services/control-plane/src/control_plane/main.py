@@ -31,9 +31,16 @@ from collections.abc import AsyncIterator
 
 from control_plane.api.health import router as health_router
 from control_plane.api.incidents import router as incidents_router
+from control_plane.api.remediation import router as remediation_router
 from control_plane.api.webhook import router as webhook_router
 from control_plane.api.webhook_limits import WebhookBodySizeLimitMiddleware
-from control_plane.core.config import DatabaseSettings, LifecycleSettings, WebhookSettings, resolve_write_tokens
+from control_plane.core.config import (
+    DatabaseSettings,
+    LifecycleSettings,
+    RemediationTokenSettings,
+    WebhookSettings,
+    resolve_write_tokens,
+)
 from control_plane.db.engine import create_engine
 
 logger = logging.getLogger("control_plane")
@@ -45,15 +52,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = create_engine(settings)
     app.state.db_engine = engine
     app.state.db_sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-    # Post-review correction: resolve_write_tokens() refuses to let
-    # both write-endpoint tokens authorize anything if they were
+    # Post-review correction: resolve_write_tokens() refuses to let any
+    # two write-endpoint tokens authorize anything if they were
     # (mis)configured identically — see its own docstring and
-    # core/config.py.
-    webhook_token, lifecycle_token = resolve_write_tokens(
-        WebhookSettings.from_env().token, LifecycleSettings.from_env().token
+    # core/config.py. Phase 8 extends this same guard to the three new
+    # remediation tokens.
+    remediation_tokens = RemediationTokenSettings.from_env()
+    (
+        webhook_token,
+        lifecycle_token,
+        remediation_proposal_token,
+        remediation_approver_token,
+        remediation_executor_token,
+    ) = resolve_write_tokens(
+        WebhookSettings.from_env().token,
+        LifecycleSettings.from_env().token,
+        remediation_tokens.proposal_token,
+        remediation_tokens.approver_token,
+        remediation_tokens.executor_token,
     )
     app.state.webhook_token = webhook_token
     app.state.lifecycle_token = lifecycle_token
+    app.state.remediation_proposal_token = remediation_proposal_token
+    app.state.remediation_approver_token = remediation_approver_token
+    app.state.remediation_executor_token = remediation_executor_token
     try:
         yield
     finally:
@@ -94,6 +116,7 @@ app.add_middleware(WebhookBodySizeLimitMiddleware)
 app.include_router(health_router)
 app.include_router(incidents_router)
 app.include_router(webhook_router)
+app.include_router(remediation_router)
 
 
 async def _database_unavailable(request: Request, exc: Exception) -> JSONResponse:

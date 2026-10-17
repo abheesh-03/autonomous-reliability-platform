@@ -54,14 +54,27 @@ class FakeInvestigatorClient:
 def _build_app(control_plane=None, investigator=None) -> FastAPI:
     app = FastAPI()
     app.include_router(agent_runs_router)
+    control_plane = control_plane or FakeControlPlaneClient()
     graph = compile_graph(
-        control_plane or FakeControlPlaneClient(),
+        control_plane,
         investigator or FakeInvestigatorClient(),
         BOUNDS,
         InMemorySaver(),
+        # No tool_gateway_client here -- every one of these Phase
+        # 7-era tests' incidents/policy never reaches a real
+        # remediation proposal, so propose_remediation always finalizes
+        # as "not_applicable" and the real interrupt is never reached
+        # (see tests/test_remediation_graph.py /
+        # tests/test_api_remediation.py for the Phase 8 paths that DO
+        # reach it).
     )
     app.state.graph = graph
     app.state.runtime_bounds = BOUNDS
+    # Phase 8: resume_agent_run's own approval-gate logic reads this --
+    # unused by any of these legacy tests (their runs never reach a
+    # real pending interrupt at all) but required for the app to be
+    # constructed the same shape the real main.py builds it.
+    app.state.control_plane_client = control_plane
     return app
 
 
@@ -115,7 +128,19 @@ def test_resume_executes_a_freshly_created_run_to_completion():
     assert body["status"] == "completed"
     assert body["resumable"] is False
     assert body["investigation_report"] is not None
-    assert body["completed_nodes"] == ["load_incident", "run_investigation", "evaluate_investigation", "finalize"]
+    # Phase 8: propose_remediation always runs now, between
+    # evaluate_investigation and finalize -- this test's fake client
+    # never configures a tool-gateway client, so it safely finalizes
+    # as remediation_status="not_applicable" (see
+    # tests/test_remediation_graph.py for the paths where it doesn't).
+    assert body["completed_nodes"] == [
+        "load_incident",
+        "run_investigation",
+        "evaluate_investigation",
+        "propose_remediation",
+        "finalize",
+    ]
+    assert body["remediation_status"] == "not_applicable"
 
 
 def test_create_agent_run_malformed_incident_id_is_422():

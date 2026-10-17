@@ -28,13 +28,22 @@ jobs:
     # durability/privilege-boundary test step plus its own real
     # acceptance gate (agent run creation, restart, resume) -- measured
     # well under two minutes combined locally, generous margin kept.
-    timeout-minutes: 50
+    # Raised from 50: Phase 8 adds tool-gateway's own Go
+    # gofmt/vet/test/build, a real PostgreSQL remediation-transaction
+    # test step, and its own real acceptance gate (sustained real 5xx
+    # traffic until CheckoutServerErrors fires, then its own real
+    # ~5-minute rate() decay back to inactive -- the same documented
+    # multi-minute wait scripts/simulate-failure.sh's own
+    # payment-outage --full-acceptance already budgets for this exact
+    # alert) -- measured several minutes locally, generous margin kept
+    # for CI runner variance.
+    timeout-minutes: 65
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh
 
       - name: Verify Makefile is usable
         run: make help
@@ -55,6 +64,16 @@ jobs:
       # Makefile's own db-up ordering comment.
       - name: Run db-up ordering focused test (Phase 7)
         run: make test-db-up-order
+
+      # Phase 8 correction round (finding #8): a static, no-Docker
+      # regression proving verify-remediation.sh's own EXIT cleanup
+      # trap tolerates a simulated payment_fault_get failure (e.g. a
+      # genuinely unreachable payment-service) without aborting early
+      # under `set -euo pipefail` -- every remaining restoration step
+      # still runs, and cleanup still forces a nonzero exit status. See
+      # scripts/test-remediation-cleanup-resilience.sh.
+      - name: Run remediation cleanup resilience focused test (Phase 8)
+        run: ./scripts/test-remediation-cleanup-resilience.sh
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -176,6 +195,28 @@ jobs:
         working-directory: services/inventory-service
         run: CGO_ENABLED=0 GOOS=linux go build -o /tmp/inventory-service ./cmd/inventory-service
 
+      # Phase 8: tool-gateway, the ninth backend service -- reuses the
+      # SAME Go 1.27 toolchain just set up above (no second
+      # actions/setup-go step needed; this module has no external
+      # dependencies at all, so there is nothing for a separate
+      # cache-dependency-path to cache either). gofmt/vet/test/build,
+      # same discipline as inventory-service above.
+      - name: Check tool-gateway formatting
+        working-directory: services/tool-gateway
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run tool-gateway go vet
+        working-directory: services/tool-gateway
+        run: go vet ./...
+
+      - name: Run tool-gateway tests
+        working-directory: services/tool-gateway
+        run: go test ./...
+
+      - name: Build tool-gateway binary
+        working-directory: services/tool-gateway
+        run: CGO_ENABLED=0 GOOS=linux go build -o /tmp/tool-gateway ./cmd/tool-gateway
+
       - name: Set up Node 24
         uses: actions/setup-node@v5
         with:
@@ -225,6 +266,17 @@ jobs:
       # .env or secrets/ directory) or an existing one alike.
       - name: Initialize webhook + lifecycle secrets (Phase 3C/3D)
         run: ./scripts/init-webhook-secret.sh
+
+      # Phase 8: generates the six remediation Bearer tokens (see
+      # scripts/init-remediation-secrets.sh). Same reasoning as the
+      # webhook/lifecycle step above -- must exist before any container
+      # that reads one of them is ever created. `make db-up` below
+      # calls this same idempotent script again as part of its own
+      # recipe; running it explicitly here first is the same
+      # established double-call pattern the webhook/lifecycle step
+      # above already uses.
+      - name: Initialize remediation secrets (Phase 8)
+        run: ./scripts/init-remediation-secrets.sh
 
       - name: Validate Docker Compose configuration
         run: docker compose config
@@ -332,13 +384,19 @@ jobs:
       # unavailable here -- unlike the earlier "Run agent-runtime-
       # service tests" step above, which runs before PostgreSQL even
       # exists and is expected to skip these same tests.
-      - name: Verify real-database checkpoint durability and privilege boundary (Phase 7)
+      # Phase 8 extends this same real-database step with
+      # test_remediation_durability.py -- the real LangGraph
+      # interrupt/resume proof against the real AsyncPostgresSaver
+      # (Phase 8's own explicit requirement: never InMemorySaver alone
+      # for persistence/HITL durability tests). Same real
+      # agent_runtime role/schema, no new database setup needed.
+      - name: Verify real-database checkpoint durability and privilege boundary (Phase 7/8)
         working-directory: services/agent-runtime-service
         run: |
           set -a
           . ../../.env
           set +a
-          AGENT_RUNTIME_REQUIRE_REAL_DB=true pytest tests/test_db_privilege_boundary.py tests/test_checkpoint_durability.py tests/test_checkpoint_pool_recovery.py -v
+          AGENT_RUNTIME_REQUIRE_REAL_DB=true pytest tests/test_db_privilege_boundary.py tests/test_checkpoint_durability.py tests/test_checkpoint_pool_recovery.py tests/test_remediation_durability.py -v
 
       # Phase 6 correction round: a dedicated, REAL PostgreSQL
       # transaction-rollback regression -- never mocked -- proving
@@ -370,6 +428,30 @@ jobs:
           . ../../.env
           set +a
           RETRIEVAL_REQUIRE_REAL_DB=true pytest tests/test_db_transaction.py -v
+
+      # Phase 8: a dedicated, REAL PostgreSQL proof -- never mocked --
+      # of the remediation domain's own atomic/idempotent transaction
+      # boundaries: idempotent proposal creation, approval atomic with
+      # the incident investigating->remediating transition, rejection
+      # never touching the incident, execution start/result
+      # idempotency, and the failed-execution incident rollback
+      # (remediating->investigating). See
+      # services/control-plane/tests/test_remediation_transactions.py.
+      # Placed here, alongside the Phase 6 real-database step above:
+      # Flyway's own migrate step (Phase 3A, above) already applied
+      # V6__create_remediation_schema.sql along with every other
+      # pending migration, so reliability.remediation_proposals/
+      # remediation_events already exist by this point.
+      # CONTROL_PLANE_REQUIRE_REAL_DB=true makes this step FAIL
+      # outright (never silently skip) if the database is somehow
+      # unavailable here.
+      - name: Verify real-database remediation transactions (Phase 8)
+        working-directory: services/control-plane
+        run: |
+          set -a
+          . ../../.env
+          set +a
+          CONTROL_PLANE_REQUIRE_REAL_DB=true pytest tests/test_remediation_transactions.py -v
 
       # Phase 3B: brings up the control-plane container (building its
       # image if not already built — the same implicit-build-on-`up`
@@ -973,6 +1055,26 @@ jobs:
         timeout-minutes: 10
         run: bash scripts/verify-agent-runtime.sh
 
+      # Phase 8: human-approved remediation acceptance. Deliberately
+      # placed AFTER the Phase 7 gate above, but creates its OWN FRESH
+      # incident (never reuses Phase 4's already-resolved one -- Phase
+      # 8 is a MUTATING demo and must prove its own real chain: a real
+      # checkout failure induced by the controlled payment
+      # authorization fault, a real Prometheus/Alertmanager alert, a
+      # real human-approved remediation proposal, real tool-gateway
+      # execution, real recovery, and the SAME incident naturally
+      # resolving via Alertmanager's own real webhook). Sources
+      # scripts/verify-agent-runtime.sh (which itself sources
+      # scripts/verify-rag.sh -> scripts/verify-investigator.sh) and
+      # scripts/simulate-failure.sh for their reusable helpers rather
+      # than duplicating them. Uses the same deterministic stub LLM
+      # provider machinery as Phase 5/6/7 -- no credentials configured
+      # or required in CI. See scripts/verify-remediation.sh and
+      # docs/architecture/phase-8-human-approval-remediation.md.
+      - name: Verify remediation (Phase 8)
+        timeout-minutes: 20
+        run: bash scripts/verify-remediation.sh
+
       - name: Show service logs
         if: always()
         run: |
@@ -982,6 +1084,7 @@ jobs:
           docker compose logs --tail=100 investigator-service
           docker compose logs --tail=100 retrieval-service
           docker compose logs --tail=100 agent-runtime-service
+          docker compose logs --tail=100 tool-gateway
           docker compose logs --tail=100 payment-service
           docker compose logs --tail=100 inventory-service
           docker compose logs --tail=100 notification-service

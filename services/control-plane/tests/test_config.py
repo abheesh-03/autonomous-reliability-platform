@@ -1,10 +1,13 @@
-"""Unit tests for the Phase 3D post-review correction: identical
-webhook/lifecycle tokens must never authorize either write endpoint.
+"""Unit tests for the Phase 3D post-review correction (extended in
+Phase 8 to all five write-endpoint tokens): identical tokens must never
+authorize two different write endpoints.
 
 Two layers are tested:
 
 - `resolve_write_tokens` (core/config.py) as a pure function — no
-  FastAPI app, no HTTP, no repository at all.
+  FastAPI app, no HTTP, no repository at all. Phase 8 widened this
+  from a 2-token to a 5-token pairwise check (webhook, lifecycle,
+  remediation proposal/approver/executor).
 - The end-to-end guard actually wired into app startup (main.py's
   lifespan): a fresh TestClient, started with both tokens set
   identically via the real environment (simulating an operator
@@ -28,24 +31,46 @@ from tests.conftest import FakeIncidentRepository
 # ---------------------------------------------------------------------
 
 
-def test_resolve_write_tokens_returns_both_unchanged_when_distinct():
-    assert resolve_write_tokens("webhook-value", "lifecycle-value") == ("webhook-value", "lifecycle-value")
+def test_resolve_write_tokens_returns_all_unchanged_when_distinct():
+    assert resolve_write_tokens("webhook-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value") == (
+        "webhook-value",
+        "lifecycle-value",
+        "proposal-value",
+        "approver-value",
+        "executor-value",
+    )
 
 
 def test_resolve_write_tokens_returns_both_none_when_identical():
-    assert resolve_write_tokens("same-value", "same-value") == (None, None)
+    assert resolve_write_tokens("same-value", "same-value") == (None, None, None, None, None)
 
 
 def test_resolve_write_tokens_preserves_one_unconfigured_token():
     # Exactly one token being unconfigured (None) must be unaffected —
     # it continues to fail closed only for its own endpoint, same as
     # before this guard existed.
-    assert resolve_write_tokens(None, "lifecycle-value") == (None, "lifecycle-value")
-    assert resolve_write_tokens("webhook-value", None) == ("webhook-value", None)
+    assert resolve_write_tokens(None, "lifecycle-value") == (None, "lifecycle-value", None, None, None)
+    assert resolve_write_tokens("webhook-value", None) == ("webhook-value", None, None, None, None)
 
 
 def test_resolve_write_tokens_both_unconfigured_stays_both_none():
-    assert resolve_write_tokens(None, None) == (None, None)
+    assert resolve_write_tokens(None, None) == (None, None, None, None, None)
+
+
+def test_resolve_write_tokens_clears_only_the_colliding_pair():
+    # Phase 8: the pairwise check must clear ONLY the two tokens that
+    # actually collide, leaving every other distinct token untouched —
+    # never a blanket "any collision anywhere clears everything".
+    result = resolve_write_tokens("webhook-value", "lifecycle-value", "same-value", "same-value", "executor-value")
+    assert result == ("webhook-value", "lifecycle-value", None, None, "executor-value")
+
+
+def test_resolve_write_tokens_remediation_tokens_cannot_collide_with_webhook_or_lifecycle():
+    # A remediation token accidentally set equal to the EXISTING
+    # webhook/lifecycle token must also fail closed — not just
+    # collisions among the three new tokens themselves.
+    result = resolve_write_tokens("same-value", "lifecycle-value", "same-value", "approver-value", "executor-value")
+    assert result == (None, "lifecycle-value", None, "approver-value", "executor-value")
 
 
 # ---------------------------------------------------------------------

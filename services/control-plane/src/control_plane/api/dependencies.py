@@ -14,9 +14,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.db.session import get_session
 from control_plane.repositories.incident_repository import IncidentRepository
+from control_plane.repositories.remediation_repository import RemediationRepository
 
 
 async def get_incident_repository(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> IncidentRepository:
     return IncidentRepository(session)
+
+
+async def get_remediation_repository(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> RemediationRepository:
+    # Phase 8: constructed from the SAME request-scoped session as
+    # get_incident_repository would be for the same request -- this is
+    # what lets api/remediation.py's decide()/record_execution_result()
+    # perform a remediation-proposal mutation and an incident-lifecycle
+    # mutation in ONE atomic transaction (see
+    # repositories/remediation_repository.py's own docstring).
+    return RemediationRepository(session)

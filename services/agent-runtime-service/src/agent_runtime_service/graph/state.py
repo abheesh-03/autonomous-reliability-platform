@@ -78,3 +78,39 @@ class AgentGraphState(TypedDict, total=False):
 
     error_code: str | None
     error_detail: str | None
+
+    # ------------------------------------------------------------------
+    # Phase 8: human approval + remediation. Every field here is bounded,
+    # JSON-serializable workflow data -- same hard-bound discipline as
+    # every Phase 7 field above. NEVER an auth token, an Authorization
+    # header, a raw HTTP error body, an arbitrary tool response, or a
+    # raw exception string (Phase 8 §REMEDIATION RESULT IN GRAPH STATE).
+    # ------------------------------------------------------------------
+
+    # Set by propose_remediation only when the deterministic policy
+    # actually matched and a proposal was created -- all four stay
+    # None/absent for a run that never reaches that bar (which then
+    # finalizes with remediation_status="not_applicable" and never
+    # touches await_human_approval at all).
+    remediation_proposal_id: str | None
+    remediation_action_type: str | None  # "clear_payment_authorization_fault"
+    remediation_target: str | None  # "payment-service"
+    # "not_applicable" | "pending_approval" | "approved" | "rejected" |
+    # "succeeded" | "failed"
+    remediation_status: str | None
+
+    # Set by await_human_approval's resume, from the TRUSTED
+    # control-plane decision only (never a caller-supplied value --
+    # see api/agent_runs.py::resume_agent_run).
+    approval_decision: str | None  # "approved" | "rejected"
+
+    # Set by execute_remediation -- tool-gateway's own bounded result
+    # only (never a raw HTTP body).
+    execution_result: dict | None  # {"status": "succeeded"|"failed", "detail": str | None}
+
+    # Set by verify_recovery -- this service's OWN independent
+    # confirmation, re-derived from control-plane's durable record AND
+    # tool-gateway's own fresh capability re-check (Phase 8 correction
+    # round, finding #2: never merely re-asserting the execute
+    # response, and never collapsed into a single boolean).
+    recovery_verification: dict | None  # {"proposal_succeeded": bool, "fault_inactive": bool, "target_healthy": bool}

@@ -1170,6 +1170,90 @@ rollback/scale actions against any application service, checkpoint
 retention/pruning policy, a frontend, and Kubernetes/Terraform/AWS
 deployment.
 
+## Human Approval, Safe Remediation, and Recovery Verification (Phase 8)
+
+A new, ninth backend service, `services/tool-gateway` (Go), plus
+extensions to control-plane, agent-runtime-service, and payment-service,
+add this platform's first MUTATING operational capability — entirely
+behind a human-approval boundary. Full detail:
+[docs/architecture/phase-8-human-approval-remediation.md](docs/architecture/phase-8-human-approval-remediation.md).
+
+The graph grows four nodes: `evaluate_investigation ->
+propose_remediation -> await_human_approval -> execute_remediation ->
+verify_recovery -> finalize`, with `await_human_approval` using REAL
+LangGraph `interrupt()`/`Command(resume=...)` — verified directly
+against the installed, pinned `langgraph==1.2.15` source before being
+adopted, not assumed from documentation.
+
+- **The LLM never selects an executable action.** `propose_remediation`
+  checks a small, fixed, deterministic policy over structured fields
+  (incident source/severity/title, an existing investigation, and
+  tool-gateway's own independent report of whether the controlled
+  payment fault is actually active) — never LLM hypothesis prose.
+  Exactly one allowlisted action/target pair (`clear_payment_authorization_fault`
+  / `payment-service`) can ever exist, enforced in four independent
+  places (Go allowlist, database CHECK constraints, and both
+  services' own closed types).
+- **A valid execution token alone never authorizes an action.**
+  tool-gateway independently re-fetches the proposal from
+  control-plane on every execute call and checks its REAL, current
+  status — a compromised or misbehaving agent-runtime-service holding
+  a valid `TOOL_GATEWAY_EXECUTION_TOKEN` cannot turn `pending_approval`
+  into an executed action by itself.
+- **Human approval cannot be bypassed through the resume API.**
+  `POST /api/v1/agent-runs/{id}/resume` has NO decision field in its
+  request body at all. The trusted decision is independently fetched
+  from control-plane's own durable record; a pending proposal returns
+  `409 approval_pending` without ever touching the real LangGraph
+  interrupt.
+- **Three separate, never-interchangeable remediation credentials** —
+  proposal-creation (agent-runtime-service only), approval
+  (human/operator only), and execution-bookkeeping (tool-gateway
+  only) — plus two more separating payment-fault injection from
+  payment-fault remediation. None of the five is ever configurable to
+  the same value as another (a real, enforced, fail-closed guard, not
+  a convention).
+- **No Docker socket, no shell, no `os/exec`.** tool-gateway is pure Go
+  standard library (zero external dependencies), a distroless non-root
+  runtime, and a hard, compiled-in allowlist — the SAME Tool Gateway
+  boundary a future phase can extend with real Kubernetes capability,
+  once real RBAC exists to scope it the way this allowlist scopes its
+  one action today.
+- **Real recovery, never merely a 2xx response.** tool-gateway clears
+  the fault, then independently re-verifies it is inactive AND that
+  payment-service's existing health contract reports healthy, before
+  ever recording success. A failed remediation atomically rolls the
+  owning incident back `remediating -> investigating` — it is never
+  left stuck.
+- **At-least-once invocation, idempotent everything.** Proposal
+  creation, human decisions, and tool-gateway's own execution
+  bookkeeping are all idempotent under retry — a node that crashes
+  after calling an external service and before its checkpoint commits
+  (Phase 7's own documented reality) can safely run again.
+- **Real-evidence acceptance, its own fresh incident.** A real
+  checkout failure (the controlled payment fault, never a container
+  stop), a real Prometheus/Alertmanager alert, a real human-approved
+  proposal, real tool-gateway execution, a real fresh checkout
+  succeeding afterward, and the SAME incident naturally resolving via
+  Alertmanager's own real webhook — proven against the real running
+  stack, not a mock.
+
+```bash
+make remediation-secret-init         # generate/verify the six Phase 8 Bearer tokens in .env (idempotent)
+make tool-gateway-build              # builds the image (also built automatically by `make db-up`)
+make tool-gateway-test               # gofmt/vet/test/build, no running stack needed
+make verify-remediation              # real-evidence acceptance gate (creates its own fresh incident)
+make remediation-approve PROPOSAL_ID=<uuid>   # approve a pending proposal (never prints the token)
+make remediation-reject PROPOSAL_ID=<uuid>    # reject a pending proposal
+```
+
+**Not implemented in this phase (explicitly out of scope — see the
+dedicated doc's known limitations):** a frontend approval UI (Phase
+9), real Docker/Kubernetes restart or rollback, deployment scaling,
+any action beyond the one allowlisted payment-fault clear, and
+exactly-once execution guarantees (the real action and every durable
+bookkeeping step are idempotent instead).
+
 ## Developer Commands
 
 The commands above are also available as `make` targets, for convenience:

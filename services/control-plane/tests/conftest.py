@@ -40,6 +40,14 @@ os.environ.setdefault("CONTROL_PLANE_WEBHOOK_TOKEN", "test-webhook-token")
 # not interchangeable (using one where the other is expected must
 # still 401).
 os.environ.setdefault("CONTROL_PLANE_LIFECYCLE_TOKEN", "test-lifecycle-token")
+# Phase 8: three more SEPARATE deterministic, known-in-tests Bearer
+# tokens — proposal/approver/executor — every one a different literal
+# value from each other and from the two above, so
+# test_remediation_auth.py can assert none of the five are
+# interchangeable.
+os.environ.setdefault("CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN", "test-remediation-proposal-token")
+os.environ.setdefault("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "test-remediation-approver-token")
+os.environ.setdefault("CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN", "test-remediation-executor-token")
 
 # Exported so test_webhook.py/test_lifecycle.py can build a correct
 # `Authorization: Bearer <token>` header without hard-coding the
@@ -48,6 +56,9 @@ os.environ.setdefault("CONTROL_PLANE_LIFECYCLE_TOKEN", "test-lifecycle-token")
 # value if one was already set).
 WEBHOOK_TOKEN = os.environ["CONTROL_PLANE_WEBHOOK_TOKEN"]
 LIFECYCLE_TOKEN = os.environ["CONTROL_PLANE_LIFECYCLE_TOKEN"]
+REMEDIATION_PROPOSAL_TOKEN = os.environ["CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN"]
+REMEDIATION_APPROVER_TOKEN = os.environ["CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN"]
+REMEDIATION_EXECUTOR_TOKEN = os.environ["CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN"]
 
 import pytest
 from fastapi.testclient import TestClient

@@ -8,8 +8,23 @@ dedicated, least-privileged `agent_runtime` role) -- unlike
 investigator-service, which holds none. What it must NEVER hold is the
 shared, broad POSTGRES_USER/POSTGRES_PASSWORD credential the rest of
 this platform's application code uses, and it must never reference
-control-plane's write-capable tokens or write-capable endpoints, or
-any remediation/infrastructure-control capability at all.
+control-plane's PRE-Phase-8 write-capable tokens/endpoints at all.
+
+Phase 8 narrows (never widens) this boundary further: this service
+now intentionally holds exactly TWO additional, narrow credentials --
+CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN (create a remediation
+proposal only) and TOOL_GATEWAY_EXECUTION_TOKEN (ask tool-gateway to
+execute an already-approved action only) -- see
+docs/architecture/phase-8-human-approval-remediation.md's credential
+boundary table. It must still NEVER hold
+CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN (the human/operator-only
+decision credential),
+CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN (tool-gateway's own
+execution-bookkeeping credential), or either payment-service credential
+(PAYMENT_FAULT_INJECTION_TOKEN/PAYMENT_REMEDIATION_TOKEN) -- and it
+must never call the decision endpoint or either internal execution-
+bookkeeping endpoint itself, since calling those is what those tokens
+exist to gate.
 """
 
 import ast
@@ -20,6 +35,17 @@ SRC_ROOT = pathlib.Path(__file__).resolve().parent.parent / "src" / "agent_runti
 FORBIDDEN_TOKENS = (
     "CONTROL_PLANE_WEBHOOK_TOKEN",
     "CONTROL_PLANE_LIFECYCLE_TOKEN",
+    # Phase 8: the human-approver-only and tool-gateway-executor-only
+    # credentials -- this service must NEVER hold either. (It DOES
+    # intentionally hold CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN and
+    # TOOL_GATEWAY_EXECUTION_TOKEN, so neither of those two appears
+    # here.)
+    "CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN",
+    "CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN",
+    # Phase 8: neither payment-service credential -- this service never
+    # talks to payment-service directly at all (only tool-gateway does).
+    "PAYMENT_FAULT_INJECTION_TOKEN",
+    "PAYMENT_REMEDIATION_TOKEN",
     # The shared, broad application credential -- this service must
     # use ONLY its own dedicated AGENT_RUNTIME_DB_USER/
     # AGENT_RUNTIME_DB_PASSWORD (see config.py), never these.
@@ -30,6 +56,14 @@ FORBIDDEN_TOKENS = (
 FORBIDDEN_SUBSTRINGS = (
     "/api/v1/incidents/{incident_id}/status",
     "/internal/v1/alertmanager/webhook",
+    # Phase 8: the human-approver-only and tool-gateway-executor-only
+    # endpoints -- only a human/operator (the decision endpoint) or
+    # tool-gateway itself (the two execution-bookkeeping endpoints) may
+    # ever call these; this service creates a proposal and reads it
+    # back, nothing more.
+    "/decision",
+    "/execution/start",
+    "/execution/result",
 )
 
 FORBIDDEN_IMPORTS = {
@@ -86,11 +120,38 @@ def test_no_write_capable_control_plane_endpoint_is_ever_referenced():
             )
 
 
-def test_control_plane_client_module_calls_only_http_get():
+def test_control_plane_client_module_calls_only_get_and_the_one_proposal_post():
+    """Phase 7: this module called only GET. Phase 8 adds exactly ONE
+    legitimate write call -- POST, for creating a remediation proposal
+    only (authenticated with CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN,
+    see config.py/main.py). PUT/PATCH/DELETE remain, and must remain,
+    completely absent -- this service has no use for any of them."""
     tree = ast.parse((SRC_ROOT / "clients" / "control_plane.py").read_text())
-    write_verbs = {"post", "put", "patch", "delete"}
-    found = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in write_verbs}
-    assert not found, f"control_plane.py calls write HTTP verb(s): {found}"
+    never_allowed_write_verbs = {"put", "patch", "delete"}
+    found = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in never_allowed_write_verbs
+    }
+    assert not found, f"control_plane.py calls write HTTP verb(s) it must never use: {found}"
+
+    post_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr == "post"]
+    assert len(post_calls) == 1, f"expected exactly one client.post(...) call site, found {len(post_calls)}"
+
+
+def test_tool_gateway_client_module_calls_only_get_capability_and_the_one_execute_post():
+    """Phase 8: tool_gateway.py may call GET (the capability/
+    precondition read) and exactly ONE POST (execute) -- never
+    PUT/PATCH/DELETE, and never more than one POST call site, which
+    would be the first sign of a second, broader execution surface
+    creeping in."""
+    tree = ast.parse((SRC_ROOT / "clients" / "tool_gateway.py").read_text())
+    never_allowed_write_verbs = {"put", "patch", "delete"}
+    found = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in never_allowed_write_verbs
+    }
+    assert not found, f"tool_gateway.py calls write HTTP verb(s) it must never use: {found}"
+
+    post_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr == "post"]
+    assert len(post_calls) == 1, f"expected exactly one client.post(...) call site, found {len(post_calls)}"
 
 
 def test_investigator_client_module_calls_only_the_one_investigate_post():

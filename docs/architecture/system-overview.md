@@ -443,6 +443,31 @@ Full inventory:
   **read-only orchestration only** — no remediation, no human
   approval, no LangGraph `interrupt()` (all Phase 8). Full detail:
   [docs/architecture/phase-7-durable-agent-runtime.md](phase-7-durable-agent-runtime.md).
+- **Human approval, safe remediation, and recovery verification**
+  (Phase 8, `services/tool-gateway` — a ninth backend application, Go):
+  the graph grows `propose_remediation -> await_human_approval ->
+  execute_remediation -> verify_recovery`, with `await_human_approval`
+  using REAL LangGraph `interrupt()`/`Command(resume=...)` (verified
+  directly against the installed, pinned `langgraph==1.2.15` source).
+  The LLM never selects an executable action — `propose_remediation`
+  checks a small, deterministic policy over structured fields plus
+  tool-gateway's own independent report of whether the controlled
+  payment-service fault is active; exactly one allowlisted action/
+  target pair (`clear_payment_authorization_fault` / `payment-service`)
+  can ever exist. tool-gateway holds no Docker socket, no shell/
+  `os/exec`, and independently re-verifies control-plane's own real
+  proposal approval on every execute call — a valid execution token
+  alone never authorizes anything. `POST /api/v1/agent-runs/{id}/resume`
+  has no decision field at all; the trusted human decision is fetched
+  from control-plane's own durable record, never accepted from the
+  caller. Three separate, never-interchangeable remediation
+  credentials (proposal/approval/execution-bookkeeping) plus two more
+  separating payment-fault injection from remediation. Proposal
+  creation, human decisions, and execution bookkeeping are all
+  idempotent under retry; a failed remediation atomically rolls the
+  owning incident back `remediating -> investigating` rather than
+  leaving it stuck. Full detail:
+  [docs/architecture/phase-8-human-approval-remediation.md](phase-8-human-approval-remediation.md).
 - **`checkout-service`** (`services/checkout-service`), a Java 21 / Spring
   Boot 3 Maven project — the first piece of the planned "demonstration
   target system" below to actually exist, and now its **orchestrator**.
@@ -958,9 +983,17 @@ indirectly, exclusively through control-plane's existing GET API —
 never a direct database connection, and never a write of any kind —
 see [Read-only AI incident
 investigator](#read-only-ai-incident-investigator-phase-5) above.
-**Still planned:** any agent *writing* to this table; additional
-tables for investigation history, decisions, and approvals (future
-migrations, not yet written).
+As of **Phase 8**, a real agent *does* write elsewhere — never
+directly to this table (agent-runtime-service and tool-gateway alike
+hold no credential for `reliability.incidents` at all): a human
+approval transitions this table's own row `investigating ->
+remediating` through the EXISTING lifecycle machinery (`domain/lifecycle.py`,
+unmodified), atomically with a new `reliability.remediation_proposals`
+row's own `pending_approval -> approved` transition — see
+[Human approval, safe remediation, and recovery
+verification](#human-approval-safe-remediation-and-recovery-verification-phase-8)
+above. **Still planned:** additional investigation-history tables
+beyond the proposal/decision pair Phase 8 added.
 
 ### Coordination / ephemeral state
 **Redis** for short-lived state such as in-flight workflow coordination.
@@ -979,21 +1012,43 @@ this runtime needs now exists — `services/agent-runtime-service` (see
 the durable LangGraph agent runtime entry above): a real LangGraph
 `StateGraph`, checkpointed to PostgreSQL after every node, with
 explicit run identity, inspectable history, and real resume-after-crash
-semantics. What Phase 7 deliberately does **not** add yet is the
-*iterative, tool-using* part this section describes: its graph is a
-small, fixed, four-node sequence (not an LLM-directed loop), it never
-gathers additional evidence across multiple reasoning steps, it never
-calls a tool the LLM itself selected, and it never proposes or executes
-a remediation action — those remain this section's and Phase 8's
-future work, now with a durable foundation to build them on rather than
-from scratch.
+semantics. What Phase 7 deliberately did **not** add yet is the
+*iterative, tool-using* part this section describes: its graph was a
+small, fixed, four-node sequence (not an LLM-directed loop), never
+gathering additional evidence across multiple reasoning steps and
+never calling a tool the LLM itself selected.
+
+As of **Phase 8**, the graph grows four more nodes
+(`propose_remediation -> await_human_approval -> execute_remediation ->
+verify_recovery`) and genuinely proposes and executes ONE allowlisted
+remediation action — but action SELECTION remains deliberately
+non-agentic: `propose_remediation` evaluates a small, fixed,
+deterministic policy over structured fields, never an LLM-directed
+choice, and never a tool the LLM itself selected. **Still planned:**
+a real LLM-directed, iterative, multi-tool reasoning loop that chooses
+among MULTIPLE possible actions — Phase 8 proves the safe
+approval/execution boundary with exactly one, deterministically
+selected action; broadening to genuine agentic action-selection, atop
+this same boundary, remains future work.
 
 ### Infrastructure tool gateway
-A **Go** service that exposes a controlled, auditable set of operations for
-interacting with infrastructure (e.g., restarting a service, scaling a
-deployment). This is the only component permitted to execute approved
-remediation actions, and only after explicit human approval for anything
-destructive or high-risk.
+A **Go** service that exposes a controlled, auditable set of operations
+for interacting with infrastructure (e.g., restarting a service,
+scaling a deployment). This is the only component permitted to execute
+approved remediation actions, and only after explicit human approval
+for anything destructive or high-risk.
+
+As of **Phase 8**, this now exists as `services/tool-gateway` — see
+[Human approval, safe remediation, and recovery
+verification](#human-approval-safe-remediation-and-recovery-verification-phase-8)
+above — with exactly ONE allowlisted operation
+(`clear_payment_authorization_fault` against `payment-service`), no
+Docker socket, and independent re-verification of control-plane's own
+real approval state before ever acting. **Still planned:** real
+infrastructure operations (restarting a service, scaling a deployment,
+Kubernetes/Docker actions) behind this same boundary, once real
+RBAC/namespace scoping exists to bound them the way today's allowlist
+bounds its one action.
 
 ### Demonstration target system
 A set of small **demo commerce microservices** that the platform monitors

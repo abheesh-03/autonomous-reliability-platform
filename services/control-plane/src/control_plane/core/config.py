@@ -110,45 +110,113 @@ class LifecycleSettings:
         return cls(token=raw if raw.strip() else None)
 
 
-def resolve_write_tokens(
-    webhook_token: str | None, lifecycle_token: str | None
-) -> tuple[str | None, str | None]:
-    """Post-review correction: an application-level guard against the
-    two write-endpoint tokens (above) being configured identically.
+@dataclass(frozen=True)
+class RemediationTokenSettings:
+    """Phase 8: three separate, never-interchangeable Bearer tokens for
+    the remediation-proposal domain. Same non-blocking-startup
+    philosophy as WebhookSettings/LifecycleSettings — an unconfigured
+    token just makes its own endpoint fail closed (401), it never
+    crashes this service.
 
-    scripts/init-webhook-secret.sh refuses to produce this combination
-    in the first place (see its own "identical token" check) — but
+    - `proposal_token` (CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN) — held
+      ONLY by agent-runtime-service. Authorizes creating a proposal
+      only; cannot approve/reject, cannot record an execution result,
+      cannot touch the incident lifecycle endpoint.
+    - `approver_token` (CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN) — held
+      ONLY by a human/operator (or a CI acceptance script simulating
+      one). Never given to agent-runtime-service, tool-gateway,
+      investigator-service, or retrieval-service.
+    - `executor_token` (CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN) — held
+      ONLY by tool-gateway. Authorizes recording execution start/result
+      only; cannot create or approve/reject a proposal.
+    """
+
+    proposal_token: str | None
+    approver_token: str | None
+    executor_token: str | None
+
+    @classmethod
+    def from_env(cls) -> "RemediationTokenSettings":
+        def _opt(name: str) -> str | None:
+            raw = os.environ.get(name, "")
+            return raw if raw.strip() else None
+
+        return cls(
+            proposal_token=_opt("CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN"),
+            approver_token=_opt("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN"),
+            executor_token=_opt("CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN"),
+        )
+
+
+def resolve_write_tokens(
+    webhook_token: str | None,
+    lifecycle_token: str | None,
+    remediation_proposal_token: str | None = None,
+    remediation_approver_token: str | None = None,
+    remediation_executor_token: str | None = None,
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    """Post-review correction: an application-level guard against any
+    TWO of this service's write-endpoint tokens being configured
+    identically.
+
+    scripts/init-webhook-secret.sh / scripts/init-remediation-secrets.sh
+    refuse to produce such a combination in the first place — but
     nothing stops an operator from hand-editing .env, or setting these
-    two environment variables directly in some other deployment
-    mechanism, bypassing that script entirely. If that happens, the
-    whole reason these are two separate credentials — Alertmanager must
-    never be able to invoke the human/operator lifecycle endpoint, and
-    vice versa — is silently defeated: a single leaked/observed token
-    would then authorize both write paths. This function is called
-    once, at startup (main.py's lifespan), after both are independently
+    environment variables directly in some other deployment mechanism,
+    bypassing both scripts entirely. If that happens, the whole reason
+    these are separate credentials — Alertmanager must never invoke the
+    human/operator lifecycle endpoint; agent-runtime-service must never
+    approve/reject or record an execution result; tool-gateway must
+    never create or approve a proposal; a human approver's credential
+    must never double as anything an automated service could present —
+    is silently defeated: a single leaked/observed token would then
+    authorize more than one write path. This function is called once,
+    at startup (main.py's lifespan), after every token is independently
     read from the environment, and is deliberately a plain function
     (not reaching into app.state itself) so it is directly unit-testable
     without constructing the whole FastAPI app.
 
-    If both are configured (non-None) and equal, BOTH are returned as
-    None — i.e. both write endpoints fail closed, exactly as if neither
-    token had ever been configured — rather than letting either
-    authorize the other's endpoint. This does not crash the process
-    (consistent with the non-blocking-startup philosophy every other
-    setting in this module already follows): a misconfigured secret
-    must not take down the read-only API. The misconfiguration is
-    logged as an error server-side; neither token value is ever logged.
+    For every PAIR of the five tokens that are both configured
+    (non-None) and equal, BOTH members of that pair are returned as
+    None — i.e. every endpoint either of them would authorize fails
+    closed, exactly as if neither token had ever been configured —
+    rather than letting either authorize the other's endpoint(s). This
+    does not crash the process (consistent with the non-blocking-startup
+    philosophy every other setting in this module already follows): a
+    misconfigured secret must not take down the read-only API. Every
+    misconfiguration is logged as an error server-side by NAME only;
+    no token value is ever logged.
 
-    Exactly one token being unconfigured (None) is unaffected by this
-    check and continues to fail closed only for its own endpoint, same
-    as before this function existed.
+    A token being unconfigured (None) is unaffected by this check for
+    any pair it is not part of, and continues to fail closed only for
+    its own endpoint(s), same as before this function existed.
     """
-    if webhook_token is not None and lifecycle_token is not None and webhook_token == lifecycle_token:
-        logger.error(
-            "CONTROL_PLANE_WEBHOOK_TOKEN and CONTROL_PLANE_LIFECYCLE_TOKEN are "
-            "configured identically — both write endpoints (the Alertmanager "
-            "webhook and the human/operator lifecycle PATCH) will fail closed "
-            "until they are set to two different values"
-        )
-        return None, None
-    return webhook_token, lifecycle_token
+    names = (
+        "CONTROL_PLANE_WEBHOOK_TOKEN",
+        "CONTROL_PLANE_LIFECYCLE_TOKEN",
+        "CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN",
+        "CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN",
+        "CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN",
+    )
+    values = [
+        webhook_token,
+        lifecycle_token,
+        remediation_proposal_token,
+        remediation_approver_token,
+        remediation_executor_token,
+    ]
+    cleared = [False] * len(values)
+    for i in range(len(values)):
+        for j in range(i + 1, len(values)):
+            if values[i] is not None and values[j] is not None and values[i] == values[j]:
+                logger.error(
+                    "%s and %s are configured identically — every endpoint either one would "
+                    "authorize will fail closed until they are set to two different values",
+                    names[i],
+                    names[j],
+                )
+                cleared[i] = True
+                cleared[j] = True
+
+    resolved = [None if cleared[i] else values[i] for i in range(len(values))]
+    return tuple(resolved)  # type: ignore[return-value]

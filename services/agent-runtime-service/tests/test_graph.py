@@ -87,7 +87,23 @@ async def test_happy_path_reaches_completed_with_preserved_report():
     _graph, _config, result = await _run(control_plane, investigator)
 
     assert result["status"] == "completed"
-    assert result["completed_nodes"] == ["load_incident", "run_investigation", "evaluate_investigation", "finalize"]
+    # Phase 8: propose_remediation now always runs between
+    # evaluate_investigation and finalize -- here it finds no
+    # tool-gateway client configured (this test never passes one, the
+    # same Phase-7-era `compile_graph(...)` call shape every one of
+    # these historical tests still uses) and safely finalizes with
+    # remediation_status="not_applicable", never touching
+    # await_human_approval at all. See
+    # test_propose_remediation_is_not_applicable_without_a_tool_gateway_client
+    # below for the dedicated proof of this exact path.
+    assert result["completed_nodes"] == [
+        "load_incident",
+        "run_investigation",
+        "evaluate_investigation",
+        "propose_remediation",
+        "finalize",
+    ]
+    assert result["remediation_status"] == "not_applicable"
     assert result["incident_snapshot"]["id"] == str(SAMPLE_INCIDENT_ID)
     # Final report preservation: the real investigation_report dict is
     # still exactly what the fake investigator returned.
@@ -337,6 +353,7 @@ async def test_graph_state_transitions_recorded_in_completed_nodes_order():
         "load_incident",
         "run_investigation",
         "evaluate_investigation",
+        "propose_remediation",
         "finalize",
     ]
 

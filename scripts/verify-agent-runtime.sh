@@ -359,7 +359,19 @@ assert body['investigation_report'] is not None
 # never re-committed by this resume -- it appears in completed_nodes
 # EXACTLY once, even though this is the run's second resume call.
 assert body['completed_nodes'].count('load_incident') == 1, body['completed_nodes']
-assert body['completed_nodes'] == ['load_incident', 'run_investigation', 'evaluate_investigation', 'finalize'], body['completed_nodes']
+# Phase 8: propose_remediation now always runs between
+# evaluate_investigation and finalize. This reused Phase 4 incident's
+# title/source/severity structurally match Phase 8's own deterministic
+# policy, but the controlled payment fault is NOT active during this
+# Phase 7 acceptance run (nothing in this script ever enables it), so
+# tool-gateway's own real precondition check correctly reports
+# precondition_met=false and this safely finalizes as
+# remediation_status=not_applicable -- never creating a real proposal,
+# exactly Phase 8's own documented guarantee that the historical Phase
+# 7 read-only investigation path remains valid when no remediation
+# policy matches.
+assert body['completed_nodes'] == ['load_incident', 'run_investigation', 'evaluate_investigation', 'propose_remediation', 'finalize'], body['completed_nodes']
+assert body['remediation_status'] == 'not_applicable', body['remediation_status']
 assert body['result_quality'] in ('well_supported', 'inconclusive', 'partial'), body['result_quality']
 
 raw = json.dumps(body)

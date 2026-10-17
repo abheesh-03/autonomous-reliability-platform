@@ -239,7 +239,18 @@ async def test_real_checkpoint_survives_process_destruction_and_resumes_correctl
     result = await graph_b.ainvoke(None, config=config, durability="sync")
 
     assert result["status"] == "completed"
-    assert result["completed_nodes"] == ["load_incident", "run_investigation", "evaluate_investigation", "finalize"]
+    # Phase 8: propose_remediation always runs now; this test's
+    # compile_graph(...) call never passes a tool_gateway_client (same
+    # Phase-7-era shape), so it safely finalizes as
+    # remediation_status="not_applicable".
+    assert result["completed_nodes"] == [
+        "load_incident",
+        "run_investigation",
+        "evaluate_investigation",
+        "propose_remediation",
+        "finalize",
+    ]
+    assert result["remediation_status"] == "not_applicable"
     assert result["result_quality"] in ("well_supported", "inconclusive", "partial")
 
     # load_incident was NEVER re-executed by instance B -- its result

@@ -52,12 +52,22 @@ from the checkpoint remaining resumable either way.
 import logging
 from datetime import UTC, datetime
 
+from langgraph.types import interrupt
+
 from agent_runtime_service.clients.control_plane import (
     ControlPlaneClient,
     ControlPlaneOutputError,
     IncidentNotFoundError,
+    RemediationProposalConflictError,
+    RemediationProposalNotFoundError,
 )
 from agent_runtime_service.clients.investigator import InvestigatorClient, InvestigatorOutputError
+from agent_runtime_service.clients.tool_gateway import (
+    ToolGatewayAmbiguousExecutionError,
+    ToolGatewayClient,
+    ToolGatewayOutputError,
+    ToolGatewayRefusedError,
+)
 from agent_runtime_service.config import RuntimeBounds
 from agent_runtime_service.domain.incident_snapshot import IncidentSnapshot
 from agent_runtime_service.domain.investigation import InvestigationReport
@@ -65,6 +75,36 @@ from agent_runtime_service.graph.state import AgentGraphState
 from agent_runtime_service.text_safety import bound_and_redact, hard_bound
 
 logger = logging.getLogger("agent_runtime_service.graph.nodes")
+
+# Phase 8 §DETERMINISTIC ACTION POLICY: the one, and only, allowlisted
+# action/target -- mirrors tool-gateway's own Go allowlist
+# (internal/allowlist/allowlist.go) and database/migrations/
+# V6__create_remediation_schema.sql's own CHECK constraints exactly.
+# Never derived from LLM output; a pure, hardcoded constant.
+REMEDIATION_ACTION_TYPE = "clear_payment_authorization_fault"
+REMEDIATION_TARGET = "payment-service"
+
+# Must match observability/prometheus/rules/alerts.yml's
+# CheckoutServerErrors alert `annotations.summary` EXACTLY --
+# control-plane's ingestion/mapping.py sets an incident's `title` to
+# the alert's own `summary` annotation when one is present (which this
+# rule always provides), so this is the real, structured signal this
+# service has for "this incident corresponds to the existing
+# CheckoutServerErrors condition" (Phase 8 §DETERMINISTIC ACTION
+# POLICY). Honest, stated limitation (see
+# docs/architecture/phase-8-human-approval-remediation.md): reliability.incidents
+# does not persist the Alertmanager alert name itself, so this is a
+# title-text coupling to the alert rule's own annotation, not a
+# first-class alertname column -- if that annotation text changes,
+# this constant must change with it.
+_REMEDIATION_POLICY_ALERT_TITLE = "checkout-service is returning HTTP 5xx errors"
+
+# A defensive ceiling on how many evidence/context ids a single
+# proposal ever carries -- mirrors
+# V6__create_remediation_schema.sql's own `cardinality(...) <= 50`
+# CHECK constraint exactly, so a request this service builds can never
+# itself be the reason control-plane 422s/409s it.
+MAX_SUPPORTING_IDS = 50
 
 
 def _now_iso() -> str:
@@ -88,9 +128,17 @@ def build_nodes(
     control_plane_client: ControlPlaneClient,
     investigator_client: InvestigatorClient,
     bounds: RuntimeBounds,
+    tool_gateway_client: ToolGatewayClient | None = None,
 ):
-    """Returns the four node callables, each a plain
-    `async def (state) -> dict` LangGraph node function."""
+    """Returns the node callables, each a plain
+    `async def (state) -> dict` LangGraph node function. Phase 7's
+    original four (load_incident/run_investigation/
+    evaluate_investigation/finalize) plus Phase 8's four new ones
+    (propose_remediation/await_human_approval/execute_remediation/
+    verify_recovery). `tool_gateway_client` is optional ONLY so
+    existing Phase 7-era unit tests that construct a graph without any
+    remediation capability at all keep working unmodified; the real
+    service (main.py) always provides one."""
 
     async def load_incident(state: AgentGraphState) -> dict:
         # ControlPlaneUnavailableError is deliberately NOT caught here --
@@ -206,7 +254,433 @@ def build_nodes(
             "completed_nodes": ["finalize"],
         }
 
-    return load_incident, run_investigation, evaluate_investigation, finalize
+    async def propose_remediation(state: AgentGraphState) -> dict:
+        """Phase 8 §DETERMINISTIC ACTION POLICY. The LLM/investigation
+        never chooses an executable action here -- this node checks a
+        small, deterministic set of structured conditions (never
+        parsed from LLM prose) and, only if ALL of them hold, creates
+        ONE allowlisted proposal. If no policy matches, this node
+        creates NOTHING -- the run still finalizes normally, with
+        `remediation_status="not_applicable"`."""
+        now = _now_iso()
+        not_applicable = {
+            "remediation_status": "not_applicable",
+            "current_node": "propose_remediation",
+            "completed_nodes": ["propose_remediation"],
+            "updated_at": now,
+        }
+
+        incident_snapshot = state.get("incident_snapshot") or {}
+        policy_matches = (
+            incident_snapshot.get("source") == "alertmanager"
+            and incident_snapshot.get("severity") == "critical"
+            and incident_snapshot.get("title") == _REMEDIATION_POLICY_ALERT_TITLE
+            and bool(state.get("investigation_report"))
+        )
+        if not policy_matches or tool_gateway_client is None:
+            return not_applicable
+
+        # Independent, deterministic precondition check -- never
+        # trusts a hypothesis merely because it mentions "payment":
+        # the one thing that actually gates proposal creation here is
+        # tool-gateway's own read-only report of the REAL controlled
+        # fault's current state.
+        try:
+            capability = await tool_gateway_client.get_capability()
+        except ToolGatewayOutputError as exc:
+            return {
+                "status": "failed",
+                "error_code": "tool_gateway_output_invalid",
+                "error_detail": _safe_detail(str(exc), bounds.max_error_detail_chars),
+                "current_node": "propose_remediation",
+                "completed_nodes": ["propose_remediation"],
+                "updated_at": now,
+            }
+        # ToolGatewayUnavailableError is deliberately NOT caught here --
+        # same TRANSIENT/RETRYABLE reasoning as load_incident/
+        # run_investigation above.
+
+        if not (
+            capability.action_type == REMEDIATION_ACTION_TYPE
+            and capability.target == REMEDIATION_TARGET
+            and capability.precondition_met
+        ):
+            return not_applicable
+
+        evidence_ids = _collect_supporting_evidence_ids(state.get("investigation_report"))
+        context_ids = _collect_supporting_context_ids(state.get("investigation_report"))
+        reason = _safe_detail(
+            "deterministic policy match: alertmanager-sourced critical incident matching the "
+            "CheckoutServerErrors condition, with an existing investigation and tool-gateway "
+            "independently reporting the controlled payment authorization fault as active",
+            bounds.max_error_detail_chars,
+        )
+
+        try:
+            proposal = await control_plane_client.create_remediation_proposal(
+                incident_id=state["incident_id"],
+                agent_run_id=state["run_id"],
+                idempotency_key=f"phase8-proposal:{state['run_id']}",
+                action_type=REMEDIATION_ACTION_TYPE,
+                target=REMEDIATION_TARGET,
+                reason=reason,
+                supporting_evidence_ids=evidence_ids,
+                supporting_context_ids=context_ids,
+            )
+        except RemediationProposalConflictError as exc:
+            # TERMINAL: the same idempotency key already exists with a
+            # DIFFERENT, conflicting proposal -- retrying the identical
+            # request would never resolve this.
+            return {
+                "status": "failed",
+                "error_code": "remediation_proposal_conflict",
+                "error_detail": _safe_detail(str(exc), bounds.max_error_detail_chars),
+                "current_node": "propose_remediation",
+                "completed_nodes": ["propose_remediation"],
+                "updated_at": now,
+            }
+        # RemediationProposalCreateAmbiguousError deliberately NOT
+        # caught (Phase 8 correction round, finding #2): control-plane
+        # already commits the proposal + its 'proposed' event BEFORE
+        # ever building its HTTP response, so an HTTP 5xx, a malformed
+        # body, or a shape-invalid body does NOT prove creation never
+        # happened. Left uncaught -- same TRANSIENT/RETRYABLE
+        # convention as ControlPlaneUnavailableError immediately below
+        # -- so this node's checkpoint is never committed and the run
+        # stays resumable at propose_remediation. ControlPlaneOutputError
+        # deliberately NOT caught here either -- create_remediation_proposal
+        # never raises it (only RemediationProposalCreateAmbiguousError,
+        # for exactly the ambiguous cases above); ControlPlaneOutputError
+        # remains reserved for read-only GET shape failures elsewhere in
+        # this module (load_incident, verify_recovery), which genuinely
+        # are terminal.
+        #
+        # ControlPlaneUnavailableError deliberately NOT caught --
+        # TRANSIENT/RETRYABLE, same as load_incident above. A retried
+        # create_remediation_proposal call for the SAME run_id uses the
+        # SAME idempotency_key, so it safely converges on the SAME
+        # proposal rather than creating a duplicate (Phase 8 §PROPOSAL
+        # IDEMPOTENCY).
+
+        return {
+            "remediation_proposal_id": str(proposal.id),
+            "remediation_action_type": proposal.action_type,
+            "remediation_target": proposal.target,
+            "remediation_status": "pending_approval",
+            "current_node": "propose_remediation",
+            "completed_nodes": ["propose_remediation"],
+            "updated_at": now,
+        }
+
+    async def await_human_approval(state: AgentGraphState) -> dict:
+        """Phase 8 §LANGGRAPH HUMAN INTERRUPT. The ONLY thing this
+        node does before calling `interrupt(...)` is read already-set
+        state fields -- no side effect, no external call -- because
+        LangGraph RE-EXECUTES this node's body from the top on every
+        resume attempt (confirmed directly against the installed,
+        pinned langgraph==1.2.15 source before this was written); the
+        interrupt payload is safe to recompute every time.
+
+        The value `interrupt()` returns on resume is NEVER a
+        caller-supplied value -- it is the Command(resume=...) payload
+        api/agent_runs.py::resume_agent_run builds EXCLUSIVELY from
+        control-plane's own trusted, persisted decision record (Phase
+        8 §HUMAN DECISION SOURCE OF TRUTH). This node has no way to
+        tell the difference between a real human decision and a faked
+        one -- that guarantee is enforced entirely by the API layer,
+        never here; this node simply trusts whatever decision value it
+        is resumed with, by design.
+        """
+        payload = {
+            "proposal_id": state.get("remediation_proposal_id"),
+            "action_type": state.get("remediation_action_type"),
+            "target": state.get("remediation_target"),
+            "reason": "human approval required before executing this remediation action",
+            "risk": "low",
+        }
+        decision = interrupt(payload)
+        decision_value = decision.get("decision") if isinstance(decision, dict) else None
+
+        now = _now_iso()
+        if decision_value == "approved":
+            return {
+                "approval_decision": "approved",
+                "remediation_status": "approved",
+                "current_node": "await_human_approval",
+                "completed_nodes": ["await_human_approval"],
+                "updated_at": now,
+            }
+        return {
+            "approval_decision": "rejected",
+            "remediation_status": "rejected",
+            "current_node": "await_human_approval",
+            "completed_nodes": ["await_human_approval"],
+            "updated_at": now,
+        }
+
+    async def execute_remediation(state: AgentGraphState) -> dict:
+        """Only ever reached after a REAL, trusted 'approved' decision
+        (see route_after_await_human_approval below). tool-gateway
+        independently re-verifies control-plane's own proposal state
+        before doing anything at all -- this node's own call here
+        carries nothing but `proposal_id` (Phase 8 §NO CALLER-SUPPLIED
+        EXECUTION TARGET)."""
+        proposal_id = state.get("remediation_proposal_id")
+        now = _now_iso()
+        assert tool_gateway_client is not None  # unreachable otherwise -- see route_after_await_human_approval
+
+        try:
+            result = await tool_gateway_client.execute(proposal_id)
+        except ToolGatewayRefusedError as exc:
+            # A definitive business-level refusal (e.g. the real
+            # action or its independent post-action verification
+            # genuinely did not succeed) -- recorded as a failed
+            # REMEDIATION outcome, never as this agent RUN's own
+            # internal failure: the run itself completed its job
+            # (it tried, and tool-gateway/control-plane already
+            # rolled the incident back to 'investigating' on their own
+            # side -- see repositories/remediation_repository.py).
+            return {
+                "execution_result": {"status": "failed", "detail": _safe_detail(exc.detail, bounds.max_error_detail_chars)},
+                "remediation_status": "failed",
+                "current_node": "execute_remediation",
+                "completed_nodes": ["execute_remediation"],
+                "updated_at": now,
+            }
+        except ToolGatewayOutputError as exc:
+            # Phase 8 correction round (finding #1): a malformed/lost/
+            # otherwise-ambiguous tool-gateway response does NOT prove
+            # the mutation never happened -- it may have already
+            # durably succeeded or failed on control-plane's own side
+            # (e.g. the response was lost in transit AFTER
+            # execution/result was already recorded), or it may still
+            # be genuinely in flight. Never blindly terminalized;
+            # always independently reconciled first.
+            return await _reconcile_ambiguous_execution(proposal_id, exc, now)
+        # ToolGatewayUnavailableError deliberately NOT caught --
+        # TRANSIENT/RETRYABLE: the proposal remains 'executing' on
+        # control-plane's own side, so a retried resume safely retries
+        # the SAME idempotent action (Phase 8 §TOOL-GATEWAY EXECUTION
+        # IDEMPOTENCY).
+
+        return {
+            "execution_result": {
+                "status": result.status,
+                "detail": _safe_detail(result.detail, bounds.max_error_detail_chars) if result.detail else None,
+            },
+            "remediation_status": result.status,
+            "current_node": "execute_remediation",
+            "completed_nodes": ["execute_remediation"],
+            "updated_at": now,
+        }
+
+    async def _reconcile_ambiguous_execution(proposal_id: str | None, exc: ToolGatewayOutputError, now: str) -> dict:
+        """Phase 8 correction round (finding #1): independently
+        re-derives what ACTUALLY happened from control-plane's own
+        durable proposal record, rather than trusting (or blindly
+        terminalizing on) tool-gateway's own ambiguous execute()
+        response. Three real outcomes, never guessed:
+
+          - control-plane durably recorded 'succeeded'/'failed' ->
+            report that REAL outcome (the response was merely lost in
+            transit; nothing is re-executed).
+          - control-plane still reports 'approved'/'executing' -> truly
+            unknown/in-flight -> raises ToolGatewayAmbiguousExecutionError
+            (left UNCAUGHT, same TRANSIENT/RETRYABLE convention as every
+            other dependency-outage case in this module) so this node's
+            checkpoint is never committed and the thread stays resumable
+            at execute_remediation.
+          - anything else (pending_approval/rejected, or control-plane
+            itself returning a shape/not-found error) -> this node was
+            somehow reached without a real completed/in-flight
+            execution on control-plane's side; classified explicitly as
+            a failed remediation outcome, never silently pretending any
+            action occurred.
+        """
+        try:
+            proposal = await control_plane_client.get_remediation_proposal(proposal_id)
+        except RemediationProposalNotFoundError as nf_exc:
+            return {
+                "status": "failed",
+                "error_code": "remediation_proposal_not_found",
+                "error_detail": _safe_detail(str(nf_exc), bounds.max_error_detail_chars),
+                "current_node": "execute_remediation",
+                "completed_nodes": ["execute_remediation"],
+                "updated_at": now,
+            }
+        except ControlPlaneOutputError as cp_exc:
+            return {
+                "status": "failed",
+                "error_code": "control_plane_output_invalid",
+                "error_detail": _safe_detail(str(cp_exc), bounds.max_error_detail_chars),
+                "current_node": "execute_remediation",
+                "completed_nodes": ["execute_remediation"],
+                "updated_at": now,
+            }
+        # ControlPlaneUnavailableError deliberately NOT caught --
+        # reconciliation itself being unavailable is just as
+        # transient/resumable as the original ambiguous response: the
+        # proposal's real state has not been confirmed either way yet.
+
+        if proposal.status == "succeeded":
+            return {
+                "execution_result": {
+                    "status": "succeeded",
+                    "detail": "reconciled from control-plane's durable record after an ambiguous tool-gateway response",
+                },
+                "remediation_status": "succeeded",
+                "current_node": "execute_remediation",
+                "completed_nodes": ["execute_remediation"],
+                "updated_at": now,
+            }
+        if proposal.status == "failed":
+            return {
+                "execution_result": {
+                    "status": "failed",
+                    "detail": "reconciled from control-plane's durable record after an ambiguous tool-gateway response",
+                },
+                "remediation_status": "failed",
+                "current_node": "execute_remediation",
+                "completed_nodes": ["execute_remediation"],
+                "updated_at": now,
+            }
+        if proposal.status in ("approved", "executing"):
+            raise ToolGatewayAmbiguousExecutionError(
+                f"tool-gateway execute response was ambiguous ({exc}) and control-plane proposal "
+                f"{proposal_id} is still {proposal.status!r}; this agent run remains resumable"
+            ) from exc
+
+        # pending_approval/rejected here would mean this node was
+        # somehow reached without a real 'approved' decision ever
+        # landing durably on control-plane's side -- an inconsistent,
+        # effectively unreachable state given route_after_await_human_
+        # approval's own guard, but defensively classified as an
+        # honest, explicit failure rather than silently pretending any
+        # execution occurred.
+        return {
+            "execution_result": {
+                "status": "failed",
+                "detail": _safe_detail(
+                    f"control-plane proposal is unexpectedly {proposal.status!r} after an ambiguous "
+                    "tool-gateway execute response",
+                    bounds.max_error_detail_chars,
+                ),
+            },
+            "remediation_status": proposal.status,
+            "current_node": "execute_remediation",
+            "completed_nodes": ["execute_remediation"],
+            "updated_at": now,
+        }
+
+    async def verify_recovery(state: AgentGraphState) -> dict:
+        """Phase 8 correction round (finding #2): independently proves
+        REAL recovery, never merely durable bookkeeping. Three
+        independent facts, all re-fetched FRESH here -- never trusting
+        execute_remediation's own synchronous response for any of them:
+
+          1. control-plane's own durable proposal record genuinely says
+             'succeeded' (not merely what execute_remediation's
+             response claimed).
+          2. tool-gateway's own authenticated, independent capability/
+             precondition read reports the controlled payment fault as
+             currently INACTIVE (`not precondition_met`) -- a fresh
+             read, not a cached belief.
+          3. that SAME fresh read reports payment-service as currently
+             healthy (`target_healthy`).
+
+        All three must hold before this node ever reports
+        remediation_status="succeeded"; if any is false, recovery is
+        reported exactly as it was independently observed -- never
+        papered over as a success merely because the durable execution
+        result said so."""
+        now = _now_iso()
+        proposal_id = state.get("remediation_proposal_id")
+        execution_result = state.get("execution_result") or {}
+
+        if execution_result.get("status") != "succeeded" or not proposal_id:
+            return {
+                "recovery_verification": {
+                    "proposal_succeeded": False,
+                    "fault_inactive": False,
+                    "target_healthy": False,
+                },
+                "current_node": "verify_recovery",
+                "completed_nodes": ["verify_recovery"],
+                "updated_at": now,
+            }
+
+        try:
+            proposal = await control_plane_client.get_remediation_proposal(proposal_id)
+        except RemediationProposalNotFoundError as exc:
+            return {
+                "status": "failed",
+                "error_code": "remediation_proposal_not_found",
+                "error_detail": _safe_detail(str(exc), bounds.max_error_detail_chars),
+                "current_node": "verify_recovery",
+                "completed_nodes": ["verify_recovery"],
+                "updated_at": now,
+            }
+        except ControlPlaneOutputError as exc:
+            return {
+                "status": "failed",
+                "error_code": "control_plane_output_invalid",
+                "error_detail": _safe_detail(str(exc), bounds.max_error_detail_chars),
+                "current_node": "verify_recovery",
+                "completed_nodes": ["verify_recovery"],
+                "updated_at": now,
+            }
+        # ControlPlaneUnavailableError deliberately NOT caught --
+        # TRANSIENT/RETRYABLE.
+
+        proposal_succeeded = proposal.status == "succeeded"
+        fault_inactive = False
+        target_healthy = False
+
+        if proposal_succeeded:
+            assert tool_gateway_client is not None  # unreachable otherwise -- execute_remediation always requires one
+            try:
+                capability = await tool_gateway_client.get_capability()
+            except ToolGatewayOutputError as exc:
+                return {
+                    "status": "failed",
+                    "error_code": "tool_gateway_output_invalid",
+                    "error_detail": _safe_detail(str(exc), bounds.max_error_detail_chars),
+                    "current_node": "verify_recovery",
+                    "completed_nodes": ["verify_recovery"],
+                    "updated_at": now,
+                }
+            # ToolGatewayUnavailableError deliberately NOT caught --
+            # TRANSIENT/RETRYABLE: a temporary outage while verifying
+            # recovery does not prove recovery failed; a retried resume
+            # safely re-attempts this SAME read-only check.
+
+            fault_inactive = not capability.precondition_met
+            target_healthy = capability.target_healthy
+
+        recovery_confirmed = proposal_succeeded and fault_inactive and target_healthy
+
+        return {
+            "recovery_verification": {
+                "proposal_succeeded": proposal_succeeded,
+                "fault_inactive": fault_inactive,
+                "target_healthy": target_healthy,
+            },
+            "remediation_status": "succeeded" if recovery_confirmed else "failed",
+            "current_node": "verify_recovery",
+            "completed_nodes": ["verify_recovery"],
+            "updated_at": now,
+        }
+
+    return (
+        load_incident,
+        run_investigation,
+        evaluate_investigation,
+        propose_remediation,
+        await_human_approval,
+        execute_remediation,
+        verify_recovery,
+        finalize,
+    )
 
 
 def classify_investigation(report: dict) -> str:
@@ -271,6 +745,68 @@ def classify_investigation(report: dict) -> str:
     return "partial"
 
 
+def _collect_supporting_evidence_ids(report: dict | None) -> list[str]:
+    """Deterministic, structural extraction only -- never parses or
+    reasons about any `statement` prose. Deduplicated and capped at
+    MAX_SUPPORTING_IDS -- mirrors V6's own database-level ceiling.
+
+    Phase 8 correction round (finding #5): the deterministic stub
+    provider (and, in general, any report whose real support lives in
+    its OBSERVATIONS rather than a hypothesis) can produce a report
+    with cited evidence but NO hypotheses at all -- a prior version of
+    this function only ever looked at
+    `hypothesis.supporting_evidence_ids`, so such a report would
+    produce an empty, provenance-less proposal even though the
+    investigation genuinely cited real evidence. Now collects BOTH
+    `observation.evidence_ids` (every observation's own cited evidence
+    -- confirmed facts, Phase 5/6's own epistemic floor) AND
+    `hypothesis.supporting_evidence_ids` -- deliberately never
+    `hypothesis.conflicting_evidence_ids`, which by definition does NOT
+    support this proposal's own reasoning."""
+    if not report:
+        return []
+    ids: list[str] = []
+    for observation in report.get("observations", []):
+        for evidence_id in observation.get("evidence_ids", []):
+            if evidence_id not in ids:
+                ids.append(evidence_id)
+            if len(ids) >= MAX_SUPPORTING_IDS:
+                return ids
+    for hypothesis in report.get("hypotheses", []):
+        for evidence_id in hypothesis.get("supporting_evidence_ids", []):
+            if evidence_id not in ids:
+                ids.append(evidence_id)
+            if len(ids) >= MAX_SUPPORTING_IDS:
+                return ids
+    return ids
+
+
+def _collect_supporting_context_ids(report: dict | None) -> list[str]:
+    """Deterministic, structural extraction only -- never the retrieved
+    excerpt text itself. Deduplicated and capped at MAX_SUPPORTING_IDS.
+
+    Phase 8 correction round (finding #5): a prior version of this
+    function collected EVERY item control-plane's own Phase 6 retrieval
+    step returned (`retrieval_context.{knowledge,historical_incidents}`)
+    -- that is "everything retrieved", not "supporting context"; some
+    retrieved context can be irrelevant or even conflicting. Now
+    collects ONLY `hypothesis.supporting_context_ids` -- the model's own
+    declared judgement of which retrieved items actually support its
+    reasoning -- and deliberately never
+    `hypothesis.conflicting_context_ids` or any unreferenced retrieval
+    item."""
+    if not report:
+        return []
+    ids: list[str] = []
+    for hypothesis in report.get("hypotheses", []):
+        for context_id in hypothesis.get("supporting_context_ids", []):
+            if context_id not in ids:
+                ids.append(context_id)
+            if len(ids) >= MAX_SUPPORTING_IDS:
+                return ids
+    return ids
+
+
 def route_after_load_incident(state: AgentGraphState) -> str:
     return "finalize" if state.get("status") == "failed" else "run_investigation"
 
@@ -279,14 +815,45 @@ def route_after_run_investigation(state: AgentGraphState) -> str:
     return "finalize" if state.get("status") == "failed" else "evaluate_investigation"
 
 
+def route_after_propose_remediation(state: AgentGraphState) -> str:
+    """Phase 8: a proposal was actually created (remediation_proposal_id
+    is set) -> wait for a real human decision. No policy match (or a
+    terminal error -- status=="failed") -> finalize directly; a run
+    with nothing to remediate never touches await_human_approval at
+    all."""
+    if state.get("status") == "failed":
+        return "finalize"
+    return "await_human_approval" if state.get("remediation_proposal_id") else "finalize"
+
+
+def route_after_await_human_approval(state: AgentGraphState) -> str:
+    """Phase 8 §APPROVAL REJECTION PATH / §APPROVAL APPROVED PATH:
+    only a REAL, trusted 'approved' decision (resumed via
+    api/agent_runs.py from control-plane's own durable record) ever
+    reaches execute_remediation. Anything else (rejected, or an
+    unexpected/malformed decision value) finalizes directly -- no
+    tool-gateway call, no payment-service call, no incident
+    transition."""
+    return "execute_remediation" if state.get("approval_decision") == "approved" else "finalize"
+
+
+def route_after_execute_remediation(state: AgentGraphState) -> str:
+    return "finalize" if state.get("status") == "failed" else "verify_recovery"
+
+
 # Re-exported so callers (and tests) don't need to reach into
 # clients/domain modules just to validate a report shape.
 __all__ = [
     "AgentGraphState",
     "IncidentSnapshot",
     "InvestigationReport",
+    "REMEDIATION_ACTION_TYPE",
+    "REMEDIATION_TARGET",
     "build_nodes",
     "classify_investigation",
+    "route_after_await_human_approval",
+    "route_after_execute_remediation",
     "route_after_load_incident",
+    "route_after_propose_remediation",
     "route_after_run_investigation",
 ]

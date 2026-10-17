@@ -199,6 +199,55 @@ class InvestigatorSettings:
 
 
 @dataclass(frozen=True)
+class RemediationSettings:
+    """Phase 8: the ONE remediation credential this service holds for
+    control-plane -- CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN. Never
+    CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN or
+    CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN (this module never even
+    reads either environment variable), never
+    CONTROL_PLANE_WEBHOOK_TOKEN/CONTROL_PLANE_LIFECYCLE_TOKEN, and
+    never PAYMENT_FAULT_INJECTION_TOKEN/PAYMENT_REMEDIATION_TOKEN --
+    see tests/test_read_only_guarantees.py's structural proof.
+    Deliberately non-blocking at startup (empty string default): an
+    unconfigured token just means control-plane's own
+    require_remediation_proposal_token fails every create-proposal
+    call closed (401) -- never a crash."""
+
+    proposal_token: str
+
+    @classmethod
+    def from_env(cls) -> "RemediationSettings":
+        return cls(proposal_token=os.environ.get("CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN", ""))
+
+
+@dataclass(frozen=True)
+class ToolGatewaySettings:
+    """Phase 8: the ONE tool-gateway credential this service holds --
+    TOOL_GATEWAY_EXECUTION_TOKEN. This token alone never authorizes an
+    action (tool-gateway independently re-verifies control-plane's own
+    approved proposal on every call) -- see
+    docs/architecture/phase-8-human-approval-remediation.md."""
+
+    base_url: str
+    execution_token: str
+    connect_timeout_seconds: float
+    request_timeout_seconds: float
+
+    @classmethod
+    def from_env(cls) -> "ToolGatewaySettings":
+        return cls(
+            base_url=os.environ.get("AGENT_RUNTIME_TOOL_GATEWAY_URL", "http://tool-gateway:8004"),
+            execution_token=os.environ.get("TOOL_GATEWAY_EXECUTION_TOKEN", ""),
+            connect_timeout_seconds=_float_env("AGENT_RUNTIME_CONNECT_TIMEOUT_SECONDS", 5.0),
+            # Execution involves a real downstream mutation + independent
+            # verification round-trip inside tool-gateway -- a materially
+            # longer bound than a plain GET, matching the generous margin
+            # InvestigatorSettings already gives a real LLM call.
+            request_timeout_seconds=_float_env("AGENT_RUNTIME_TOOL_GATEWAY_TIMEOUT_SECONDS", 30.0),
+        )
+
+
+@dataclass(frozen=True)
 class RuntimeBounds:
     """Practical bounds for this service's own API surface -- never a
     claim about investigator-service's own bounds (which it owns and

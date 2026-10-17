@@ -5,13 +5,30 @@ every other service in this platform already establishes."""
 import httpx
 import pytest
 
+import uuid
+
 from agent_runtime_service.clients.control_plane import (
     ControlPlaneClient,
     ControlPlaneOutputError,
     ControlPlaneUnavailableError,
     IncidentNotFoundError,
+    RemediationProposalConflictError,
+    RemediationProposalCreateAmbiguousError,
 )
 from tests.conftest import SAMPLE_INCIDENT_ID, incident_json
+
+
+def _create_kwargs(idempotency_key: str) -> dict:
+    return dict(
+        incident_id=SAMPLE_INCIDENT_ID,
+        agent_run_id=uuid.uuid4(),
+        idempotency_key=idempotency_key,
+        action_type="clear_payment_authorization_fault",
+        target="payment-service",
+        reason="test",
+        supporting_evidence_ids=[],
+        supporting_context_ids=[],
+    )
 
 
 async def test_get_incident_success():
@@ -92,9 +109,126 @@ async def test_output_error_never_leaks_the_raw_field_value():
     assert str(exc_info.value) == "control-plane response did not match the expected response contract"
 
 
-async def test_client_never_calls_a_write_http_verb_at_the_ast_level():
+def _proposal_json(proposal_id: uuid.UUID, incident_id: uuid.UUID, agent_run_id: uuid.UUID) -> dict:
+    return {
+        "id": str(proposal_id),
+        "incident_id": str(incident_id),
+        "agent_run_id": str(agent_run_id),
+        "idempotency_key": "k",
+        "action_type": "clear_payment_authorization_fault",
+        "target": "payment-service",
+        "reason": "test",
+        "supporting_evidence_ids": [],
+        "supporting_context_ids": [],
+        "status": "pending_approval",
+        "proposed_at": "2026-04-01T09:00:00+00:00",
+        "updated_at": "2026-04-01T09:00:00+00:00",
+        "decided_at": None,
+        "decision_comment": None,
+        "execution_started_at": None,
+        "execution_completed_at": None,
+    }
+
+
+async def test_create_proposal_malformed_body_raises_ambiguous_not_output_error():
+    """Phase 8 correction round (finding #2): control-plane's create
+    endpoint already COMMITS the proposal before building its
+    response, so a malformed 200 body must raise
+    RemediationProposalCreateAmbiguousError -- a DISTINCT, retryable
+    type -- never the terminal ControlPlaneOutputError this same
+    client correctly still raises for read-only GETs."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not json")
+
+    client = ControlPlaneClient("http://control-plane", 2.0, 5.0, transport=httpx.MockTransport(handler))
+    with pytest.raises(RemediationProposalCreateAmbiguousError):
+        await client.create_remediation_proposal(**_create_kwargs("phase8-proposal:test"))
+
+
+async def test_create_proposal_5xx_raises_ambiguous_not_output_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502)
+
+    client = ControlPlaneClient("http://control-plane", 2.0, 5.0, transport=httpx.MockTransport(handler))
+    with pytest.raises(RemediationProposalCreateAmbiguousError):
+        await client.create_remediation_proposal(**_create_kwargs("phase8-proposal:test"))
+
+
+async def test_create_proposal_shape_invalid_body_raises_ambiguous_not_output_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"totally": "wrong shape"})
+
+    client = ControlPlaneClient("http://control-plane", 2.0, 5.0, transport=httpx.MockTransport(handler))
+    with pytest.raises(RemediationProposalCreateAmbiguousError):
+        await client.create_remediation_proposal(**_create_kwargs("phase8-proposal:test"))
+
+
+async def test_create_proposal_409_still_raises_conflict_error_unchanged():
+    """Point C of the correction's own test list: the 409 semantic-
+    conflict path is untouched by this correction -- still terminal,
+    still its own distinct type."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "idempotency conflict"})
+
+    client = ControlPlaneClient("http://control-plane", 2.0, 5.0, transport=httpx.MockTransport(handler))
+    with pytest.raises(RemediationProposalConflictError):
+        await client.create_remediation_proposal(**_create_kwargs("phase8-proposal:test"))
+
+
+async def test_create_proposal_retry_after_ambiguous_response_converges_to_a_clean_result():
+    """Point B: models a retried create_remediation_proposal call (the
+    SAME idempotency_key, as propose_remediation always derives
+    deterministically from run_id) after an ambiguous first response.
+    The first attempt's response is lost/malformed; the SECOND
+    attempt -- control-plane's own real idempotent creation logic
+    already proven for real in
+    services/control-plane/tests/test_remediation_transactions.py --
+    cleanly returns the existing proposal. This proves the CLIENT
+    correctly raises on the first (ambiguous) attempt and correctly
+    parses the clean result on the retried attempt; the underlying
+    database-level convergence guarantee (same key -> same row,
+    exactly one 'proposed' event) is what that real-PostgreSQL suite
+    independently proves."""
+    proposal_id = uuid.uuid4()
+    incident_id = uuid.uuid4()
+    agent_run_id = uuid.uuid4()
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return httpx.Response(200, content=b"not json")
+        return httpx.Response(200, json=_proposal_json(proposal_id, incident_id, agent_run_id))
+
+    client = ControlPlaneClient("http://control-plane", 2.0, 5.0, transport=httpx.MockTransport(handler))
+    kwargs = dict(
+        incident_id=incident_id,
+        agent_run_id=agent_run_id,
+        idempotency_key="phase8-proposal:same-run",
+        action_type="clear_payment_authorization_fault",
+        target="payment-service",
+        reason="test",
+        supporting_evidence_ids=[],
+        supporting_context_ids=[],
+    )
+
+    with pytest.raises(RemediationProposalCreateAmbiguousError):
+        await client.create_remediation_proposal(**kwargs)
+
+    retried = await client.create_remediation_proposal(**kwargs)
+    assert retried.id == proposal_id
+    assert calls["count"] == 2
+
+
+async def test_client_never_calls_a_write_http_verb_other_than_the_one_proposal_post():
     """Belt-and-suspenders alongside test_read_only_guarantees.py's own
-    module-wide AST check -- this client specifically."""
+    module-wide AST check -- this client specifically. Phase 7: no
+    write verb at all. Phase 8: exactly one legitimate POST (create a
+    remediation proposal, authenticated with
+    CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN) -- PUT/PATCH/DELETE must
+    still never appear."""
     import ast
     import pathlib
 
@@ -106,6 +240,6 @@ async def test_client_never_calls_a_write_http_verb_at_the_ast_level():
         / "control_plane.py"
     )
     tree = ast.parse(path.read_text())
-    write_verbs = {"post", "put", "patch", "delete"}
-    found = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in write_verbs}
-    assert not found, f"control_plane.py calls write HTTP verb(s): {found}"
+    never_allowed = {"put", "patch", "delete"}
+    found = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in never_allowed}
+    assert not found, f"control_plane.py calls write HTTP verb(s) it must never use: {found}"
