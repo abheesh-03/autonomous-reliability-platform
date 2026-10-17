@@ -445,12 +445,28 @@ jobs:
       # CONTROL_PLANE_REQUIRE_REAL_DB=true makes this step FAIL
       # outright (never silently skip) if the database is somehow
       # unavailable here.
+      #
+      # Post-GitHub-Actions-run-#35 fix: this pytest invocation runs
+      # directly on the runner HOST (never inside a container on the
+      # Compose network), so it must reach PostgreSQL's HOST-PUBLISHED
+      # address. tests/conftest.py intentionally poisons the GLOBAL
+      # POSTGRES_HOST to "postgres.invalid" for every OTHER
+      # (non-real-database) test in this suite -- a safety net this
+      # step must never weaken. test_remediation_transactions.py's own
+      # `session` fixture therefore reads the SEPARATE, dedicated
+      # CONTROL_PLANE_TEST_POSTGRES_HOST/_PORT set explicitly below
+      # instead (see that file's own module docstring); setting them
+      # here makes the host-vs-Compose-network boundary explicit
+      # rather than relying solely on their own already-correct
+      # defaults (127.0.0.1 / $POSTGRES_PORT-or-5432).
       - name: Verify real-database remediation transactions (Phase 8)
         working-directory: services/control-plane
         run: |
           set -a
           . ../../.env
           set +a
+          CONTROL_PLANE_TEST_POSTGRES_HOST=127.0.0.1 \
+          CONTROL_PLANE_TEST_POSTGRES_PORT="$POSTGRES_PORT" \
           CONTROL_PLANE_REQUIRE_REAL_DB=true pytest tests/test_remediation_transactions.py -v
 
       # Phase 3B: brings up the control-plane container (building its

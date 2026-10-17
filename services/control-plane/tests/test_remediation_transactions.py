@@ -24,6 +24,36 @@ Gracefully SKIPPED when no real database is reachable (the normal fast
 linked). Setting CONTROL_PLANE_REQUIRE_REAL_DB=true turns that skip
 into a hard FAILURE instead -- used by CI's dedicated real-database
 step, mirroring AGENT_RUNTIME_REQUIRE_REAL_DB / RETRIEVAL_REQUIRE_REAL_DB.
+
+CI host-address wiring (post-GitHub-Actions-run-#35 fix): this file's
+own `session` fixture deliberately does NOT call
+`control_plane.core.config.DatabaseSettings.from_env()` (production
+semantics there are UNCHANGED and still read plain `POSTGRES_HOST`,
+defaulting to the Compose-internal DNS name `"postgres"`). CI's
+dedicated real-database step runs pytest directly on the GitHub
+Actions HOST (never inside a container on the Compose network), so it
+must connect to PostgreSQL's HOST-PUBLISHED address
+(`127.0.0.1:$POSTGRES_PORT`) -- but `tests/conftest.py` unconditionally
+`setdefault()`s `POSTGRES_HOST=postgres.invalid` for every OTHER test
+in this suite (an intentional safety net: ordinary unit tests must
+never be able to silently reach a real database). Importing
+conftest.py therefore poisons `POSTGRES_HOST` for this file too, and
+`DatabaseSettings.from_env()` would try to resolve
+`postgres.invalid`, which GitHub Actions' real DNS correctly refuses
+to resolve -- `[Errno -2] Name or service not known` -- failing every
+one of this file's 23 tests before any transaction logic ever ran.
+
+Fixed via `_test_postgres_host`/`_test_postgres_port` below: two tiny,
+PURE functions (unit-tested directly by
+`test_test_postgres_host_ignores_the_poisoned_global_default` further
+down, no real database required) that read dedicated,
+real-database-test-only environment variables
+(`CONTROL_PLANE_TEST_POSTGRES_HOST`/`CONTROL_PLANE_TEST_POSTGRES_PORT`,
+defaulting to `127.0.0.1`/`$POSTGRES_PORT` or `5432`) -- never the
+global `POSTGRES_HOST` conftest.py's safety default controls. This
+never weakens that safety net for any OTHER test in this suite, and
+normal unit tests remain exactly as incapable of reaching a real
+database as before.
 """
 
 import os
@@ -54,6 +84,81 @@ def _unavailable(message: str) -> None:
     pytest.skip(message)
 
 
+def _test_postgres_host() -> str:
+    """The HOST-REACHABLE PostgreSQL address for THIS file's own
+    real-database tests only -- deliberately never `POSTGRES_HOST`
+    (which `tests/conftest.py` intentionally poisons to
+    `"postgres.invalid"` for every other, non-real-database test in
+    this suite). Defaults to `127.0.0.1`, matching the published host
+    port `docker-compose.yml`'s own `postgres` service always binds
+    (`"${POSTGRES_PORT:-5432}:5432"`)."""
+    return os.environ.get("CONTROL_PLANE_TEST_POSTGRES_HOST", "127.0.0.1")
+
+
+def _test_postgres_port() -> int:
+    """Same discipline as `_test_postgres_host` above. Falls back to
+    the general `POSTGRES_PORT` (the real, intentionally-public
+    host-side port every other real-database script in this platform
+    already uses), then `5432` -- never the Compose-internal-only
+    `POSTGRES_INTERNAL_PORT` production `DatabaseSettings.from_env()`
+    uses, which is never meaningful from outside the Compose
+    network."""
+    return int(os.environ.get("CONTROL_PLANE_TEST_POSTGRES_PORT", os.environ.get("POSTGRES_PORT", "5432")))
+
+
+def test_test_postgres_host_ignores_the_poisoned_global_default(monkeypatch):
+    """Regression proof for GitHub Actions run #35's exact failure:
+    even with `POSTGRES_HOST` poisoned to `tests/conftest.py`'s own
+    `"postgres.invalid"` safety default, `_test_postgres_host()` must
+    resolve to the real, host-reachable address -- never that poisoned
+    value -- whenever `CONTROL_PLANE_TEST_POSTGRES_HOST` is set. Pure
+    function, no real database required."""
+    monkeypatch.setenv("POSTGRES_HOST", "postgres.invalid")
+    monkeypatch.setenv("CONTROL_PLANE_TEST_POSTGRES_HOST", "127.0.0.1")
+    assert _test_postgres_host() == "127.0.0.1"
+    assert _test_postgres_host() != "postgres.invalid"
+
+
+def test_test_postgres_host_defaults_to_127_0_0_1_even_without_the_override(monkeypatch):
+    """Same proof, but relying purely on the function's own default --
+    confirms the default itself is host-reachable, not merely that an
+    explicit override can escape the poisoned value."""
+    monkeypatch.setenv("POSTGRES_HOST", "postgres.invalid")
+    monkeypatch.delenv("CONTROL_PLANE_TEST_POSTGRES_HOST", raising=False)
+    assert _test_postgres_host() == "127.0.0.1"
+
+
+def test_test_postgres_port_falls_back_to_postgres_port_then_5432(monkeypatch):
+    monkeypatch.delenv("CONTROL_PLANE_TEST_POSTGRES_PORT", raising=False)
+    monkeypatch.setenv("POSTGRES_PORT", "5433")
+    assert _test_postgres_port() == 5433
+
+    monkeypatch.delenv("POSTGRES_PORT", raising=False)
+    assert _test_postgres_port() == 5432
+
+    monkeypatch.setenv("CONTROL_PLANE_TEST_POSTGRES_PORT", "6000")
+    monkeypatch.setenv("POSTGRES_PORT", "5433")
+    assert _test_postgres_port() == 6000
+
+
+def test_production_from_env_is_unaffected_and_still_sees_the_poisoned_default(monkeypatch):
+    """Preserves the OTHER half of the safety boundary: this real-
+    database test file's own fix must never weaken conftest.py's
+    global `POSTGRES_HOST` default for ordinary unit tests, nor change
+    production `DatabaseSettings.from_env()`'s own semantics. Proves
+    both directly: with the SAME poisoned value conftest.py's own
+    `setdefault()` installs, `DatabaseSettings.from_env()` (the exact
+    code path every OTHER service entrypoint/test uses) still resolves
+    `host == "postgres.invalid"` -- completely unmodified and
+    unaffected by `_test_postgres_host()`'s own, deliberately separate
+    override above."""
+    monkeypatch.setenv("POSTGRES_HOST", "postgres.invalid")
+    monkeypatch.setenv("POSTGRES_USER", "u")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "p")
+    monkeypatch.setenv("POSTGRES_DB", "d")
+    assert DatabaseSettings.from_env().host == "postgres.invalid"
+
+
 @pytest.fixture
 async def session():
     user = os.environ.get("POSTGRES_USER", "")
@@ -66,7 +171,18 @@ async def session():
         )
         return
 
-    settings = DatabaseSettings.from_env()
+    settings = DatabaseSettings(
+        host=_test_postgres_host(),
+        port=_test_postgres_port(),
+        user=user,
+        password=password,
+        database=database,
+        pool_size=5,
+        pool_pre_ping=True,
+        pool_timeout_seconds=5.0,
+        connect_timeout_seconds=5.0,
+        command_timeout_seconds=10.0,
+    )
     engine = create_engine(settings)
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     real_session = sessionmaker()
