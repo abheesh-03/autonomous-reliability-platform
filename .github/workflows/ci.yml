@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/test-failure-simulation-settling.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh
 
       - name: Verify Makefile is usable
         run: make help
@@ -55,6 +55,16 @@ jobs:
       # docker stubbed. See scripts/test-simulate-failure.sh.
       - name: Run failure-simulation focused tests (Phase 4)
         run: make test-failure-simulation
+
+      # GitHub Actions run #36 fix: a static, no-Docker regression
+      # proving verify-failure-simulation.sh's new
+      # wait_for_checkout_server_errors_clean settling gate (added
+      # after the inventory-outage scenario) polls until clean rather
+      # than returning early/late, and that its own call site precedes
+      # the script's final acceptance message. See
+      # scripts/test-failure-simulation-settling.sh.
+      - name: Run failure-simulation settling-gate focused test (Phase 4)
+        run: make test-failure-simulation-settling
 
       # Phase 7 correction round (finding #1): a static, no-Docker
       # regression test proving db-up's recipe provisions
@@ -1015,8 +1025,18 @@ jobs:
       # inventory-outage runs its own deterministic checks only. See
       # scripts/verify-failure-simulation.sh and
       # docs/architecture/phase-4-failure-simulation.md.
+      # timeout-minutes bumped 15 -> 30: this step now also includes a
+      # bounded (90 attempts x 5s = up to 7.5 real minutes), condition-
+      # based wait for the shared CheckoutServerErrors alert to settle
+      # back to a clean inactive state after inventory-outage's own
+      # real checkout failure, on top of payment-outage's existing
+      # real fire/recover cycle -- see
+      # scripts/verify-failure-simulation.sh's own "3. Confirm shared
+      # CheckoutServerErrors state is clean after inventory-outage"
+      # section. This is a step-local ceiling only; the overall job
+      # timeout-minutes above is untouched.
       - name: Verify failure simulation (Phase 4)
-        timeout-minutes: 15
+        timeout-minutes: 30
         run: bash scripts/verify-failure-simulation.sh
 
       # Phase 5: the read-only AI investigator's real-evidence

@@ -33,6 +33,8 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." &>/dev/null && pwd)"
 cd "$REPO_ROOT"
 
 CONTROL_PLANE_URL="${CONTROL_PLANE_URL:-http://127.0.0.1:8000}"
+PROMETHEUS_URL="${PROMETHEUS_URL:-http://127.0.0.1:9090}"
+ALERTMANAGER_URL="${ALERTMANAGER_URL:-http://127.0.0.1:9093}"
 
 section() {
   echo ""
@@ -42,6 +44,36 @@ section() {
 fail() {
   echo "FAIL: $1" >&2
   exit 1
+}
+
+# wait_for_checkout_server_errors_clean [max_attempts] [sleep_seconds]
+#
+# Bounded, condition-based polling (never a fixed sleep) via the
+# existing, authoritative scripts/verify-alerting.py "recovered"
+# subcommand -- never a second, duplicated parsing of Prometheus/
+# Alertmanager's own responses. Returns 0 the first time that helper
+# confirms CheckoutServerErrors is fully clean (Prometheus rule state
+# == inactive, its own alerts list empty, AND Alertmanager has no
+# active unresolved match); returns 1 if it never does within
+# max_attempts. Extracted as its own function (rather than inlined)
+# so scripts/test-failure-simulation-settling.sh can exercise this
+# exact polling/attempt-counting logic with a stubbed `python3`,
+# without sleeping for real or needing a running stack.
+wait_for_checkout_server_errors_clean() {
+  local max_attempts="${1:-90}" sleep_seconds="${2:-5}"
+  local attempt
+  for attempt in $(seq 1 "$max_attempts"); do
+    if python3 "$SCRIPT_DIR/verify-alerting.py" recovered \
+         --prometheus-url "$PROMETHEUS_URL" \
+         --alertmanager-url "$ALERTMANAGER_URL" \
+         --alert CheckoutServerErrors
+    then
+      return 0
+    fi
+    echo "  attempt $attempt/$max_attempts: CheckoutServerErrors has not naturally returned to a clean inactive state yet"
+    sleep "$sleep_seconds"
+  done
+  return 1
 }
 
 section "0. Prepare secrets; confirm postgres + control-plane ready"
@@ -64,5 +96,27 @@ section "1. Scenario: payment-outage (full acceptance -- the one expensive full-
 section "2. Scenario: inventory-outage (deterministic failure/recovery only -- no second full-alert simulation)"
 "$SCRIPT_DIR/simulate-failure.sh" inventory-outage
 
+section "3. Confirm shared CheckoutServerErrors state is clean after inventory-outage"
+# inventory-outage's own real checkout request(s) genuinely fail
+# through checkout-service (a real HTTP 5xx, by design -- see
+# simulate-failure.sh's own assertions above), which feeds the SAME
+# shared CheckoutServerErrors Prometheus rule payment-outage already
+# exercised. That rule's expression is a 5-minute rate() window with a
+# 2-minute `for:` -- a single recent failing request can leave it
+# "pending" (or even "firing") for several real minutes afterward, long
+# after inventory-outage's own deterministic assertions have already
+# passed. Phase 8 (scripts/verify-remediation.sh) deliberately REQUIRES
+# this same shared alert to be genuinely "inactive" before it ever
+# starts, so this phase must not declare itself complete -- and hand
+# off to whatever runs next -- while leaving that shared alert dirty.
+# Bounded, condition-based polling (never a fixed sleep); the 90 x 5s
+# budget mirrors simulate-failure.sh's own documented real-decay
+# precedent for this exact alert.
+if wait_for_checkout_server_errors_clean 90 5; then
+  echo "  CheckoutServerErrors confirmed clean after inventory-outage"
+else
+  fail "CheckoutServerErrors did not return to a clean inactive state after the inventory-outage scenario"
+fi
+
 echo ""
-echo "PHASE 4 FAILURE-SIMULATION ACCEPTANCE VERIFIED: payment-outage proved the complete real chain (outage -> failed checkouts -> Prometheus CheckoutServerErrors firing -> real Alertmanager webhook -> persisted incident -> restoration -> recovery -> automatic resolution -> correctly-attributed audit trail); inventory-outage proved its own deterministic failure (correct dependency identified, payment completed, notification short-circuited) and recovery."
+echo "PHASE 4 FAILURE-SIMULATION ACCEPTANCE VERIFIED: payment-outage proved the complete real chain (outage -> failed checkouts -> Prometheus CheckoutServerErrors firing -> real Alertmanager webhook -> persisted incident -> restoration -> recovery -> automatic resolution -> correctly-attributed audit trail); inventory-outage proved its own deterministic failure (correct dependency identified, payment completed, notification short-circuited) and recovery; the shared CheckoutServerErrors alert was confirmed to have naturally returned to a clean inactive state afterward, so later phases (including Phase 8's own strict baseline requirement) start from clean shared alerting state."
