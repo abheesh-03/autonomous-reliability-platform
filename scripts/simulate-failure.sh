@@ -186,6 +186,69 @@ wait_for_metric_increase() {
   return 1
 }
 
+# wait_for_completed_checkout [max_attempts] [sleep_seconds]
+#
+# Bounded, condition-based polling (never a fixed sleep) for the ONE
+# real desired condition after a target service has been restarted and
+# Docker health has already returned healthy: "a real checkout through
+# checkout-service can again complete end to end" (HTTP 200, body
+# status == COMPLETED) -- never merely "Docker reports healthy", which
+# does NOT by itself prove checkout-service's own outbound path to the
+# just-restored dependency has settled (a real, observed 502
+# immediately after a verified-healthy restart, with an identical
+# request succeeding moments later with no intervention, is what
+# motivated this). Retries ONLY the narrow, explicitly-named set of
+# transient restoration-path symptoms: a transport failure (status
+# 000), the existing safe downstream_failure 502 contract naming
+# TARGET_SERVICE itself, or a 503 during startup. Any other response
+# (a malformed/wrong 200 body, a 502 naming the wrong service, or any
+# other unexpected status) fails immediately via the existing `fail` --
+# never retried, never silently tolerated as if it might be transient.
+# Used ONLY for post-restoration readiness (section 8) -- never for
+# the outage assertion itself, which must remain strict and immediate.
+wait_for_completed_checkout() {
+  local max_attempts="${1:-10}" sleep_seconds="${2:-2}"
+  local attempt
+  for attempt in $(seq 1 "$max_attempts"); do
+    do_checkout
+    if [ "$CHECKOUT_STATUS" = "200" ]; then
+      if echo "$CHECKOUT_BODY" | python3 -c "
+import json, sys
+b = json.load(sys.stdin)
+sys.exit(0 if b.get('status') == 'COMPLETED' else 1)
+" 2>/dev/null; then
+        return 0
+      fi
+      fail "fresh checkout after restoring $TARGET_SERVICE returned HTTP 200 but an unexpected/malformed body (expected status=COMPLETED): $CHECKOUT_BODY"
+    fi
+
+    case "$CHECKOUT_STATUS" in
+      000)
+        echo "  attempt $attempt/$max_attempts: transient transport failure (status=000) while $TARGET_SERVICE's restoration settles -- retrying"
+        ;;
+      502)
+        if echo "$CHECKOUT_BODY" | python3 -c "
+import json, sys
+b = json.load(sys.stdin)
+sys.exit(0 if b == {'error': 'downstream_failure', 'service': '$TARGET_SERVICE', 'message': 'Downstream service request failed'} else 1)
+" 2>/dev/null; then
+          echo "  attempt $attempt/$max_attempts: transient HTTP 502 (downstream_failure, service=$TARGET_SERVICE) while restoration settles -- retrying"
+        else
+          fail "fresh checkout after restoring $TARGET_SERVICE returned HTTP 502 but the body did not match the expected downstream_failure contract for $TARGET_SERVICE (body=$CHECKOUT_BODY)"
+        fi
+        ;;
+      503)
+        echo "  attempt $attempt/$max_attempts: transient HTTP 503 while $TARGET_SERVICE's restoration settles -- retrying"
+        ;;
+      *)
+        fail "fresh checkout after restoring $TARGET_SERVICE returned an unexpected HTTP status $CHECKOUT_STATUS (body=$CHECKOUT_BODY)"
+        ;;
+    esac
+    sleep "$sleep_seconds"
+  done
+  fail "fresh checkout after restoring $TARGET_SERVICE never completed end-to-end within $max_attempts bounded attempts (last status=$CHECKOUT_STATUS body=$CHECKOUT_BODY)"
+}
+
 # restore_target
 # The ONE place this script ever starts a stopped dependency back up.
 # Idempotent: a second call after NEEDS_RESTORE has already been
@@ -427,9 +490,7 @@ main() {
   echo "  $TARGET_SERVICE restored and confirmed healthy"
 
   section "8. Verify a fresh checkout succeeds"
-  do_checkout
-  [ "$CHECKOUT_STATUS" = "200" ] || fail "fresh checkout after restoring $TARGET_SERVICE failed (status=$CHECKOUT_STATUS body=$CHECKOUT_BODY)"
-  echo "$CHECKOUT_BODY" | python3 -c "import json,sys; b=json.load(sys.stdin); assert b['status']=='COMPLETED', b"
+  wait_for_completed_checkout 10 2
   echo "  fresh checkout succeeded (status=COMPLETED) after restoration"
   RECOVERY_SUMMARY="$TARGET_SERVICE restarted and confirmed healthy; fresh checkout COMPLETED"
 

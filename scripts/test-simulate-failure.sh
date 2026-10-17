@@ -274,5 +274,129 @@ else
 fi
 
 echo ""
+echo "=== wait_for_completed_checkout (post-restoration readiness; stubbed do_checkout/sleep, no real Docker/network) ==="
+
+# run_checkout_case <name> <max_attempts> <status_seq_csv> <body_seq...>
+#
+# status_seq_csv is comma-separated HTTP statuses, one per expected
+# do_checkout call; body_seq is passed as the remaining positional
+# args (one body string per status, same count/order) to avoid
+# fighting shell quoting/comma-splitting on JSON bodies. do_checkout
+# is stubbed to consume one (status, body) pair per call from these
+# sequences and increment a plain in-process ATTEMPT_COUNTER -- safe
+# here because wait_for_completed_checkout calls do_checkout as a
+# direct statement, never via command substitution, so the increment
+# is never lost to a subshell fork (the same subshell-fork pitfall
+# documented in scripts/test-failure-simulation-settling.sh simply
+# does not apply to this call site). Runs in a `bash -c` subshell
+# (like the on_exit cases above) since `fail` calls `exit`.
+run_checkout_case() {
+  local name="$1" max_attempts="$2" status_seq_csv="$3"
+  shift 3
+  local bodies=("$@")
+
+  IFS=',' read -r -a statuses <<<"$status_seq_csv"
+  local body_literal=""
+  local i
+  for i in "${!bodies[@]}"; do
+    body_literal+="BODY_SEQ[$i]='${bodies[$i]//\'/\'\\\'\'}'"$'\n'
+  done
+  local status_literal=""
+  for i in "${!statuses[@]}"; do
+    status_literal+="STATUS_SEQ[$i]='${statuses[$i]}'"$'\n'
+  done
+
+  # ATTEMPTS_USED is echoed from an EXIT trap, not after the call --
+  # wait_for_completed_checkout's own `fail` calls `exit` directly, so
+  # a plain "echo after the call" would never run on any failure case
+  # (CASE 3/4/5/6 below). The trap fires on EVERY exit path (success's
+  # final `return 0`/implicit exit 0, or `fail`'s `exit 1`), so the
+  # attempt count is always observable.
+  CASE_OUT="$(bash -c '
+    source "'"$TARGET"'"
+    set +e
+    sleep() { :; }
+    declare -a STATUS_SEQ
+    declare -a BODY_SEQ
+    '"$status_literal$body_literal"'
+    ATTEMPT_COUNTER=0
+    do_checkout() {
+      local idx=$ATTEMPT_COUNTER
+      ATTEMPT_COUNTER=$((ATTEMPT_COUNTER + 1))
+      CHECKOUT_STATUS="${STATUS_SEQ[$idx]}"
+      CHECKOUT_BODY="${BODY_SEQ[$idx]}"
+    }
+    TARGET_SERVICE="payment-service"
+    # Captures $? FIRST, before echo can change it, then re-exits with
+    # it explicitly -- an EXIT trap whose own last command becomes the
+    # new exit status is the same silent-exit-status-corruption pitfall
+    # already documented/fixed in scripts/verify-failure-simulation.sh.
+    trap "es=\$?; echo ATTEMPTS_USED=\$ATTEMPT_COUNTER; exit \$es" EXIT
+    wait_for_completed_checkout '"$max_attempts"' 0
+  ' 2>&1)"
+  CASE_EXIT="$?"
+  CASE_ATTEMPTS="$(grep -o 'ATTEMPTS_USED=[0-9]*' <<<"$CASE_OUT" | cut -d= -f2)"
+}
+
+completed_body='{"checkout_id":"chk_x","status":"COMPLETED","payment":{},"inventory":{},"notification":{}}'
+pending_body='{"checkout_id":"chk_x","status":"PENDING","payment":{},"inventory":{},"notification":{}}'
+payment_502_body='{"error":"downstream_failure","service":"payment-service","message":"Downstream service request failed"}'
+inventory_502_body='{"error":"downstream_failure","service":"inventory-service","message":"Downstream service request failed"}'
+
+# CASE 1: first attempt 502 (expected contract), second attempt 200
+# COMPLETED -- success after exactly 2 attempts.
+run_checkout_case "case1" 10 "502,200" "$payment_502_body" "$completed_body"
+if [ "$CASE_EXIT" -eq 0 ] && [ "$CASE_ATTEMPTS" = "2" ]; then
+  ok "CASE 1 (502 then 200 COMPLETED): succeeded after exactly 2 attempts"
+else
+  bad "CASE 1 failed (exit=$CASE_EXIT attempts=${CASE_ATTEMPTS:-<none>}); output: $CASE_OUT"
+fi
+
+# CASE 2: 000, then expected 502, then 200 COMPLETED -- success after
+# exactly 3 attempts.
+run_checkout_case "case2" 10 "000,502,200" "" "$payment_502_body" "$completed_body"
+if [ "$CASE_EXIT" -eq 0 ] && [ "$CASE_ATTEMPTS" = "3" ]; then
+  ok "CASE 2 (000, then 502, then 200 COMPLETED): succeeded after exactly 3 attempts"
+else
+  bad "CASE 2 failed (exit=$CASE_EXIT attempts=${CASE_ATTEMPTS:-<none>}); output: $CASE_OUT"
+fi
+
+# CASE 3: persistent expected 502 for every configured attempt --
+# bounded failure, never a false success.
+run_checkout_case "case3" 4 "502,502,502,502" "$payment_502_body" "$payment_502_body" "$payment_502_body" "$payment_502_body"
+if [ "$CASE_EXIT" -ne 0 ] && [ "$CASE_ATTEMPTS" = "4" ] && grep -qF "never completed end-to-end within 4 bounded attempts" <<<"$CASE_OUT"; then
+  ok "CASE 3 (persistent expected 502): bounded failure after exhausting all 4 attempts, never a false success"
+else
+  bad "CASE 3 failed to behave as expected (exit=$CASE_EXIT attempts=${CASE_ATTEMPTS:-<none>}); output: $CASE_OUT"
+fi
+
+# CASE 4: HTTP 200 but body status != COMPLETED -- immediate failure,
+# never retried, never hidden as success.
+run_checkout_case "case4" 10 "200" "$pending_body"
+if [ "$CASE_EXIT" -ne 0 ] && [ "$CASE_ATTEMPTS" = "1" ] && grep -qF "unexpected/malformed body" <<<"$CASE_OUT"; then
+  ok "CASE 4 (HTTP 200, status=PENDING not COMPLETED): immediate failure after exactly 1 attempt, no retries"
+else
+  bad "CASE 4 failed to behave as expected (exit=$CASE_EXIT attempts=${CASE_ATTEMPTS:-<none>}); output: $CASE_OUT"
+fi
+
+# CASE 5: HTTP 502 naming the WRONG downstream service -- immediate
+# failure, never treated as the expected/retryable restoration 502.
+run_checkout_case "case5" 10 "502" "$inventory_502_body"
+if [ "$CASE_EXIT" -ne 0 ] && [ "$CASE_ATTEMPTS" = "1" ] && grep -qF "did not match the expected downstream_failure contract for payment-service" <<<"$CASE_OUT"; then
+  ok "CASE 5 (502 naming the wrong service): immediate failure after exactly 1 attempt, no retries"
+else
+  bad "CASE 5 failed to behave as expected (exit=$CASE_EXIT attempts=${CASE_ATTEMPTS:-<none>}); output: $CASE_OUT"
+fi
+
+# CASE 6: an unexpected HTTP status (400) outside the explicitly
+# retryable restoration statuses -- immediate failure.
+run_checkout_case "case6" 10 "400" '{"error":"bad_request"}'
+if [ "$CASE_EXIT" -ne 0 ] && [ "$CASE_ATTEMPTS" = "1" ] && grep -qF "unexpected HTTP status 400" <<<"$CASE_OUT"; then
+  ok "CASE 6 (unexpected HTTP 400): immediate failure after exactly 1 attempt, no retries"
+else
+  bad "CASE 6 failed to behave as expected (exit=$CASE_EXIT attempts=${CASE_ATTEMPTS:-<none>}); output: $CASE_OUT"
+fi
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

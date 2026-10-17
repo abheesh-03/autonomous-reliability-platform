@@ -224,24 +224,25 @@ fi
 cp_get "/api/v1/incidents?source=alertmanager&status=resolved&limit=100&offset=0"
 [ "$HTTP_STATUS" = "200" ] || fail "GET /api/v1/incidents returned $HTTP_STATUS: $HTTP_BODY"
 
-INCIDENT_ID="$(echo "$HTTP_BODY" | python3 -c "
-import json, sys
-from datetime import datetime
-
-body = json.load(sys.stdin)
-matches = [i for i in body['items'] if i['title'] == '$CHECKOUT_SERVER_ERRORS_TITLE']
-checkpoint = '$PHASE5_FRESHNESS_CHECKPOINT'
-if checkpoint:
-    cutoff = datetime.fromisoformat(checkpoint)
-    matches = [i for i in matches if datetime.fromisoformat(i['first_seen_at']) > cutoff]
-print(matches[0]['id'] if matches else '')
-")"
+# select_canonical_phase4_incident_id (verify-investigator.sh, sourced
+# transitively via verify-rag.sh) is the ONE centralized implementation
+# of this selection -- see its own docstring for why a bare
+# `matches[0]` is no longer safe.
+SELECTION_RESULT="$(select_canonical_phase4_incident_id "$HTTP_BODY")"
+case "$SELECTION_RESULT" in
+  AMBIGUOUS:*)
+    fail "multiple resolved CheckoutServerErrors incidents tie on the exact same earliest first_seen_at after the freshness checkpoint -- ambiguous, refusing to silently pick one: ${SELECTION_RESULT#AMBIGUOUS:}"
+    ;;
+  *)
+    INCIDENT_ID="$SELECTION_RESULT"
+    ;;
+esac
 if [ -n "$PHASE5_FRESHNESS_CHECKPOINT" ]; then
   [ -n "$INCIDENT_ID" ] || fail "no resolved CheckoutServerErrors incident found with first_seen_at after $PHASE5_FRESHNESS_CHECKPOINT"
 else
   [ -n "$INCIDENT_ID" ] || fail "no existing resolved CheckoutServerErrors incident found at all -- run 'make verify-failure-simulation' first"
 fi
-echo "  reusing real incident: $INCIDENT_ID"
+echo "  reusing real incident: $INCIDENT_ID (canonically selected -- earliest after the freshness checkpoint in CI mode, most recent in historical/local mode)"
 
 cp_get "/api/v1/incidents/$INCIDENT_ID"
 [ "$HTTP_STATUS" = "200" ] || fail "GET /api/v1/incidents/$INCIDENT_ID returned $HTTP_STATUS"

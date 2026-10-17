@@ -124,6 +124,70 @@ print(json.dumps(items, sort_keys=True))
 "
 }
 
+# select_canonical_phase4_incident_id <incidents-list-json-body>
+#
+# CI cross-phase stabilization audit finding: this is the ONE,
+# centralized implementation of "which real, resolved
+# CheckoutServerErrors incident does Phase 5/6/7 reuse" -- previously
+# duplicated three times (here, verify-rag.sh, verify-agent-runtime.sh),
+# each independently re-deriving its own `matches[0]` (= most recent by
+# last_seen_at, the list's own natural ordering) selection. That became
+# genuinely ambiguous once scripts/verify-failure-simulation.sh's own
+# inventory-outage scenario can ALSO create and resolve its own,
+# later, CheckoutServerErrors incident within the SAME freshness
+# window.
+#
+# Takes the exact JSON body already fetched via
+# `cp_get "/api/v1/incidents?source=alertmanager&status=resolved&limit=100&offset=0"`
+# -- never re-fetches anything itself, so callers keep full control of
+# their own HTTP_STATUS/HTTP_BODY error handling.
+#
+# In freshness-proven mode (PHASE5_FRESHNESS_CHECKPOINT set): the
+# canonical incident is deterministically the EARLIEST (MIN
+# first_seen_at) resolved CheckoutServerErrors incident strictly after
+# the checkpoint. payment-outage --full-acceptance always runs BEFORE
+# inventory-outage in scripts/verify-failure-simulation.sh, so this
+# always selects payment-outage's own incident -- never whichever one
+# happens to sort first by list order or by last_seen_at. Two
+# incidents tying on the exact same earliest first_seen_at is treated
+# as ambiguous and fails closed (prints "AMBIGUOUS:<id>,<id>,..." for
+# the caller to fail on) rather than silently picking one -- this
+# should be mechanically impossible given Prometheus/control-plane's
+# own real timestamp granularity, but is not assumed to be.
+#
+# In historical/local mode (no checkpoint set): preserves the
+# ORIGINAL behavior exactly -- the most recent (by last_seen_at, the
+# list's own natural order) match -- since there is no "payment-outage
+# always runs before inventory-outage, in THIS run" guarantee to
+# exploit outside of a single CI/local invocation; "most recent" stays
+# the most reasonable default for ad hoc/historical reuse.
+select_canonical_phase4_incident_id() {
+  local incidents_json="$1"
+  echo "$incidents_json" | python3 -c "
+import json, sys
+from datetime import datetime
+
+body = json.load(sys.stdin)
+matches = [i for i in body['items'] if i['title'] == '$CHECKOUT_SERVER_ERRORS_TITLE']
+checkpoint = '$PHASE5_FRESHNESS_CHECKPOINT'
+if checkpoint:
+    cutoff = datetime.fromisoformat(checkpoint)
+    matches = [i for i in matches if datetime.fromisoformat(i['first_seen_at']) > cutoff]
+    if not matches:
+        print('')
+        sys.exit(0)
+    matches.sort(key=lambda i: datetime.fromisoformat(i['first_seen_at']))
+    earliest_ts = datetime.fromisoformat(matches[0]['first_seen_at'])
+    tied = [i for i in matches if datetime.fromisoformat(i['first_seen_at']) == earliest_ts]
+    if len(tied) > 1:
+        print('AMBIGUOUS:' + ','.join(i['id'] for i in tied))
+    else:
+        print(matches[0]['id'])
+else:
+    print(matches[0]['id'] if matches else '')
+"
+}
+
 wait_healthy() {
   local service="$1" attempts="${2:-20}"
   local i cid health
@@ -234,24 +298,21 @@ fi
 cp_get "/api/v1/incidents?source=alertmanager&status=resolved&limit=100&offset=0"
 [ "$HTTP_STATUS" = "200" ] || fail "GET /api/v1/incidents returned $HTTP_STATUS: $HTTP_BODY"
 
-INCIDENT_ID="$(echo "$HTTP_BODY" | python3 -c "
-import json, sys
-from datetime import datetime
-
-body = json.load(sys.stdin)
-matches = [i for i in body['items'] if i['title'] == '$CHECKOUT_SERVER_ERRORS_TITLE']
-checkpoint = '$PHASE5_FRESHNESS_CHECKPOINT'
-if checkpoint:
-    cutoff = datetime.fromisoformat(checkpoint)
-    matches = [i for i in matches if datetime.fromisoformat(i['first_seen_at']) > cutoff]
-print(matches[0]['id'] if matches else '')
-")"
+SELECTION_RESULT="$(select_canonical_phase4_incident_id "$HTTP_BODY")"
+case "$SELECTION_RESULT" in
+  AMBIGUOUS:*)
+    fail "multiple resolved CheckoutServerErrors incidents tie on the exact same earliest first_seen_at after the freshness checkpoint -- ambiguous, refusing to silently pick one: ${SELECTION_RESULT#AMBIGUOUS:}"
+    ;;
+  *)
+    INCIDENT_ID="$SELECTION_RESULT"
+    ;;
+esac
 if [ -n "$PHASE5_FRESHNESS_CHECKPOINT" ]; then
   [ -n "$INCIDENT_ID" ] || fail "no resolved CheckoutServerErrors incident found with first_seen_at after $PHASE5_FRESHNESS_CHECKPOINT -- did the Phase 4 step actually run and persist an incident in this job?"
 else
   [ -n "$INCIDENT_ID" ] || fail "no existing resolved CheckoutServerErrors incident found at all — run 'make verify-failure-simulation' first (see docs/architecture/phase-5-ai-investigator.md), then rerun this script"
 fi
-echo "  reusing real incident: $INCIDENT_ID"
+echo "  reusing real incident: $INCIDENT_ID (canonically selected -- earliest after the freshness checkpoint in CI mode, most recent in historical/local mode)"
 
 section "2. Capture BEFORE state directly from control-plane's own real API (complete, fully-paginated audit history)"
 cp_get "/api/v1/incidents/$INCIDENT_ID"

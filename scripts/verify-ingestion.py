@@ -83,11 +83,26 @@ entirely. fetch_all_events also cross-checks that the API's own
 reported `total` stays consistent across pages and that no event id
 is ever returned twice.
 
+CI cross-phase stabilization audit finding: `incident-from-alert`
+requires the alert to still be ACTIVE in Prometheus/Alertmanager at
+read time -- too fragile for a short-lived occurrence (e.g.
+inventory-outage's own single real 5xx, which can fire and fully
+resolve within a real couple of minutes) that may already be resolved
+by the time a caller gets around to capturing it. `incident-after`
+(below) is the read-only, status-agnostic alternative: it only cares
+that exactly one fresh incident of the given title exists after a
+given freshness floor, regardless of whether it is currently active or
+already resolved.
+
 Usage:
     python3 scripts/verify-ingestion.py incident-from-alert \\
         --alert NAME --since ISO8601 \\
         [--prometheus-url URL] [--alertmanager-url URL] [--control-plane-url URL] \\
         [--ids-out FILE]
+
+    python3 scripts/verify-ingestion.py incident-after \\
+        --title TITLE --since ISO8601 \\
+        [--control-plane-url URL] [--ids-out FILE]
 
     python3 scripts/verify-ingestion.py confirm-resolved \\
         --ids-file FILE --since ISO8601 \\
@@ -312,6 +327,55 @@ def cmd_incident_from_alert(args):
     sys.exit(0)
 
 
+def cmd_incident_after(args):
+    """CI cross-phase stabilization audit: read-only, status-agnostic
+    alternative to incident-from-alert, for exactly one purpose --
+    capturing a fresh, exact-title incident whose entire real
+    firing-to-resolved lifecycle may already be complete by the time
+    this runs (incident-from-alert would fail in that case, since it
+    requires the alert to still be reported ACTIVE in Prometheus/
+    Alertmanager at read time). Accepts the incident in ANY status
+    (active or resolved) -- never requires or checks Prometheus/
+    Alertmanager state itself, and never writes anything.
+
+    Requires EXACTLY ONE matching fresh incident (title == --title,
+    first_seen_at > --since); more than one is treated as ambiguous
+    acceptance evidence and fails closed rather than picking one.
+    Zero matches is a plain, retryable failure (the same convention
+    every other subcommand in this file already uses) -- a caller
+    polls this in a bounded loop exactly like incident-from-alert's own
+    callers already do."""
+    all_items = fetch_all_incidents(args.control_plane_url, "alertmanager")
+    since = datetime.fromisoformat(args.since)
+    matches = [
+        i
+        for i in all_items
+        if i["title"] == args.title and datetime.fromisoformat(i["first_seen_at"]) > since
+    ]
+
+    if len(matches) > 1:
+        fail(
+            f"expected exactly ONE fresh incident titled {args.title!r} with first_seen_at after "
+            f"{since.isoformat()}, found {len(matches)} -- the acceptance evidence would be ambiguous "
+            f"(ids: {[m['id'] for m in matches]})"
+        )
+    if not matches:
+        fail(f"no incident titled {args.title!r} found yet with first_seen_at after {since.isoformat()}")
+
+    incident = matches[0]
+    print(
+        f"  fresh incident OK: id={incident['id']} fingerprint={incident['source_fingerprint']} "
+        f"status={incident['status']} first_seen_at={incident['first_seen_at']}"
+    )
+
+    if args.ids_out:
+        with open(args.ids_out, "w") as f:
+            f.write(f"{incident['id']}\t{incident['source_fingerprint']}\n")
+        print(f"wrote 1 confirmed fresh incident id (with its real Alertmanager fingerprint) to {args.ids_out}")
+
+    sys.exit(0)
+
+
 def fetch_all_events(control_plane_url, incident_id, page_size=100):
     """Post-review correction: fully paginates
     GET /api/v1/incidents/{id}/events via the API's own limit/offset
@@ -525,8 +589,25 @@ def main():
         "after Alertmanager's resolved webhook has had a chance to arrive",
     )
 
+    pa = sub.add_parser("incident-after")
+    pa.add_argument("--title", required=True, help="exact incident title to match (e.g. the alert rule's own summary)")
+    pa.add_argument(
+        "--since",
+        required=True,
+        help="ISO 8601 timestamp; an incident's first_seen_at must be strictly after this to count as "
+        "genuinely fresh for this exact window",
+    )
+    pa.add_argument("--control-plane-url", default="http://127.0.0.1:8000")
+    pa.add_argument(
+        "--ids-out",
+        default=None,
+        help="optional: write the single confirmed fresh incident's id and its real Alertmanager "
+        "fingerprint (tab-separated) to this file -- same format incident-from-alert's own --ids-out "
+        "produces, consumable by confirm-resolved",
+    )
+
     pr = sub.add_parser("confirm-resolved")
-    pr.add_argument("--ids-file", required=True, help="file written by incident-from-alert's --ids-out")
+    pr.add_argument("--ids-file", required=True, help="file written by incident-from-alert's or incident-after's --ids-out")
     pr.add_argument("--control-plane-url", default="http://127.0.0.1:8000")
     pr.add_argument(
         "--since",
@@ -536,7 +617,11 @@ def main():
     )
 
     args = parser.parse_args()
-    {"incident-from-alert": cmd_incident_from_alert, "confirm-resolved": cmd_confirm_resolved}[args.mode](args)
+    {
+        "incident-from-alert": cmd_incident_from_alert,
+        "incident-after": cmd_incident_after,
+        "confirm-resolved": cmd_confirm_resolved,
+    }[args.mode](args)
 
 
 if __name__ == "__main__":

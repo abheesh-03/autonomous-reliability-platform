@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/test-failure-simulation-settling.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/test-failure-simulation-settling.sh && bash -n scripts/test-canonical-incident-selection.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh
 
       - name: Verify Makefile is usable
         run: make help
@@ -56,15 +56,30 @@ jobs:
       - name: Run failure-simulation focused tests (Phase 4)
         run: make test-failure-simulation
 
-      # GitHub Actions run #36 fix: a static, no-Docker regression
-      # proving verify-failure-simulation.sh's new
-      # wait_for_checkout_server_errors_clean settling gate (added
-      # after the inventory-outage scenario) polls until clean rather
-      # than returning early/late, and that its own call site precedes
-      # the script's final acceptance message. See
+      # CI cross-phase stabilization audit (post-run-#37) fix: a
+      # static, no-Docker regression proving
+      # verify-failure-simulation.sh's confirm_inventory_outage_convergence
+      # (the real function, extracted and exercised directly) correctly
+      # distinguishes the firing vs. non-firing inventory-outage paths,
+      # polls incident-after/confirm-resolved to full convergence when
+      # firing occurred, and requires a bounded, repeated-observation
+      # database stability window on BOTH paths before ever succeeding
+      # -- never a false success, never an early/late return. See
       # scripts/test-failure-simulation-settling.sh.
-      - name: Run failure-simulation settling-gate focused test (Phase 4)
+      - name: Run failure-simulation settling/convergence focused test (Phase 4)
         run: make test-failure-simulation-settling
+
+      # CI cross-phase stabilization audit, Part D: a static,
+      # no-Docker regression proving the centralized
+      # select_canonical_phase4_incident_id helper (now shared by
+      # verify-investigator.sh/verify-rag.sh/verify-agent-runtime.sh)
+      # deterministically selects payment-outage's own earlier
+      # incident over inventory-outage's own later one in
+      # freshness-proven mode, regardless of list order, and fails
+      # closed (never silently picks one) on a genuine tie. See
+      # scripts/test-canonical-incident-selection.sh.
+      - name: Run canonical-incident-selection focused test (Phase 4/5/6/7)
+        run: make test-canonical-incident-selection
 
       # Phase 7 correction round (finding #1): a static, no-Docker
       # regression test proving db-up's recipe provisions
@@ -1110,6 +1125,35 @@ jobs:
       - name: Verify remediation (Phase 8)
         timeout-minutes: 20
         run: bash scripts/verify-remediation.sh
+
+      # CI cross-phase stabilization audit, Part E: a NON-MUTATING,
+      # read-only diagnostic dump of recent incident/audit state --
+      # never affects pass/fail on its own. Gives immediate forensic
+      # evidence (which incident_id/event_type/actor_type/timestamp
+      # combination actually changed) if anything in Phases 4-8 still
+      # fails, instead of another blind, unexplained CI failure. Only
+      # runs on an actual failure (if: failure()), so it adds no cost
+      # to a normal green run.
+      - name: Dump recent incident/audit state on failure
+        if: failure()
+        run: |
+          set -a
+          . ./.env
+          set +a
+          echo "--- reliability.incidents (most recent 20, by created_at desc) ---"
+          docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+            SELECT id, source_fingerprint, title, status, first_seen_at, last_seen_at, resolved_at
+            FROM reliability.incidents
+            ORDER BY created_at DESC
+            LIMIT 20;
+          " || true
+          echo "--- reliability.incident_events (most recent 40, by occurred_at desc) ---"
+          docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+            SELECT id, incident_id, event_type, actor_type, previous_status, new_status, occurred_at
+            FROM reliability.incident_events
+            ORDER BY occurred_at DESC
+            LIMIT 40;
+          " || true
 
       - name: Show service logs
         if: always()
