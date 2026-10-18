@@ -165,16 +165,42 @@ No authentication/login system or RBAC redesign is introduced — the
 console borrows the same two Bearer tokens an operator already uses
 from the command line today.
 
-## 10. Stage 1 scope (this document's current reality)
+## 10. Stage 1/2 scope (this document's current reality)
 
-Stage 1 implements only the foundation: a minimal Next.js App Router
-service (`services/web-console`) with a product-identity homepage, a
-static navigation shell listing the sections later stages will fill in,
-and `GET /api/health` for container healthchecking. It makes no
-backend call, holds neither operator token, and has no `depends_on` on
-control-plane/agent-runtime-service in `docker-compose.yml` — a
-dependency it does not yet need. Later stages will add, in order: the
-read-only `/incidents`, `/incidents/[id]`, `/agent-runs/[runId]`, and
-`/system` pages against real backend data; then the two BFF mutations
-(§7); then polling (§4); then the layered test/acceptance strategy
-described in §8.
+**Stage 1** implemented the foundation: a minimal Next.js App Router
+service (`services/web-console`) with a product-identity homepage and
+`GET /api/health` for container healthchecking. No backend call, no
+operator token, no `depends_on`.
+
+**Stage 2** adds the read-only real-data layer, still with no operator
+token and still no `depends_on` (the `/system` page exists specifically
+to show a backend as unavailable, so this container must stay
+independently startable even during a real backend outage — see the
+`web-console` service's own comment in `docker-compose.yml`):
+
+- `lib/server/http.ts` — a shared, server-only bounded-fetch primitive
+  (5s default timeout, never throws), a narrow `BackendErrorKind`
+  (`not_found` | `validation` | `unavailable` | `malformed`) every
+  page renders a tailored failure state for, and a bounded
+  `fetchAllPages` helper (API max page size, a hard page-count safety
+  cap, and immediate termination on an empty page) used to fetch an
+  incident's/proposal's COMPLETE durable history rather than only its
+  first default-sized page.
+- `lib/server/control-plane-client.ts` — the only thing that ever
+  calls control-plane, using its real, unauthenticated GET contracts
+  exactly as documented in `docs/api/control-plane.md`: incident
+  list/detail, incident events, remediation proposal list/detail, and
+  remediation proposal events. No write call exists yet.
+- `lib/server/health-client.ts` — independent `/health/live` +
+  `/health/ready` checks per service, run in parallel across
+  control-plane, agent-runtime-service, investigator-service, and
+  retrieval-service for `/system`; one service's failure never hides
+  another's real result.
+- `/incidents` (real, backend-driven pagination/filtering),
+  `/incidents/[incidentId]` (real metadata, complete audit timeline,
+  read-only remediation proposal + event history — no approve/reject
+  control exists yet), `/system` (real four-service health fan-out).
+
+Later stages will add, in order: the `/agent-runs/[runId]` page; then
+the two BFF mutations (§7); then polling (§4); then the layered
+test/acceptance strategy described in §8.

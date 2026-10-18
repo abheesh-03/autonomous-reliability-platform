@@ -1,0 +1,221 @@
+import "server-only";
+
+import type {
+  Incident,
+  IncidentEvent,
+  IncidentEventListResponse,
+  IncidentListResponse,
+  IncidentSeverity,
+  IncidentStatus,
+} from "../types/incident";
+import type {
+  RemediationEvent,
+  RemediationEventListResponse,
+  RemediationProposal,
+  RemediationProposalListResponse,
+} from "../types/remediation";
+import {
+  type BackendResult,
+  buildQuery,
+  fail,
+  fetchAllPages,
+  getJson,
+  ok,
+} from "./http";
+
+const CONTROL_PLANE_URL =
+  process.env.WEB_CONSOLE_CONTROL_PLANE_URL ?? "http://control-plane:8000";
+
+export interface ListIncidentsParams {
+  status?: IncidentStatus;
+  severity?: IncidentSeverity;
+  source?: string;
+  limit?: number;
+  offset?: number;
+}
+
+// Mirrors control-plane's own bounds exactly (api/incidents.py):
+// limit 1..100 (default 20), offset >=0 (default 0). Clamped here as a
+// defensive second layer -- the page itself also clamps whatever a
+// browser-supplied query string contained before it ever reaches this
+// function.
+function clampLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) return 20;
+  return Math.min(100, Math.max(1, Math.trunc(limit)));
+}
+
+function clampOffset(offset: number | undefined): number {
+  if (offset === undefined || !Number.isFinite(offset)) return 0;
+  return Math.max(0, Math.trunc(offset));
+}
+
+export async function listIncidents(
+  params: ListIncidentsParams,
+): Promise<BackendResult<IncidentListResponse>> {
+  const query = buildQuery({
+    status: params.status,
+    severity: params.severity,
+    source: params.source,
+    limit: clampLimit(params.limit),
+    offset: clampOffset(params.offset),
+  });
+  const result = await getJson(`${CONTROL_PLANE_URL}/api/v1/incidents${query}`);
+  if ("networkError" in result) {
+    return fail("unavailable", "control-plane unreachable");
+  }
+  if (result.parseError) {
+    return fail("malformed", "control-plane returned a non-JSON incident list response");
+  }
+  if (result.status === 422) {
+    return fail("validation", "control-plane rejected the incident list query parameters");
+  }
+  if (result.status !== 200) {
+    return fail("unavailable", `control-plane returned unexpected status ${result.status} for incident list`);
+  }
+  const body = result.body as Partial<IncidentListResponse> | null;
+  if (
+    !body ||
+    !Array.isArray(body.items) ||
+    typeof body.total !== "number" ||
+    typeof body.limit !== "number" ||
+    typeof body.offset !== "number"
+  ) {
+    return fail("malformed", "control-plane incident list response did not match the expected shape");
+  }
+  return ok(body as IncidentListResponse);
+}
+
+export async function getIncident(incidentId: string): Promise<BackendResult<Incident>> {
+  const result = await getJson(`${CONTROL_PLANE_URL}/api/v1/incidents/${encodeURIComponent(incidentId)}`);
+  if ("networkError" in result) {
+    return fail("unavailable", "control-plane unreachable");
+  }
+  if (result.parseError) {
+    return fail("malformed", "control-plane returned a non-JSON incident response");
+  }
+  if (result.status === 404) {
+    return fail("not_found", "incident not found");
+  }
+  if (result.status === 422) {
+    return fail("validation", "invalid incident identifier");
+  }
+  if (result.status !== 200) {
+    return fail("unavailable", `control-plane returned unexpected status ${result.status} for incident detail`);
+  }
+  const body = result.body as Partial<Incident> | null;
+  if (!body || typeof body.id !== "string" || typeof body.status !== "string") {
+    return fail("malformed", "control-plane incident response did not match the expected shape");
+  }
+  return ok(body as Incident);
+}
+
+async function getIncidentEventsPage(
+  incidentId: string,
+  limit: number,
+  offset: number,
+): Promise<BackendResult<IncidentEventListResponse>> {
+  const query = buildQuery({ limit, offset });
+  const result = await getJson(
+    `${CONTROL_PLANE_URL}/api/v1/incidents/${encodeURIComponent(incidentId)}/events${query}`,
+  );
+  if ("networkError" in result) {
+    return fail("unavailable", "control-plane unreachable");
+  }
+  if (result.parseError) {
+    return fail("malformed", "control-plane returned a non-JSON incident events response");
+  }
+  if (result.status === 404) {
+    return fail("not_found", "incident not found");
+  }
+  if (result.status !== 200) {
+    return fail("unavailable", `control-plane returned unexpected status ${result.status} for incident events`);
+  }
+  const body = result.body as Partial<IncidentEventListResponse> | null;
+  if (!body || !Array.isArray(body.items) || typeof body.total !== "number") {
+    return fail("malformed", "control-plane incident events response did not match the expected shape");
+  }
+  return ok(body as IncidentEventListResponse);
+}
+
+/**
+ * The incident detail page shows the COMPLETE durable audit timeline,
+ * never just the first default-sized page -- see fetchAllPages's own
+ * bounded-pagination contract (lib/server/http.ts).
+ */
+export async function getAllIncidentEvents(incidentId: string): Promise<BackendResult<IncidentEvent[]>> {
+  return fetchAllPages((limit, offset) => getIncidentEventsPage(incidentId, limit, offset));
+}
+
+async function getIncidentRemediationProposalsPage(
+  incidentId: string,
+  limit: number,
+  offset: number,
+): Promise<BackendResult<RemediationProposalListResponse>> {
+  const query = buildQuery({ limit, offset });
+  const result = await getJson(
+    `${CONTROL_PLANE_URL}/api/v1/incidents/${encodeURIComponent(incidentId)}/remediation-proposals${query}`,
+  );
+  if ("networkError" in result) {
+    return fail("unavailable", "control-plane unreachable");
+  }
+  if (result.parseError) {
+    return fail("malformed", "control-plane returned a non-JSON remediation proposal list response");
+  }
+  if (result.status === 404) {
+    return fail("not_found", "incident not found");
+  }
+  if (result.status !== 200) {
+    return fail(
+      "unavailable",
+      `control-plane returned unexpected status ${result.status} for remediation proposals`,
+    );
+  }
+  const body = result.body as Partial<RemediationProposalListResponse> | null;
+  if (!body || !Array.isArray(body.items) || typeof body.total !== "number") {
+    return fail("malformed", "control-plane remediation proposal list response did not match the expected shape");
+  }
+  return ok(body as RemediationProposalListResponse);
+}
+
+export async function getAllIncidentRemediationProposals(
+  incidentId: string,
+): Promise<BackendResult<RemediationProposal[]>> {
+  return fetchAllPages((limit, offset) => getIncidentRemediationProposalsPage(incidentId, limit, offset));
+}
+
+async function getRemediationProposalEventsPage(
+  proposalId: string,
+  limit: number,
+  offset: number,
+): Promise<BackendResult<RemediationEventListResponse>> {
+  const query = buildQuery({ limit, offset });
+  const result = await getJson(
+    `${CONTROL_PLANE_URL}/api/v1/remediation-proposals/${encodeURIComponent(proposalId)}/events${query}`,
+  );
+  if ("networkError" in result) {
+    return fail("unavailable", "control-plane unreachable");
+  }
+  if (result.parseError) {
+    return fail("malformed", "control-plane returned a non-JSON remediation event response");
+  }
+  if (result.status === 404) {
+    return fail("not_found", "remediation proposal not found");
+  }
+  if (result.status !== 200) {
+    return fail(
+      "unavailable",
+      `control-plane returned unexpected status ${result.status} for remediation proposal events`,
+    );
+  }
+  const body = result.body as Partial<RemediationEventListResponse> | null;
+  if (!body || !Array.isArray(body.items) || typeof body.total !== "number") {
+    return fail("malformed", "control-plane remediation event response did not match the expected shape");
+  }
+  return ok(body as RemediationEventListResponse);
+}
+
+export async function getAllRemediationProposalEvents(
+  proposalId: string,
+): Promise<BackendResult<RemediationEvent[]>> {
+  return fetchAllPages((limit, offset) => getRemediationProposalEventsPage(proposalId, limit, offset));
+}

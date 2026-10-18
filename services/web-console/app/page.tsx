@@ -1,13 +1,15 @@
-// Stage 1 shell only: establishes product identity and the intended
-// navigation structure. No incident/agent-run data, no backend calls,
-// no operator credentials -- those arrive in later Phase 9 stages.
-// A Server Component (the default for this app): nothing here runs in
-// the browser, so there is nothing client-side to expose.
+// Dashboard shell. Stage 2 wires real links for the two sections that
+// now have real backend-data pages (/incidents, /system); Agent Runs
+// remains a placeholder until a later Phase 9 stage implements it. No
+// dashboard statistics are fabricated here -- a richer dashboard with
+// real aggregate numbers can come later, once it can be obtained
+// cleanly without loading unbounded data.
+import Link from "next/link";
 
-const PLANNED_SECTIONS = [
-  { name: "Incidents", path: "/incidents" },
-  { name: "Agent Runs", path: "/agent-runs" },
-  { name: "System Health", path: "/system" },
+const SECTIONS = [
+  { name: "Incidents", path: "/incidents", available: true },
+  { name: "Agent Runs", path: "/agent-runs", available: false },
+  { name: "System Health", path: "/system", available: true },
 ] as const;
 
 export default function HomePage() {
@@ -22,11 +24,9 @@ export default function HomePage() {
       </header>
 
       <section>
-        <h2 style={{ fontSize: "1.1rem", color: "#9fb3c8" }}>
-          Planned sections
-        </h2>
+        <h2 style={{ fontSize: "1.1rem", color: "#9fb3c8" }}>Sections</h2>
         <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: "0.75rem" }}>
-          {PLANNED_SECTIONS.map((section) => (
+          {SECTIONS.map((section) => (
             <li
               key={section.path}
               style={{
@@ -35,10 +35,18 @@ export default function HomePage() {
                 padding: "1rem",
               }}
             >
-              <strong>{section.name}</strong>
-              <span style={{ color: "#6b7f93", marginLeft: "0.5rem" }}>
-                (not yet available -- later Phase 9 stage)
-              </span>
+              {section.available ? (
+                <Link href={section.path}>
+                  <strong>{section.name}</strong>
+                </Link>
+              ) : (
+                <>
+                  <strong>{section.name}</strong>
+                  <span style={{ color: "#6b7f93", marginLeft: "0.5rem" }}>
+                    (not yet available -- later Phase 9 stage)
+                  </span>
+                </>
+              )}
             </li>
           ))}
         </ul>

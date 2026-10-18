@@ -2,7 +2,7 @@
   "name": "web-console",
   "version": "0.1.0",
   "private": true,
-  "description": "Phase 9 operator web console for the Autonomous Production Reliability Platform. Stage 1: Next.js App Router foundation only -- no backend data, no operator credentials.",
+  "description": "Phase 9 operator web console for the Autonomous Production Reliability Platform. Stage 2: read-only real backend data (incidents, remediation history, system health) -- no mutations, no operator credentials yet.",
   "engines": {
     "node": ">=24"
   },
@@ -17,7 +17,8 @@
   "dependencies": {
     "next": "16.4.2",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "server-only": "0.0.1"
   },
   "devDependencies": {
     "@testing-library/dom": "10.4.2",

@@ -84,14 +84,16 @@
 #     (it has no use for either — it never calls a write-capable
 #     control-plane endpoint) and holds no PostgreSQL credentials at
 #     all.
-#   - web-console (Phase 9 Stage 1): the operator web console
-#     foundation. A Next.js App Router shell -- product identity,
-#     navigation structure, and a container healthcheck endpoint only.
-#     Makes no backend calls, holds no PostgreSQL credentials, and
-#     holds neither CONTROL_PLANE_LIFECYCLE_TOKEN nor
-#     CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN yet (those arrive once a
-#     later stage actually wires real incident/remediation data through
-#     server-side BFF Route Handlers -- see
+#   - web-console (Phase 9 Stage 2): the operator web console. A
+#     Next.js App Router app rendering real, READ-ONLY control-plane
+#     data server-side (incident list/detail, audit timeline,
+#     remediation history) plus a /system health fan-out across all
+#     four backends' own /health/live + /health/ready. Holds no
+#     PostgreSQL credential, and still holds neither
+#     CONTROL_PLANE_LIFECYCLE_TOKEN nor
+#     CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN (those arrive once a
+#     later stage actually implements a mutation through server-side
+#     BFF Route Handlers -- see
 #     docs/architecture/phase-9-web-console.md). Never given any of the
 #     other five write-capable control-plane/tool-gateway/payment
 #     tokens under any circumstance.
@@ -838,20 +840,32 @@ services:
       retries: 5
       start_period: 15s
 
-  # Phase 9 Stage 1: the operator web console foundation only -- a
-  # minimal Next.js App Router shell with no backend calls, no incident
-  # data, and no operator credentials (CONTROL_PLANE_LIFECYCLE_TOKEN /
-  # CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN arrive in a later stage,
-  # once this service actually needs them -- see
-  # docs/architecture/phase-9-web-console.md). Deliberately has NO
-  # depends_on on control-plane/agent-runtime-service: this stage does
-  # not call either, so it is independently startable, and adding a
-  # dependency it does not yet need would misrepresent what this
-  # container actually requires to run.
+  # Phase 9 Stage 2: the operator web console now reads real, read-only
+  # data from control-plane (incidents, audit timeline, remediation
+  # history) and fans out to all four backends' own /health/live +
+  # /health/ready for the /system page. Still holds no operator
+  # credential (CONTROL_PLANE_LIFECYCLE_TOKEN /
+  # CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN arrive only once a later
+  # stage implements a mutation -- see
+  # docs/architecture/phase-9-web-console.md). The four WEB_CONSOLE_*_URL
+  # variables below are plain internal Docker DNS URLs, never secrets,
+  # and are never exposed via NEXT_PUBLIC_*. Deliberately still has NO
+  # depends_on on any of the four backends: the /system page exists
+  # specifically to show a backend as unavailable, so this container
+  # must remain independently startable (and stay up) even if every
+  # monitored service is down -- a depends_on here would misrepresent
+  # that and could prevent this container from starting at all during
+  # a real backend outage, exactly when an operator most needs to load
+  # this page.
   web-console:
     build:
       context: ./services/web-console
     restart: unless-stopped
+    environment:
+      WEB_CONSOLE_CONTROL_PLANE_URL: http://control-plane:8000
+      WEB_CONSOLE_AGENT_RUNTIME_URL: http://agent-runtime-service:8003
+      WEB_CONSOLE_INVESTIGATOR_URL: http://investigator-service:8001
+      WEB_CONSOLE_RETRIEVAL_URL: http://retrieval-service:8002
     ports:
       - "127.0.0.1:3101:3101"
     healthcheck:
