@@ -33,8 +33,16 @@ describe("durable run-id-before-execution invariant", () => {
   });
 
   it("the agent-runtime server client's createAgentRun path never calls /resume", () => {
+    // Scoped to createAgentRun's own function body -- Gate B
+    // legitimately added a separate resumeAgentRun export to this
+    // same file (called only from a separate resume Route Handler,
+    // never from createAgentRun or the start-investigation route), so
+    // a whole-file check would now false-positive on that unrelated,
+    // intentional addition.
     const source = nonCommentSource("lib/server/agent-runtime-client.ts");
-    expect(source).not.toMatch(/\/resume/);
+    const match = source.match(/export async function createAgentRun[\s\S]*?\n}\n/);
+    expect(match).not.toBeNull();
+    expect(match![0]).not.toMatch(/\/resume/);
   });
 
   it("the StartInvestigationControl Client Component never calls /resume and navigates with the real run_id after success", () => {

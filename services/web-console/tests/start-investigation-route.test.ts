@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fail, ok } from "../lib/server/http";
 
 vi.mock("../lib/server/control-plane-client", () => ({
@@ -64,14 +64,23 @@ function seededAgentRun() {
   };
 }
 
-function callRoute() {
-  return POST(new Request("http://localhost/api/incidents/x/investigations", { method: "POST" }), {
+const TRUSTED_ORIGIN = "http://127.0.0.1:3101";
+
+function callRoute(origin: string | null = TRUSTED_ORIGIN) {
+  const headers: Record<string, string> = {};
+  if (origin !== null) headers.Origin = origin;
+  return POST(new Request("http://localhost/api/incidents/x/investigations", { method: "POST", headers }), {
     params: Promise.resolve({ incidentId: INCIDENT_ID }),
   });
 }
 
+beforeEach(() => {
+  vi.stubEnv("WEB_CONSOLE_TRUSTED_ORIGIN", TRUSTED_ORIGIN);
+});
+
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe("POST /api/incidents/[incidentId]/investigations", () => {
@@ -203,11 +212,58 @@ describe("POST /api/incidents/[incidentId]/investigations", () => {
   });
 
   it("rejects a malformed incident identifier before any backend call", async () => {
-    const response = await POST(new Request("http://localhost/api/incidents/x/investigations", { method: "POST" }), {
-      params: Promise.resolve({ incidentId: "not-a-uuid" }),
-    });
+    const response = await POST(
+      new Request("http://localhost/api/incidents/x/investigations", { method: "POST", headers: { Origin: TRUSTED_ORIGIN } }),
+      { params: Promise.resolve({ incidentId: "not-a-uuid" }) },
+    );
 
     expect(response.status).toBe(422);
     expect(getIncidentMock).not.toHaveBeenCalled();
+  });
+
+  describe("origin/CSRF guard", () => {
+    it("rejects a missing Origin header with a safe 403, before any backend call", async () => {
+      const response = await callRoute(null);
+      const body = await response.json();
+
+      expect(response.status).toBe(403);
+      expect(body.error).toBe("forbidden");
+      expect(getIncidentMock).not.toHaveBeenCalled();
+      expect(transitionIncidentStatusMock).not.toHaveBeenCalled();
+      expect(createAgentRunMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a cross-origin Origin header with a safe 403, before any backend call", async () => {
+      const response = await callRoute("http://evil.example.com");
+      const body = await response.json();
+
+      expect(response.status).toBe(403);
+      expect(body.error).toBe("forbidden");
+      expect(getIncidentMock).not.toHaveBeenCalled();
+      expect(createAgentRunMock).not.toHaveBeenCalled();
+    });
+
+    it("never derives trust from Host/X-Forwarded-Host -- a spoofed forwarded-host with a cross-origin Origin is still rejected", async () => {
+      const response = await POST(
+        new Request("http://localhost/api/incidents/x/investigations", {
+          method: "POST",
+          headers: { Origin: "http://evil.example.com", "X-Forwarded-Host": "127.0.0.1:3101" },
+        }),
+        { params: Promise.resolve({ incidentId: INCIDENT_ID }) },
+      );
+
+      expect(response.status).toBe(403);
+      expect(getIncidentMock).not.toHaveBeenCalled();
+    });
+
+    it("allows a request carrying the exact trusted origin, preserving existing same-origin behavior", async () => {
+      getIncidentMock.mockResolvedValue(ok(incidentWith("investigating")));
+      createAgentRunMock.mockResolvedValue(ok(seededAgentRun()));
+
+      const response = await callRoute(TRUSTED_ORIGIN);
+
+      expect(response.status).toBe(201);
+      expect(getIncidentMock).toHaveBeenCalledTimes(1);
+    });
   });
 });

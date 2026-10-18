@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAgentRun, getAgentRun, getAgentRunHistory } from "../lib/server/agent-runtime-client";
+import { createAgentRun, getAgentRun, getAgentRunHistory, resumeAgentRun } from "../lib/server/agent-runtime-client";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status });
@@ -233,6 +233,101 @@ describe("createAgentRun", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await createAgentRun(INCIDENT_ID);
+
+    expect(result.ok).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("resumeAgentRun", () => {
+  it("sends exactly one real POST to .../resume with an empty body -- no request body is bound by the real contract", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, VALID_AGENT_RUN));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await resumeAgentRun(VALID_AGENT_RUN.run_id);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`http://agent-runtime-service:8003/api/v1/agent-runs/${VALID_AGENT_RUN.run_id}/resume`);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({});
+  });
+
+  it("returns the real updated AgentRun on 200", async () => {
+    const resumed = { ...VALID_AGENT_RUN, status: "waiting_for_approval", current_node: "await_human_approval" };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(200, resumed)));
+
+    const result = await resumeAgentRun(VALID_AGENT_RUN.run_id);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data).toEqual(resumed);
+  });
+
+  it("categorizes a 404 as not_found", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(404, { detail: "agent run not found" })));
+    const result = await resumeAgentRun(VALID_AGENT_RUN.run_id);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("not_found");
+  });
+
+  it("categorizes a 409 (terminal state or approval still pending) as conflict", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(409, { detail: "approval_pending: proposal is pending_approval" })),
+    );
+    const result = await resumeAgentRun(VALID_AGENT_RUN.run_id);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("conflict");
+  });
+
+  it("categorizes a 422 as validation", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(422, { detail: "invalid uuid" })));
+    const result = await resumeAgentRun("not-a-uuid");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("validation");
+  });
+
+  it("categorizes a 503 (dependency unavailable, run remains resumable) as unavailable", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(503, { detail: "tool-gateway unavailable" })));
+    const result = await resumeAgentRun(VALID_AGENT_RUN.run_id);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("unavailable");
+  });
+
+  it("categorizes a 500 (defensive backend error) as unavailable", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(500, { detail: "proposal not found" })));
+    const result = await resumeAgentRun(VALID_AGENT_RUN.run_id);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("unavailable");
+  });
+
+  it("categorizes a network-level failure/timeout as unavailable, never throwing", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ETIMEDOUT")));
+    const result = await resumeAgentRun(VALID_AGENT_RUN.run_id);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("unavailable");
+  });
+
+  it("categorizes a non-JSON body as malformed", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("<html>", { status: 200 })));
+    const result = await resumeAgentRun(VALID_AGENT_RUN.run_id);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("malformed");
+  });
+
+  it("categorizes a 200 response that does not match the AgentRun shape as malformed", async () => {
+    const { resumable: _unused, ...missingResumable } = VALID_AGENT_RUN;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(200, missingResumable)));
+    const result = await resumeAgentRun(VALID_AGENT_RUN.run_id);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("malformed");
+  });
+
+  it("performs no automatic retry on an ambiguous/network failure -- exactly one call, ever", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("ETIMEDOUT"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await resumeAgentRun(VALID_AGENT_RUN.run_id);
 
     expect(result.ok).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);

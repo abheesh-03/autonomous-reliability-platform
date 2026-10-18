@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fail, ok } from "../lib/server/http";
 
 vi.mock("../lib/server/agent-runtime-client", () => ({
@@ -8,22 +8,47 @@ vi.mock("../lib/server/agent-runtime-client", () => ({
 }));
 vi.mock("../lib/server/control-plane-client", () => ({
   getRemediationProposal: vi.fn(),
+  getIncident: vi.fn(),
 }));
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND");
   }),
+  useRouter: () => ({ refresh: vi.fn() }),
 }));
 
 import AgentRunPage from "../app/agent-runs/[runId]/page";
 import { getAgentRun, getAgentRunHistory } from "../lib/server/agent-runtime-client";
-import { getRemediationProposal } from "../lib/server/control-plane-client";
+import { getIncident, getRemediationProposal } from "../lib/server/control-plane-client";
 import { notFound } from "next/navigation";
 
 const getAgentRunMock = getAgentRun as unknown as ReturnType<typeof vi.fn>;
 const getAgentRunHistoryMock = getAgentRunHistory as unknown as ReturnType<typeof vi.fn>;
 const getRemediationProposalMock = getRemediationProposal as unknown as ReturnType<typeof vi.fn>;
+const getIncidentMock = getIncident as unknown as ReturnType<typeof vi.fn>;
 const notFoundMock = notFound as unknown as ReturnType<typeof vi.fn>;
+
+const LIVE_INCIDENT = {
+  id: "22222222-2222-2222-2222-222222222222",
+  source: "alertmanager",
+  source_fingerprint: "abc",
+  title: "checkout-service is returning HTTP 5xx errors",
+  description: null,
+  severity: "critical" as const,
+  status: "investigating" as const,
+  first_seen_at: "2026-01-01T00:00:00+00:00",
+  last_seen_at: "2026-01-01T00:07:00+00:00",
+  resolved_at: null,
+  created_at: "2026-01-01T00:00:00+00:00",
+  updated_at: "2026-01-01T00:07:00+00:00",
+};
+
+beforeEach(() => {
+  // Default: every test gets a real-shaped live incident unless it
+  // overrides this explicitly -- avoids every pre-existing test having
+  // to know about Gate D's new live-incident fetch.
+  getIncidentMock.mockResolvedValue(ok(LIVE_INCIDENT));
+});
 
 const BASE_AGENT_RUN = {
   run_id: "11111111-1111-1111-1111-111111111111",
@@ -153,7 +178,7 @@ describe("AgentRunPage", () => {
     expect(screen.getByText(/similarity 0.870/)).toBeDefined();
   });
 
-  it("renders waiting_for_approval as a real read-only wait state, never resolved/approved", async () => {
+  it("renders waiting_for_approval with a pending proposal, now showing real Approve/Reject controls (Gate C)", async () => {
     getAgentRunMock.mockResolvedValue(
       ok({
         ...BASE_AGENT_RUN,
@@ -190,9 +215,14 @@ describe("AgentRunPage", () => {
     render(jsx);
 
     expect(screen.getByRole("status").textContent).toMatch(/waiting for human approval/i);
-    expect(screen.queryByRole("button", { name: /approve/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /reject/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /resume/i })).toBeNull();
+    // Gate C: a genuinely pending_approval proposal now shows real
+    // Approve/Reject controls -- but the plain "Resume run" control
+    // (Gate B's AgentRunActions) must still never appear here, since
+    // continuing past the interrupt is a separate, later action.
+    expect(screen.getByRole("button", { name: /approve/i })).toBeDefined();
+    expect(screen.getByRole("button", { name: /reject/i })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /^resume run$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /continue workflow/i })).toBeNull();
   });
 
   it("renders remediation proposal state when a proposal exists", async () => {
@@ -313,5 +343,37 @@ describe("AgentRunPage", () => {
     expect(screen.getByText(BASE_AGENT_RUN.incident_snapshot.title)).toBeDefined();
     // Only the checkpoint-history section shows the failure.
     expect(screen.getByRole("alert").textContent).toMatch(/unavailable/i);
+  });
+
+  it("Gate D: renders a separate 'Live incident state' section, distinct from the durable snapshot", async () => {
+    getAgentRunMock.mockResolvedValue(ok(BASE_AGENT_RUN));
+    getAgentRunHistoryMock.mockResolvedValue(ok({ run_id: BASE_AGENT_RUN.run_id, thread_id: BASE_AGENT_RUN.thread_id, entries: [] }));
+    getIncidentMock.mockResolvedValue(ok({ ...LIVE_INCIDENT, status: "remediating" as const }));
+
+    const jsx = await AgentRunPage({ params: Promise.resolve({ runId: BASE_AGENT_RUN.run_id }) });
+    render(jsx);
+
+    expect(screen.getByText("Live incident state")).toBeDefined();
+    // The live section shows the LIVE status ("remediating"), while the
+    // durable incident_snapshot section still shows its own, separately
+    // captured status ("investigating") -- both are visible and never
+    // conflated into one value.
+    const liveSection = screen.getByText("Live incident state").closest("section");
+    expect(liveSection?.textContent).toMatch(/remediating/);
+    const snapshotSection = screen.getByText(/Incident snapshot \(durable/).closest("section");
+    expect(snapshotSection?.textContent).toMatch(/investigating/);
+  });
+
+  it("Gate D: a live-incident fetch failure shows a scoped failure without hiding the rest of the AgentRun", async () => {
+    getAgentRunMock.mockResolvedValue(ok(BASE_AGENT_RUN));
+    getAgentRunHistoryMock.mockResolvedValue(ok({ run_id: BASE_AGENT_RUN.run_id, thread_id: BASE_AGENT_RUN.thread_id, entries: [] }));
+    getIncidentMock.mockResolvedValue(fail("unavailable", "control-plane unreachable"));
+
+    const jsx = await AgentRunPage({ params: Promise.resolve({ runId: BASE_AGENT_RUN.run_id }) });
+    render(jsx);
+
+    expect(screen.getByText("running")).toBeDefined();
+    const liveSection = screen.getByText("Live incident state").closest("section");
+    expect(liveSection?.textContent).toMatch(/unavailable/i);
   });
 });

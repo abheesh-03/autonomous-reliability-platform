@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createAgentRun } from "../../../../../lib/server/agent-runtime-client";
+import { backendErrorResponse } from "../../../../../lib/server/bff-error-response";
 import { getIncident, transitionIncidentStatus } from "../../../../../lib/server/control-plane-client";
-import type { BackendErrorKind } from "../../../../../lib/server/http";
+import { rejectCrossOriginMutation } from "../../../../../lib/server/origin-guard";
 
 // Stage 4's one mutation boundary: the browser never calls control-plane
 // or agent-runtime-service directly, and never holds
@@ -26,47 +27,26 @@ import type { BackendErrorKind } from "../../../../../lib/server/http";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const STATUS_FOR_KIND: Record<BackendErrorKind, number> = {
-  not_found: 404,
-  validation: 422,
-  conflict: 409,
-  unauthorized: 500,
-  configuration: 500,
-  unavailable: 503,
-  malformed: 502,
-};
+export async function POST(request: Request, { params }: { params: Promise<{ incidentId: string }> }) {
+  const originRejection = rejectCrossOriginMutation(request);
+  if (originRejection) return originRejection;
 
-const MESSAGE_FOR_KIND: Record<BackendErrorKind, string> = {
-  not_found: "Incident not found.",
-  validation: "The request was rejected as invalid.",
-  conflict: "The incident's status changed or no longer permits this action.",
-  unauthorized: "This server could not authenticate to control-plane.",
-  configuration: "This server is not configured to start investigations.",
-  unavailable: "A backend service is temporarily unavailable.",
-  malformed: "Received an unexpected response from a backend service.",
-};
-
-function errorResponse(kind: BackendErrorKind) {
-  return NextResponse.json({ error: kind, message: MESSAGE_FOR_KIND[kind] }, { status: STATUS_FOR_KIND[kind] });
-}
-
-export async function POST(_request: Request, { params }: { params: Promise<{ incidentId: string }> }) {
   const { incidentId } = await params;
 
   if (!UUID_PATTERN.test(incidentId)) {
-    return errorResponse("validation");
+    return backendErrorResponse("validation");
   }
 
   const incidentResult = await getIncident(incidentId);
   if (!incidentResult.ok) {
-    return errorResponse(incidentResult.error.kind);
+    return backendErrorResponse(incidentResult.error.kind);
   }
   const incident = incidentResult.data;
 
   if (incident.status === "open" || incident.status === "acknowledged") {
     const transition = await transitionIncidentStatus(incidentId, incident.status, "investigating");
     if (!transition.ok) {
-      return errorResponse(transition.error.kind);
+      return backendErrorResponse(transition.error.kind);
     }
     // Falls through to agent-run creation below -- the incident is now
     // authoritatively "investigating".
@@ -74,7 +54,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ in
     // remediating / resolved / closed: never a valid starting point
     // for a new investigation. No lifecycle transition is invented
     // here.
-    return errorResponse("conflict");
+    return backendErrorResponse("conflict", "The incident's status changed or no longer permits this action.");
   }
   // else: already "investigating" -- the PATCH is skipped entirely,
   // per the frozen start workflow (never a redundant transition merely
@@ -82,7 +62,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ in
 
   const runResult = await createAgentRun(incidentId);
   if (!runResult.ok) {
-    return errorResponse(runResult.error.kind);
+    return backendErrorResponse(runResult.error.kind);
   }
 
   // Bounded response: the browser needs the durable identifier, not

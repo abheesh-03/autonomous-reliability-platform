@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -75,6 +75,7 @@ help: ## Show available targets
 	@echo "  web-console-test    Run web-console unit/component tests on Node 24 (via Docker)"
 	@echo "  web-console-build   Build the web-console Docker image"
 	@echo "  web-console-logs    Show recent web-console logs"
+	@echo "  verify-web-console  Phase 9 real-evidence acceptance: browser-driven operator workflow, human-approved remediation, monitoring-resolved"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -539,3 +540,14 @@ web-console-build: ## Build the web-console Docker image
 
 web-console-logs: ## Show recent web-console logs
 	docker compose logs --tail=100 web-console
+
+# Phase 9 completion pass: the real-evidence acceptance gate, same
+# placement convention as verify-remediation above -- creates its OWN
+# fresh incident (never reuses Phase 8's own already-resolved one) and
+# drives the ENTIRE human workflow through a real Chromium browser
+# session (Start AI Investigation, Run investigation, Approve, Continue
+# workflow, real tool-gateway remediation, monitoring-resolved) against
+# the real running stack. See scripts/verify-web-console.sh and
+# docs/architecture/phase-9-web-console.md.
+verify-web-console: ## Phase 9 real-evidence acceptance: browser-driven operator workflow, human-approved remediation, monitoring-resolved
+	./scripts/verify-web-console.sh

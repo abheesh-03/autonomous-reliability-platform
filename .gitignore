@@ -40,6 +40,11 @@ yarn-error.log*
 out/
 *.tsbuildinfo
 
+# --- Playwright (Phase 9 Gate F e2e) ---
+playwright-report/
+test-results/
+blob-report/
+
 # --- Java ---
 target/
 *.class

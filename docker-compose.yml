@@ -84,20 +84,25 @@
 #     (it has no use for either — it never calls a write-capable
 #     control-plane endpoint) and holds no PostgreSQL credentials at
 #     all.
-#   - web-console (Phase 9 Stage 4): the operator web console. A
-#     Next.js App Router app rendering real control-plane/agent-runtime
-#     data server-side (incident list/detail, audit timeline,
-#     remediation history, durable AgentRun/investigation view) plus a
-#     /system health fan-out across all four backends. Holds no
-#     PostgreSQL credential. As of Stage 4 it holds its first and only
-#     operator credential, CONTROL_PLANE_LIFECYCLE_TOKEN (server-side
-#     only, reused from the existing Phase 3D secret, never duplicated),
-#     to start a durable AI investigation (incident -> investigating
-#     -> a seeded, NOT YET EXECUTED AgentRun -- never a resume/execute
-#     call from this BFF). Still holds neither
-#     CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN nor any of the other
-#     five write-capable control-plane/tool-gateway/payment
-#     tokens under any circumstance.
+#   - web-console (Phase 9): the operator web console. A Next.js App
+#     Router app rendering real control-plane/agent-runtime data
+#     server-side (incident list/detail, audit timeline, remediation
+#     history, durable AgentRun/investigation view) plus a /system
+#     health fan-out across all four backends. Holds no PostgreSQL
+#     credential. It holds EXACTLY two operator credentials, both
+#     server-side only and both reused from existing secrets (never
+#     duplicated): CONTROL_PLANE_LIFECYCLE_TOKEN (Stage 4 -- starts a
+#     durable AI investigation: incident -> investigating -> a seeded
+#     AgentRun) and CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN (the
+#     completion pass -- records a human operator's approve/reject
+#     decision on a remediation proposal). Resuming/executing an
+#     AgentRun and continuing a workflow after a decision are their
+#     own separate, unauthenticated agent-runtime-service calls this
+#     BFF makes on the operator's explicit action -- never automatic,
+#     never combined with the lifecycle or approver mutation into one
+#     request. Still holds NONE of the other five write-capable
+#     control-plane/tool-gateway/payment tokens under any
+#     circumstance.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -841,16 +846,21 @@ services:
       retries: 5
       start_period: 15s
 
-  # Phase 9 Stage 4: the operator web console now has its first
-  # mutation boundary -- Start AI Investigation (BFF-only, same-origin;
-  # the browser never calls control-plane/agent-runtime-service
-  # directly and never holds any token). This is why
-  # CONTROL_PLANE_LIFECYCLE_TOKEN now appears here: it is the SAME
-  # Phase 3D secret control-plane already holds above, reused (never
-  # duplicated), held server-side only (lib/server/control-plane-client.ts),
-  # never via NEXT_PUBLIC_*. Still holds NONE of the other six
-  # protected tokens -- CONTROL_PLANE_WEBHOOK_TOKEN,
-  # CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN,
+  # Phase 9 Stage 4 added this console's first mutation boundary --
+  # Start AI Investigation (BFF-only, same-origin; the browser never
+  # calls control-plane/agent-runtime-service directly and never holds
+  # any token). This is why CONTROL_PLANE_LIFECYCLE_TOKEN appears here:
+  # it is the SAME Phase 3D secret control-plane already holds above,
+  # reused (never duplicated), held server-side only
+  # (lib/server/control-plane-client.ts), never via NEXT_PUBLIC_*.
+  #
+  # The Phase 9 completion pass (final stage) added exactly ONE more:
+  # CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN -- again the SAME Phase 8
+  # secret control-plane already holds above (never duplicated), used
+  # ONLY by decideRemediationProposal to record a human operator's
+  # approve/reject decision via the decision BFF route. This console
+  # still holds NONE of the remaining six protected tokens --
+  # CONTROL_PLANE_WEBHOOK_TOKEN,
   # CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN,
   # CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN,
   # TOOL_GATEWAY_EXECUTION_TOKEN, PAYMENT_FAULT_INJECTION_TOKEN,
@@ -872,7 +882,14 @@ services:
       WEB_CONSOLE_AGENT_RUNTIME_URL: http://agent-runtime-service:8003
       WEB_CONSOLE_INVESTIGATOR_URL: http://investigator-service:8001
       WEB_CONSOLE_RETRIEVAL_URL: http://retrieval-service:8002
+      # Explicit, non-attacker-controlled origin/CSRF guard for this
+      # console's own mutation Route Handlers (lib/server/origin-guard.ts)
+      # -- matches the exact origin this container is published at
+      # below (127.0.0.1 only). NOT user authentication -- see that
+      # module's own docstring and docs/architecture/phase-9-web-console.md.
+      WEB_CONSOLE_TRUSTED_ORIGIN: http://127.0.0.1:3101
       CONTROL_PLANE_LIFECYCLE_TOKEN: ${CONTROL_PLANE_LIFECYCLE_TOKEN:-}
+      CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN: ${CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN:-}
     ports:
       - "127.0.0.1:3101:3101"
     healthcheck:

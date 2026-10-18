@@ -315,6 +315,284 @@ server's own token — never caused by anything the browser did), and
 `configuration` (the token is unset locally). All of Stage 1-3's
 existing read paths and their four original kinds are unchanged.
 
-Later stages will add, in order: the resume/execute boundary and
-remediation approve/reject BFF mutations; then polling (§4); then the
-layered test/acceptance strategy described in §8.
+## 11. The completion pass: resume/execute boundary (Gate B)
+
+The second mutation boundary executes an **already-durable** AgentRun:
+`POST /api/agent-runs/[runId]/resume`, a Route Handler that calls
+agent-runtime-service's real `POST /api/v1/agent-runs/{run_id}/resume`
+exactly once per browser request. This is, by design, a **separate
+HTTP request from Stage 4's start-investigation route** — the browser
+must already hold a durable `run_id` (received from a prior, separate
+request) before this route is ever called; the start route never calls
+resume, and this route never creates a run. The real backend contract
+binds no request body at all (confirmed by source inspection of
+`agent_runtime_service/api/agent_runs.py`); an empty `{}` is still sent,
+matching `scripts/verify-agent-runtime.sh`'s own proven convention.
+
+A resume call can run several real LangGraph nodes synchronously before
+returning (investigation, evaluation, proposal creation, or — after
+approval — tool-gateway execution and recovery verification), so this
+call uses a dedicated 60-second timeout (`RESUME_TIMEOUT_MS`), re-
+audited against the same script's own `--max-time 60` convention for
+resume versus `--max-time 15` for a plain GET.
+
+**No automatic retry, for the same reason as `createAgentRun`**: the
+resume endpoint has no idempotency key, so a timeout, network error, or
+malformed response makes **at most one** resume call per browser
+request and returns a safe `"unavailable"`/`"malformed"` result rather
+than retrying blindly — a blind retry could race or duplicate a still-
+in-flight execution. The browser's `AgentRunActions` Client Component
+reconciles by calling `router.refresh()` on *any* outcome (success,
+safe failure, or network exception), which re-runs the owning Server
+Component's own read against the real durable state, rather than
+retrying the mutation itself.
+
+The route pre-checks `resumable` and, when `waiting_for_approval`, pre-
+fetches the real proposal and refuses (safe `409`-equivalent `conflict`)
+if it is still `pending_approval` — an optimization that avoids an
+avoidable round trip for an outcome already known locally; the
+backend's own `409` remains the authoritative safety net regardless,
+never weakened or relied upon as the *only* check.
+
+The button itself (`AgentRunActions`) is gated out of the UI entirely
+while `status === "waiting_for_approval"` — that state has its own
+dedicated controls (§12), never a generic "Resume run" label that would
+be misleading mid-interrupt.
+
+## 12. The completion pass: human decision boundary (Gate C)
+
+The third and final mutation boundary records a human/operator decision
+on an already-durable remediation proposal:
+`POST /api/remediation-proposals/[proposalId]/decision`. This is where
+`CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN` enters web-console's server
+for the first time — the SAME Phase 8 secret control-plane already
+held, reused via the existing `scripts/init-remediation-secrets.sh`
+generation path, never duplicated into a second variable. The real
+backend endpoint is a **POST**, not a PATCH, despite being a state
+transition (`api/remediation.py`'s `@router.post`) — `decideRemediationProposal`
+uses `postJson` accordingly. The browser never receives the approver
+token: it is read only inside `control-plane-client.ts`, which fails
+CLOSED (`"configuration"`, no request attempted) if the token is unset
+or blank, identical to the lifecycle token's own convention.
+
+**The browser sends only `{decision, comment?}` — never an
+`expected_status`.** The BFF derives `expected_status` itself from a
+fresh `GET` of the real, current, durable proposal immediately before
+deciding, so a stale browser-held status value can never be used as the
+optimistic-concurrency guard the backend's own `decide()` method
+enforces; a value smuggled into the request body is simply ignored.
+
+**This route must not call resume, and never does.** Approving or
+rejecting a proposal is a real, independently meaningful write (on
+approve, the backend atomically transitions the owning incident
+`investigating → remediating` in the same DB transaction; on reject, it
+touches only the proposal row, never the incident — both enforced by
+control-plane itself, never re-implemented here) — but it must never
+itself execute anything. Continuing the workflow past the interrupt is
+a **separate, explicit** operator action.
+
+The UI (`RemediationDecisionControl`) reflects this split exactly:
+
+- While the real proposal is `pending_approval`: Approve / Reject
+  buttons (with an optional, 1000-character-bounded comment), shown
+  only inside the existing `waiting_for_approval` banner.
+- Once decided (`approved` or `rejected`) but the AgentRun has not yet
+  been resumed past its interrupt: a distinctly-labeled **"Continue
+  workflow"** button — calling the *same* Gate B resume route, but
+  never automatically, and never from the decision route itself.
+- Otherwise: nothing — the run has already moved past this interrupt.
+
+No automatic retry here either, and the same `router.refresh()`-on-any-
+outcome reconciliation convention as Gate B.
+
+## 13. The completion pass: bounded live polling and live-vs-durable incident state (Gate D)
+
+`/agent-runs/[runId]` now polls, bounded and read-only, via a single
+Client Component (`LiveRunPolling`) that calls `router.refresh()` on a
+plain `setInterval` — no WebSockets, SSE, or client-state library. It
+never calls `fetch` itself; every tick is a re-render of the owning
+Server Component's own GETs. Exactly one timer exists at a time,
+always cleared on unmount or when the polling cadence itself changes.
+Cadence is derived purely from state, never from time elapsed:
+
+- `running` → ~2.5s (a human is actively watching progress).
+- `waiting_for_approval` → ~5s (waiting on a human decision, or on
+  tool-gateway/recovery verification after a resume).
+- `completed` / `failed` **and** the incident is still `remediating` →
+  ~5s (waiting for Alertmanager's own natural resolution).
+- `completed` / `failed` and the incident is anything else (including
+  when the live incident fetch itself failed) → no polling at all.
+
+The page also renders a **"Live incident state"** section, fetched via
+a fresh, independent `getIncident(agentRun.incident_id)` call — deliberately
+separate from the AgentRun's own durable `incident_snapshot`, which is
+frozen at whatever point the graph last captured it. A failure in this
+fetch is scoped (`BackendFailure` inside that one section only) and
+never hides the rest of the page. The two sections are visually and
+textually distinct (`"Live incident state"` vs. `"Incident snapshot
+(durable, as captured during this run)"`) specifically so an operator
+never confuses a stale embedded snapshot with the real current state.
+
+## 14. Monitoring remains authoritative (absolute, re-affirmed)
+
+No code anywhere in this console transitions `remediating → resolved`,
+PATCHes the lifecycle to `resolved` after recovery verification, or
+infers resolution from `execution_result.status`,
+`recovery_verification.*`, or tool-gateway's own success. **Only a real
+control-plane `GET /api/v1/incidents/{id}` reporting `status: "resolved"`
+may ever say so** — and Gate F's own acceptance test explicitly proves
+the console shows the real intermediate truth (`remediating`, not yet
+`resolved`) immediately after a verified-successful remediation, and
+only shows `resolved` once Alertmanager's own real resolved webhook has
+independently caused it.
+
+## 15. Partial-success / no-rollback semantics (the complete set)
+
+Preserved at every mutation boundary, by design, never accidentally:
+
+- **Start**: lifecycle PATCH succeeds, `createAgentRun` fails → no
+  rollback PATCH is attempted (§10 above).
+- **Resume**: an ambiguous response (timeout/network/malformed) → no
+  automatic retry; the caller reconciles via a fresh read, and may
+  explicitly retry only after seeing the real current state.
+- **Decision**: approval succeeds, a later resume fails → the approval
+  stays `approved`; there is no rollback to `pending_approval`. Reject
+  never touches the incident, by the backend's own construction.
+- **Remediation**: whatever failure behavior Phase 8's tool-gateway/
+  control-plane already implement (e.g. a failed execution rolling the
+  incident `remediating → investigating`) is observed, never
+  reimplemented or special-cased by this console.
+- **Monitoring**: remediation verified successful but the alert has not
+  yet naturally recovered → the incident stays `remediating`, and the
+  UI shows exactly that — never a guessed `resolved`.
+
+**No mutation in this console ever retries itself automatically** —
+`createAgentRun`, `resumeAgentRun`, and `decideRemediationProposal` each
+make **at most one** real backend call per browser request, for the
+same reason in all three cases: none of the underlying endpoints has a
+request-level idempotency key, so a blind retry could create a
+duplicate run, race a still-in-flight execution, or re-apply a decision
+against state that has since changed. Reconciliation is always a fresh
+read (a `router.refresh()`), never a second write.
+
+## 16. Final security model (the complete set)
+
+Web-console's server may hold **exactly** these two credentials, both
+server-only, both reused from an existing secret (never duplicated):
+`CONTROL_PLANE_LIFECYCLE_TOKEN` (§10) and
+`CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN` (§12). It must never hold
+`CONTROL_PLANE_WEBHOOK_TOKEN`, `CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN`,
+`CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN`, `TOOL_GATEWAY_EXECUTION_TOKEN`,
+`PAYMENT_FAULT_INJECTION_TOKEN`, or `PAYMENT_REMEDIATION_TOKEN` — all
+six remain exclusively test-harness/Alertmanager/agent-runtime-service/
+tool-gateway credentials, confirmed absent from the web-console
+container by direct inspection (Gate E) and confirmed absent from every
+browser-shipped static JavaScript bundle and server-rendered HTML
+response, by content scan, not merely by code review (Gate E; the two
+allowed tokens' env-var *names* legitimately appear in web-console's
+server-only Next.js chunks, since that is where `process.env.*` is
+read, but never in any `.next/static` file the browser actually
+downloads, and never as a literal value anywhere). The browser holds
+zero protected credentials under any circumstance — not in
+`NEXT_PUBLIC_*`, a Client Component prop, rendered HTML, a BFF JSON
+response, a URL/query string, or a log/error message.
+
+## 17. End-to-end acceptance (Gate F)
+
+`services/web-console/e2e/phase9-workflow.spec.ts` (Playwright,
+Chromium-only) is the ONE real, mutating, browser-driven acceptance
+test, run against the live Compose stack — never a mocked backend.
+`services/web-console/e2e/support/backend.ts` creates the test's own
+**fresh** incident via the same Phase 8 controlled payment-authorization
+fault mechanism `scripts/verify-remediation.sh` already proved
+(`PAYMENT_FAULT_INJECTION_TOKEN` to enable, `PAYMENT_REMEDIATION_TOKEN`
+to clear/read — test-harness-only credentials, called directly from
+the test runner's own process, never routed through web-console or
+seen by the browser), captures a freshness checkpoint before inducing
+anything, and never inserts into PostgreSQL directly or fabricates an
+alert.
+
+The test drives the complete real workflow through actual browser
+clicks: open the fresh incident → Start AI Investigation → verify
+navigation to the durable `/agent-runs/{run_id}` with the run genuinely
+unexecuted → click "Run investigation" → wait for the real
+`waiting_for_approval` interrupt → verify the real investigation
+report/evidence/RAG context and the real pending proposal → click
+Approve → independently verify (via direct control-plane/agent-runtime
+reads, not the browser) that the proposal is `approved`, the incident is
+`remediating`, and remediation has **not** executed yet → click
+"Continue workflow" (a separate click, a separate request) → verify
+real tool-gateway execution succeeded and real recovery-verification
+fields → verify the incident is still **not** `resolved` immediately
+after → wait for `CheckoutServerErrors`' real, un-shortened recovery
+window → verify the SAME incident naturally becomes `resolved` via
+Alertmanager's own webhook → verify the complete incident and
+remediation audit trails. On a failed acceptance run, trusted test-harness cleanup attempts to clear the fault and independently verifies it is inactive. On a successful run, cleanup only independently reads and verifies the fault is already inactive, without issuing a redundant clear. Cleanup never forces incident resolution. Rejection coverage lives in the
+focused unit/component/route test suites (`tests/*.test.ts(x)`), not in
+a second expensive E2E.
+
+`scripts/verify-web-console.sh` wraps this spec for both local and CI
+use: it starts web-console if not already running, forces
+investigator-service into the same deterministic stub LLM provider
+Phase 5-8 already use (restored and verified afterward, regardless of
+where the run fails), forces `PAYMENT_FAULT_INJECTION_ENABLED=true` for
+the duration of the run only (also restored and verified afterward),
+installs the Chromium browser (idempotent), and runs `npm run e2e`.
+
+## 18. CI integration (Gate G)
+
+`.github/workflows/ci.yml` runs `scripts/verify-web-console.sh` as one
+step (`Verify web console (Phase 9)`), placed immediately after the
+existing Phase 8 `Verify remediation` step — not because of an ordering
+dependency (this test creates its own fresh incident and never reuses
+Phase 8's), but because every other backend service this test also
+depends on is already confirmed healthy and exercised by that point.
+web-console's own Node 24 install/typecheck/lint/unit-test/build steps
+remain unchanged and still run early, before the Compose stack even
+starts (Stage 1's original placement). The job's overall
+`timeout-minutes` was raised from 65 to 90 to accommodate this one
+additional real, multi-minute (~8 minutes measured locally) step; no
+existing Phase 0-8 coverage was removed, shortened, or weakened.
+
+## 19. A known, documented limitation (not resolved by this pass)
+
+The `investigating`-status duplicate-run limitation recorded in §10
+remains real and unresolved: there is still no list-agent-runs-by-
+incident endpoint, so this console still cannot prove whether an
+`investigating` incident already has a run in flight. This is an
+explicit, named trade-off, not an oversight — resolving it would mean
+adding a new backend endpoint, which is out of this phase's frozen
+scope (§9).
+
+## 20. Origin/CSRF guard (independent-review correction)
+
+All three mutation Route Handlers (`/api/incidents/[incidentId]/investigations`,
+`/api/agent-runs/[runId]/resume`, `/api/remediation-proposals/[proposalId]/decision`)
+now call a shared guard, `lib/server/origin-guard.ts`'s
+`rejectCrossOriginMutation(request)`, as the FIRST statement in each
+handler, before any parameter/body parsing or backend call. It
+compares the request's real, browser-set `Origin` header against an
+**explicitly configured trusted origin** (`WEB_CONSOLE_TRUSTED_ORIGIN`,
+defaulting to `http://127.0.0.1:3101` — the exact origin
+`docker-compose.yml` publishes this container at, which remains bound
+to `127.0.0.1` only, unchanged) — never against the request's own
+`Host` or `X-Forwarded-Host` header, both of which an attacker fully
+controls and neither of which this guard ever reads. A missing,
+empty, or mismatched `Origin` fails closed with a safe, bounded `403
+{"error": "forbidden", "message": "This request was rejected."}` —
+never a raw header echo, stack trace, or backend detail — and no
+backend call is ever attempted. A genuine same-origin click from this
+console's own UI is unaffected: a browser's `fetch()` always attaches
+its own real `Origin` header on a same-origin POST, and page
+JavaScript cannot override or spoof it.
+
+**This is NOT user authentication, and must never be treated as
+such.** It is a defense-in-depth CSRF/cross-origin mitigation for a
+console that still has no user login/RBAC system (§3, §16) — it
+proves a request came from a browser tab that believes it is talking
+to this console's own origin, never that the person driving that
+browser is an authorized operator. **This console must never be
+deployed anywhere an untrusted party can reach it without first adding
+real authentication, authorization, and CSRF controls on top of this
+guard, not instead of them.** No login/RBAC architecture was
+introduced by this fix, by explicit instruction.

@@ -13,6 +13,7 @@ import type {
   RemediationEventListResponse,
   RemediationProposal,
   RemediationProposalListResponse,
+  RemediationProposalStatus,
 } from "../types/remediation";
 import {
   type BackendResult,
@@ -22,6 +23,7 @@ import {
   getJson,
   ok,
   patchJson,
+  postJson,
 } from "./http";
 
 const CONTROL_PLANE_URL =
@@ -35,6 +37,19 @@ const CONTROL_PLANE_URL =
  */
 function getLifecycleToken(): string | null {
   const token = process.env.CONTROL_PLANE_LIFECYCLE_TOKEN;
+  return token && token.trim().length > 0 ? token : null;
+}
+
+/**
+ * Same fresh-read, fail-closed convention as getLifecycleToken --
+ * reuses control-plane's EXISTING CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN
+ * secret (api/auth.py::require_remediation_approver_token). This is a
+ * distinct secret from the lifecycle token: the approver token proves
+ * "a human decided this proposal," never "this server may transition
+ * incident lifecycle," and the two must never be used interchangeably.
+ */
+function getRemediationApproverToken(): string | null {
+  const token = process.env.CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN;
   return token && token.trim().length > 0 ? token : null;
 }
 
@@ -277,6 +292,71 @@ export async function getRemediationProposal(proposalId: string): Promise<Backen
   const body = result.body as Partial<RemediationProposal> | null;
   if (!body || typeof body.id !== "string" || typeof body.status !== "string") {
     return fail("malformed", "control-plane remediation proposal response did not match the expected shape");
+  }
+  return ok(body as RemediationProposal);
+}
+
+/**
+ * Gate C's one new mutation: POST
+ * /api/v1/remediation-proposals/{id}/decision. Fails CLOSED before any
+ * network request if CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN is
+ * unset/blank -- same convention as transitionIncidentStatus. The real
+ * backend endpoint is a POST (never PATCH) despite being a state
+ * transition, per api/remediation.py::decide_remediation_proposal --
+ * this function uses postJson accordingly, not patchJson.
+ *
+ * `expectedStatus` must be the CALLER's own freshly-read current
+ * status (optimistic-concurrency guard the backend itself enforces);
+ * this function never guesses or re-reads it. On approve, the backend
+ * ALSO atomically transitions the owning incident
+ * investigating -> remediating in the same DB transaction; on reject,
+ * the backend touches only the proposal row, never the incident. This
+ * client never re-implements either rule -- it only forwards the
+ * decision and reports the backend's own resulting proposal.
+ */
+export async function decideRemediationProposal(
+  proposalId: string,
+  expectedStatus: RemediationProposalStatus,
+  decision: "approve" | "reject",
+  comment?: string,
+): Promise<BackendResult<RemediationProposal>> {
+  const token = getRemediationApproverToken();
+  if (!token) {
+    return fail("configuration", "the remediation approver token is not configured on this server");
+  }
+
+  const result = await postJson(
+    `${CONTROL_PLANE_URL}/api/v1/remediation-proposals/${encodeURIComponent(proposalId)}/decision`,
+    { expected_status: expectedStatus, decision, comment: comment ?? null },
+    { Authorization: `Bearer ${token}` },
+  );
+  if ("networkError" in result) {
+    return fail("unavailable", "control-plane unreachable");
+  }
+  if (result.parseError) {
+    return fail("malformed", "control-plane returned a non-JSON remediation decision response");
+  }
+  if (result.status === 401) {
+    return fail("unauthorized", "control-plane rejected this server's remediation approver token");
+  }
+  if (result.status === 404) {
+    return fail("not_found", "remediation proposal not found");
+  }
+  if (result.status === 409) {
+    return fail("conflict", "the proposal's status changed, or the owning incident is no longer eligible");
+  }
+  if (result.status === 422) {
+    return fail("validation", "control-plane rejected the remediation decision request");
+  }
+  if (result.status !== 200) {
+    return fail(
+      "unavailable",
+      `control-plane returned unexpected status ${result.status} for the remediation decision`,
+    );
+  }
+  const body = result.body as Partial<RemediationProposal> | null;
+  if (!body || typeof body.id !== "string" || typeof body.status !== "string") {
+    return fail("malformed", "control-plane remediation decision response did not match the expected shape");
   }
   return ok(body as RemediationProposal);
 }

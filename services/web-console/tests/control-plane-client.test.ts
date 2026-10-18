@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getIncident, listIncidents, transitionIncidentStatus } from "../lib/server/control-plane-client";
+import {
+  decideRemediationProposal,
+  getIncident,
+  listIncidents,
+  transitionIncidentStatus,
+} from "../lib/server/control-plane-client";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status });
@@ -247,5 +252,176 @@ describe("transitionIncidentStatus", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.kind).toBe("malformed");
+  });
+});
+
+const SAMPLE_PROPOSAL_ID = "44444444-4444-4444-4444-444444444444";
+const SAMPLE_DECIDED_PROPOSAL = {
+  id: SAMPLE_PROPOSAL_ID,
+  incident_id: SAMPLE_INCIDENT_ID,
+  agent_run_id: "33333333-3333-3333-3333-333333333333",
+  idempotency_key: "key-1",
+  action_type: "restart_service",
+  target: "checkout-service",
+  reason: "high error rate",
+  supporting_evidence_ids: [],
+  supporting_context_ids: [],
+  status: "approved",
+  proposed_at: "2026-01-01T00:00:00+00:00",
+  updated_at: "2026-01-01T00:05:00+00:00",
+  decided_at: "2026-01-01T00:05:00+00:00",
+  decision_comment: null,
+  execution_started_at: null,
+  execution_completed_at: null,
+};
+
+describe("decideRemediationProposal", () => {
+  it("sends the exact POST request: real HTTP method, URL, Bearer approver token, Content-Type, and body", async () => {
+    // Mirrors transitionIncidentStatus's own real-HTTP-method regression
+    // test: the decision endpoint is a POST (api/remediation.py's
+    // @router.post), never a PATCH, despite being a state transition --
+    // this observes the actual fetch call, not a mocked return value.
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "test-approver-token");
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, SAMPLE_DECIDED_PROPOSAL));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve", "looks safe");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`http://control-plane:8000/api/v1/remediation-proposals/${SAMPLE_PROPOSAL_ID}/decision`);
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer test-approver-token");
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(init.body as string)).toEqual({
+      expected_status: "pending_approval",
+      decision: "approve",
+      comment: "looks safe",
+    });
+  });
+
+  it("sends comment: null when no comment is given", async () => {
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "test-approver-token");
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, SAMPLE_DECIDED_PROPOSAL));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "reject");
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      expected_status: "pending_approval",
+      decision: "reject",
+      comment: null,
+    });
+  });
+
+  it("fails closed with 'configuration' and makes no request when the approver token is unset", async () => {
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("configuration");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed with 'configuration' and makes no request when the approver token is blank/whitespace", async () => {
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "   ");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("configuration");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns the decided proposal on 200", async () => {
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "test-approver-token");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(200, SAMPLE_DECIDED_PROPOSAL)));
+
+    const result = await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data).toEqual(SAMPLE_DECIDED_PROPOSAL);
+  });
+
+  it("categorizes a 401 as unauthorized (wrong/absent token presented to control-plane)", async () => {
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "wrong-token");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(401, { detail: "unauthorized" })));
+
+    const result = await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("unauthorized");
+  });
+
+  it("categorizes a 404 as not_found", async () => {
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "test-approver-token");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(404, { detail: "remediation proposal not found" })));
+
+    const result = await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("not_found");
+  });
+
+  it("categorizes a 409 (stale expected_status or ineligible incident) as conflict, never a server outage", async () => {
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "test-approver-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(409, { detail: "the owning incident is not currently 'investigating'" })),
+    );
+
+    const result = await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("conflict");
+  });
+
+  it("categorizes a 422 as validation", async () => {
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "test-approver-token");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(422, { detail: "comment too long" })));
+
+    const result = await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("validation");
+  });
+
+  it("categorizes a network-level failure as unavailable, never throwing", async () => {
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "test-approver-token");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED")));
+
+    const result = await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("unavailable");
+  });
+
+  it("categorizes a non-JSON body as malformed", async () => {
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "test-approver-token");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("<html>", { status: 200 })));
+
+    const result = await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("malformed");
+  });
+
+  it("never reuses CONTROL_PLANE_LIFECYCLE_TOKEN as a fallback for the approver token", async () => {
+    vi.stubEnv("CONTROL_PLANE_LIFECYCLE_TOKEN", "lifecycle-token-only");
+    vi.stubEnv("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await decideRemediationProposal(SAMPLE_PROPOSAL_ID, "pending_approval", "approve");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("configuration");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

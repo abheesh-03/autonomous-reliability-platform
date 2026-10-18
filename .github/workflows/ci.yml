@@ -37,13 +37,21 @@ jobs:
     # payment-outage --full-acceptance already budgets for this exact
     # alert) -- measured several minutes locally, generous margin kept
     # for CI runner variance.
-    timeout-minutes: 65
+    # Raised from 65: the Phase 9 completion pass adds its own real,
+    # browser-driven end-to-end acceptance step (scripts/verify-web-console.sh)
+    # -- a SECOND real CheckoutServerErrors fire/recover cycle (its own
+    # fresh incident, same real alert, same ~5-minute rate() decay),
+    # driven through an actual Chromium browser session rather than
+    # curl -- measured ~8 minutes locally end to end, generous margin
+    # kept for CI runner variance and the Chromium download/launch
+    # overhead.
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/test-failure-simulation-settling.sh && bash -n scripts/test-canonical-incident-selection.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/test-failure-simulation-settling.sh && bash -n scripts/test-canonical-incident-selection.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh && bash -n scripts/verify-web-console.sh
 
       - name: Verify Makefile is usable
         run: make help
@@ -1154,6 +1162,36 @@ jobs:
         timeout-minutes: 20
         run: bash scripts/verify-remediation.sh
 
+      # Phase 9 completion pass: the operator web console's own real
+      # end-to-end acceptance -- a single Playwright-driven browser
+      # session performs the ENTIRE human workflow (open the incident,
+      # Start AI Investigation, Run investigation to the real
+      # waiting_for_approval interrupt, Approve, a separate "Continue
+      # workflow" click that actually resumes execution, real
+      # tool-gateway remediation, and the same incident naturally
+      # resolving via Alertmanager's own webhook) against the real
+      # running stack, never a mocked backend. Deliberately placed
+      # AFTER the Phase 8 gate above: it creates its OWN FRESH incident
+      # via the same controlled payment-authorization fault mechanism
+      # (never reusing Phase 8's own already-resolved one), so ordering
+      # relative to Phase 8 doesn't matter for correctness, but running
+      # after it means every other backend service this test also
+      # depends on (control-plane, agent-runtime-service,
+      # investigator-service, tool-gateway, payment-service,
+      # checkout-service) is already confirmed healthy and exercised at
+      # least once. Sources scripts/verify-investigator.sh for its
+      # reusable provider-mode-restore helpers rather than duplicating
+      # them, and reuses the SAME deterministic stub LLM provider
+      # machinery as Phase 5/6/7/8 -- no credentials configured or
+      # required in CI beyond the lifecycle/approver/fault tokens the
+      # earlier Phase 3C/3D/8 secret-init steps already generated. Also
+      # starts (or confirms) the web-console container itself, since no
+      # earlier step in this job does. See scripts/verify-web-console.sh
+      # and docs/architecture/phase-9-web-console.md.
+      - name: Verify web console (Phase 9)
+        timeout-minutes: 25
+        run: bash scripts/verify-web-console.sh
+
       # CI cross-phase stabilization audit, Part E: a NON-MUTATING,
       # read-only diagnostic dump of recent incident/audit state --
       # never affects pass/fail on its own. Gives immediate forensic
@@ -1203,6 +1241,7 @@ jobs:
           docker compose logs --tail=100 loki
           docker compose logs --tail=100 alloy
           docker compose logs --tail=100 alertmanager
+          docker compose logs --tail=100 web-console
 
       - name: Stop Compose environment (preserve volumes)
         if: always()

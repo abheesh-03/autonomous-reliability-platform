@@ -1,16 +1,19 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
+import { AgentRunActions } from "../../../components/AgentRunActions";
 import { AgentRunSummary } from "../../../components/AgentRunSummary";
 import { BackendFailure } from "../../../components/BackendFailure";
 import { CheckpointTimeline } from "../../../components/CheckpointTimeline";
 import { InvestigationReportView } from "../../../components/InvestigationReportView";
+import { LiveRunPolling } from "../../../components/LiveRunPolling";
 import { RecoveryVerificationCard } from "../../../components/RecoveryVerificationCard";
+import { RemediationDecisionControl } from "../../../components/RemediationDecisionControl";
 import { RemediationStateCard } from "../../../components/RemediationStateCard";
 import { SeverityBadge, StatusBadgePill } from "../../../components/StatusBadge";
 import { WorkflowProgress } from "../../../components/WorkflowProgress";
 import { formatTimestamp } from "../../../lib/format";
 import { getAgentRun, getAgentRunHistory } from "../../../lib/server/agent-runtime-client";
-import { getRemediationProposal } from "../../../lib/server/control-plane-client";
+import { getIncident, getRemediationProposal } from "../../../lib/server/control-plane-client";
 import type { BackendResult } from "../../../lib/server/http";
 import type { RemediationProposal } from "../../../lib/types/remediation";
 
@@ -45,9 +48,20 @@ export default async function AgentRunPage({
   const proposalResult: BackendResult<RemediationProposal> | null = agentRun.remediation_proposal_id
     ? await getRemediationProposal(agentRun.remediation_proposal_id)
     : null;
+  // A SEPARATE, independent, read-only fetch from the durable
+  // incident_snapshot embedded in the AgentRun checkpoint -- that
+  // snapshot is frozen at whatever point the graph last captured it,
+  // while this is the real, current incident row. Only control-plane's
+  // own authoritative state may ever report "resolved"; this console
+  // never infers it.
+  const liveIncidentResult = await getIncident(agentRun.incident_id);
 
   return (
     <main style={{ maxWidth: 900, margin: "0 auto", padding: "2rem 1.5rem" }}>
+      <LiveRunPolling
+        status={agentRun.status}
+        incidentStatus={liveIncidentResult.ok ? liveIncidentResult.data.status : null}
+      />
       <p>
         <Link href="/">&larr; Dashboard</Link>
       </p>
@@ -71,6 +85,16 @@ export default async function AgentRunPage({
               {" "}
               Remediation proposal <code>{agentRun.remediation_proposal_id}</code> has not been decided yet.
             </>
+          )}
+          {agentRun.remediation_proposal_id && proposalResult?.ok && (
+            <div style={{ marginTop: "0.75rem" }}>
+              <RemediationDecisionControl
+                runId={agentRun.run_id}
+                proposalId={agentRun.remediation_proposal_id}
+                proposalStatus={proposalResult.data.status}
+                runResumable={agentRun.resumable}
+              />
+            </div>
           )}
         </div>
       )}
@@ -96,6 +120,16 @@ export default async function AgentRunPage({
 
       <AgentRunSummary agentRun={agentRun} />
 
+      {agentRun.status !== "waiting_for_approval" && (
+        <div style={{ marginTop: "1rem" }}>
+          <AgentRunActions
+            runId={agentRun.run_id}
+            currentNode={agentRun.current_node}
+            resumable={agentRun.resumable}
+          />
+        </div>
+      )}
+
       <section style={{ marginTop: "2rem" }}>
         <h2>Workflow progress</h2>
         <WorkflowProgress completedNodes={agentRun.completed_nodes} currentNode={agentRun.current_node} />
@@ -111,7 +145,38 @@ export default async function AgentRunPage({
       </section>
 
       <section style={{ marginTop: "2rem" }}>
-        <h2>Incident snapshot</h2>
+        <h2>Live incident state</h2>
+        <p style={{ color: "#9fb3c8", fontSize: "0.85rem", marginTop: "-0.3rem" }}>
+          Read directly from control-plane just now -- distinct from the durable snapshot below, which was captured
+          at an earlier point in this run.
+        </p>
+        {!liveIncidentResult.ok ? (
+          <BackendFailure kind={liveIncidentResult.error.kind} />
+        ) : (
+          <div
+            style={{
+              border: "1px solid #2a4a5a",
+              background: "#0a1a1f",
+              borderRadius: 8,
+              padding: "0.75rem 1rem",
+            }}
+          >
+            <p style={{ display: "flex", gap: "0.5rem", margin: 0 }}>
+              <SeverityBadge severity={liveIncidentResult.data.severity} />
+              <StatusBadgePill status={liveIncidentResult.data.status} />
+            </p>
+            <dl style={{ display: "grid", gridTemplateColumns: "10rem 1fr", rowGap: "0.3rem", fontSize: "0.9rem", marginTop: "0.5rem" }}>
+              <dt style={{ color: "#9fb3c8" }}>Last seen</dt>
+              <dd>{formatTimestamp(liveIncidentResult.data.last_seen_at)}</dd>
+              <dt style={{ color: "#9fb3c8" }}>Resolved at</dt>
+              <dd>{liveIncidentResult.data.resolved_at ? formatTimestamp(liveIncidentResult.data.resolved_at) : "Not yet resolved"}</dd>
+            </dl>
+          </div>
+        )}
+      </section>
+
+      <section style={{ marginTop: "2rem" }}>
+        <h2>Incident snapshot (durable, as captured during this run)</h2>
         {agentRun.incident_snapshot ? (
           <div>
             <p style={{ display: "flex", gap: "0.5rem" }}>
