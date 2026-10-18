@@ -169,6 +169,10 @@ function RemediationProposalCard({
         <dd>{formatTimestamp(proposal.execution_completed_at)}</dd>
       </dl>
 
+      <p style={{ marginTop: "0.5rem" }}>
+        <Link href={`/agent-runs/${proposal.agent_run_id}`}>View agent run</Link>
+      </p>
+
       <div style={{ marginTop: "0.75rem" }}>
         {!eventsResult.ok ? (
           <BackendFailure kind={eventsResult.error.kind} />

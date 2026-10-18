@@ -165,7 +165,7 @@ No authentication/login system or RBAC redesign is introduced — the
 console borrows the same two Bearer tokens an operator already uses
 from the command line today.
 
-## 10. Stage 1/2 scope (this document's current reality)
+## 10. Stage 1/2/3 scope (this document's current reality)
 
 **Stage 1** implemented the foundation: a minimal Next.js App Router
 service (`services/web-console`) with a product-identity homepage and
@@ -201,6 +201,48 @@ independently startable even during a real backend outage — see the
   read-only remediation proposal + event history — no approve/reject
   control exists yet), `/system` (real four-service health fan-out).
 
-Later stages will add, in order: the `/agent-runs/[runId]` page; then
-the two BFF mutations (§7); then polling (§4); then the layered
-test/acceptance strategy described in §8.
+**Stage 3** adds the read-only durable AgentRun / LangGraph
+investigation view, still zero-credential, still no `depends_on`:
+
+- `lib/types/agent-run.ts` — re-audited directly against
+  `agent_runtime_service/domain/{agent_run,investigation,incident_snapshot}.py`
+  for this stage (never the prior audit notes alone). Two real
+  discrepancies recorded there: `execution_result` and
+  `recovery_verification` are plain `dict | None` on the backend's own
+  Pydantic model, not structured sub-models — their real shapes
+  (`{status, detail}` and `{proposal_succeeded, fault_inactive,
+  target_healthy}`) are fixed only by `graph/nodes.py`'s own code, not
+  by the schema; and `remediation_status` is plain `str | None`, not a
+  backend-enforced `Literal`, unlike `status`. This console still
+  validates both against the real, observed vocabulary and fails
+  closed on anything else.
+- `lib/server/agent-run-validation.ts` + `lib/server/agent-runtime-client.ts`
+  — `getAgentRun`/`getAgentRunHistory`, reusing Stage 2's
+  `BackendResult`/`BackendErrorKind`/`getJson` rather than a parallel
+  error framework; a hand-written (no new schema-validation
+  dependency) structural validator covers the full nested
+  investigation-report/evidence/retrieval-context shape, failing
+  "malformed" on any mismatch rather than casting arbitrary JSON.
+- `control-plane-client.ts` gained `getRemediationProposal(proposalId)`
+  — a real, existing, unauthenticated GET control-plane already
+  exposed but Stage 2 had no caller for; used only to enrich an
+  AgentRun's own `remediation_proposal_id` with the proposal's real
+  fields, never a new discovery API.
+- `/agent-runs/[runId]` — run identity/state, workflow progress
+  (completed/current nodes), chronological checkpoint history, incident
+  snapshot (linked to the live `/incidents/[id]`, never re-fetched to
+  replace it), the real investigation report (evidence, hypotheses,
+  retrieval context — rendered directly from the durable report, never
+  by calling retrieval-service), remediation state, execution result,
+  and recovery verification — all read-only, all scoped-failure (a
+  failed history or proposal-enrichment fetch never hides the
+  already-loaded AgentRun). `waiting_for_approval` renders as a plain
+  read-only wait state with no approve/reject/resume control anywhere
+  on the page. There is no list-all-runs endpoint and Stage 3 adds
+  none; the page is reached by a known durable `run_id`, including a
+  new read-only "View agent run" link from each remediation proposal
+  on `/incidents/[incidentId]` to `/agent-runs/{proposal.agent_run_id}`.
+
+Later stages will add, in order: the two BFF mutations (§7); then
+polling (§4); then the layered test/acceptance strategy described in
+§8.

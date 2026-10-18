@@ -132,6 +132,11 @@ describe("IncidentDetailPage", () => {
     expect(screen.getByText("clear_payment_authorization_fault")).toBeDefined();
     const renderedText = document.body.textContent ?? "";
     expect(renderedText.indexOf("proposed")).toBeLessThan(renderedText.indexOf("approved"));
+
+    // The proposal's own real agent_run_id is linked, read-only -- no
+    // new discovery API, no mutation.
+    const viewRunLink = screen.getByText("View agent run").closest("a");
+    expect(viewRunLink?.getAttribute("href")).toBe(`/agent-runs/${proposal.agent_run_id}`);
   });
 
   it("represents a proposal's genuinely empty event history as empty, not as a failure", async () => {

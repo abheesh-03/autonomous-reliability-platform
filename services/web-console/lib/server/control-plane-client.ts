@@ -183,6 +183,36 @@ export async function getAllIncidentRemediationProposals(
   return fetchAllPages((limit, offset) => getIncidentRemediationProposalsPage(incidentId, limit, offset));
 }
 
+// Stage 3: used only to enrich an AgentRun's own remediation_proposal_id
+// with the durable proposal's real fields (reason, decision, execution
+// timestamps) on /agent-runs/[runId] -- a real, existing, unauthenticated
+// GET endpoint, never a new discovery API.
+export async function getRemediationProposal(proposalId: string): Promise<BackendResult<RemediationProposal>> {
+  const result = await getJson(
+    `${CONTROL_PLANE_URL}/api/v1/remediation-proposals/${encodeURIComponent(proposalId)}`,
+  );
+  if ("networkError" in result) {
+    return fail("unavailable", "control-plane unreachable");
+  }
+  if (result.parseError) {
+    return fail("malformed", "control-plane returned a non-JSON remediation proposal response");
+  }
+  if (result.status === 404) {
+    return fail("not_found", "remediation proposal not found");
+  }
+  if (result.status !== 200) {
+    return fail(
+      "unavailable",
+      `control-plane returned unexpected status ${result.status} for remediation proposal`,
+    );
+  }
+  const body = result.body as Partial<RemediationProposal> | null;
+  if (!body || typeof body.id !== "string" || typeof body.status !== "string") {
+    return fail("malformed", "control-plane remediation proposal response did not match the expected shape");
+  }
+  return ok(body as RemediationProposal);
+}
+
 async function getRemediationProposalEventsPage(
   proposalId: string,
   limit: number,
