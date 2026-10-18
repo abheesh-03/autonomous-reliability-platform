@@ -8,6 +8,12 @@ vi.mock("../lib/server/control-plane-client", () => ({
   getAllIncidentRemediationProposals: vi.fn(),
   getAllRemediationProposalEvents: vi.fn(),
 }));
+// StartInvestigationControl (rendered for open/acknowledged/investigating
+// incidents) calls useRouter() -- needs a router context stub to render
+// under Vitest/jsdom, same as agent-run-page.test.tsx/start-investigation-control.test.tsx.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}));
 
 import IncidentDetailPage from "../app/incidents/[incidentId]/page";
 import {
@@ -201,5 +207,22 @@ describe("IncidentDetailPage", () => {
     // and the healthy proposal's own real event is still rendered.
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(screen.getByText(/proposed \(agent\)/)).toBeDefined();
+  });
+
+  it("17. shows the Start control for an eligible (open) incident, and no normal Start control for a resolved one", async () => {
+    getAllIncidentEventsMock.mockResolvedValue(ok([]));
+    getAllIncidentRemediationProposalsMock.mockResolvedValue(ok([]));
+
+    getIncidentMock.mockResolvedValue(ok({ ...SAMPLE_INCIDENT, status: "open" }));
+    const openJsx = await IncidentDetailPage({ params: Promise.resolve({ incidentId: SAMPLE_INCIDENT.id }) });
+    const { unmount } = render(openJsx);
+    expect(screen.getByRole("button", { name: /start ai investigation/i })).toBeDefined();
+    unmount();
+
+    getIncidentMock.mockResolvedValue(ok({ ...SAMPLE_INCIDENT, status: "resolved" }));
+    const resolvedJsx = await IncidentDetailPage({ params: Promise.resolve({ incidentId: SAMPLE_INCIDENT.id }) });
+    render(resolvedJsx);
+    expect(screen.queryByRole("button", { name: /investigation/i })).toBeNull();
+    expect(screen.getByText(/cannot be started while the incident is resolved/i)).toBeDefined();
   });
 });

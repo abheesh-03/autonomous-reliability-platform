@@ -21,10 +21,22 @@ import {
   fetchAllPages,
   getJson,
   ok,
+  patchJson,
 } from "./http";
 
 const CONTROL_PLANE_URL =
   process.env.WEB_CONSOLE_CONTROL_PLANE_URL ?? "http://control-plane:8000";
+
+/**
+ * Reads CONTROL_PLANE_LIFECYCLE_TOKEN fresh on every call (never cached
+ * at module load, so a corrected .env takes effect on the next request
+ * without a process restart) -- returns null for unset OR
+ * whitespace-only, treated identically as "not configured".
+ */
+function getLifecycleToken(): string | null {
+  const token = process.env.CONTROL_PLANE_LIFECYCLE_TOKEN;
+  return token && token.trim().length > 0 ? token : null;
+}
 
 export interface ListIncidentsParams {
   status?: IncidentStatus;
@@ -105,6 +117,62 @@ export async function getIncident(incidentId: string): Promise<BackendResult<Inc
   const body = result.body as Partial<Incident> | null;
   if (!body || typeof body.id !== "string" || typeof body.status !== "string") {
     return fail("malformed", "control-plane incident response did not match the expected shape");
+  }
+  return ok(body as Incident);
+}
+
+/**
+ * Stage 4's one mutation: PATCH /api/v1/incidents/{id}/status, the
+ * ONLY write path this console's server is allowed to call. Fails
+ * CLOSED before any network request if CONTROL_PLANE_LIFECYCLE_TOKEN
+ * is unset/blank -- never sends an unauthenticated request and hopes
+ * for a useful response. `expected_status`/`target_status` are sent
+ * exactly as given (optimistic-concurrency guard the backend itself
+ * enforces); this function never guesses or re-reads the current
+ * status on the caller's behalf.
+ */
+export async function transitionIncidentStatus(
+  incidentId: string,
+  expectedStatus: IncidentStatus,
+  targetStatus: IncidentStatus,
+): Promise<BackendResult<Incident>> {
+  const token = getLifecycleToken();
+  if (!token) {
+    return fail("configuration", "the lifecycle token is not configured on this server");
+  }
+
+  const result = await patchJson(
+    `${CONTROL_PLANE_URL}/api/v1/incidents/${encodeURIComponent(incidentId)}/status`,
+    { expected_status: expectedStatus, target_status: targetStatus },
+    { Authorization: `Bearer ${token}` },
+  );
+  if ("networkError" in result) {
+    return fail("unavailable", "control-plane unreachable");
+  }
+  if (result.parseError) {
+    return fail("malformed", "control-plane returned a non-JSON incident status response");
+  }
+  if (result.status === 401) {
+    return fail("unauthorized", "control-plane rejected this server's lifecycle token");
+  }
+  if (result.status === 404) {
+    return fail("not_found", "incident not found");
+  }
+  if (result.status === 409) {
+    return fail("conflict", "the incident's status changed or the transition is not permitted");
+  }
+  if (result.status === 422) {
+    return fail("validation", "control-plane rejected the status transition request");
+  }
+  if (result.status !== 200) {
+    return fail(
+      "unavailable",
+      `control-plane returned unexpected status ${result.status} for the incident status transition`,
+    );
+  }
+  const body = result.body as Partial<Incident> | null;
+  if (!body || typeof body.id !== "string" || typeof body.status !== "string") {
+    return fail("malformed", "control-plane incident status response did not match the expected shape");
   }
   return ok(body as Incident);
 }

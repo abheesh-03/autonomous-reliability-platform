@@ -165,7 +165,7 @@ No authentication/login system or RBAC redesign is introduced — the
 console borrows the same two Bearer tokens an operator already uses
 from the command line today.
 
-## 10. Stage 1/2/3 scope (this document's current reality)
+## 10. Stage 1/2/3/4 scope (this document's current reality)
 
 **Stage 1** implemented the foundation: a minimal Next.js App Router
 service (`services/web-console`) with a product-identity homepage and
@@ -243,6 +243,78 @@ investigation view, still zero-credential, still no `depends_on`:
   new read-only "View agent run" link from each remediation proposal
   on `/incidents/[incidentId]` to `/agent-runs/{proposal.agent_run_id}`.
 
-Later stages will add, in order: the two BFF mutations (§7); then
-polling (§4); then the layered test/acceptance strategy described in
-§8.
+**Stage 4** introduces the console's first mutation boundary: **Start
+AI Investigation**. This is where `CONTROL_PLANE_LIFECYCLE_TOKEN`
+enters web-console's server for the first time — the SAME Phase 3D
+secret control-plane already held, reused via the existing
+`scripts/init-webhook-secret.sh` generation path, never duplicated
+into a second variable. The browser never receives it: it is read only
+inside `lib/server/control-plane-client.ts`'s `transitionIncidentStatus`,
+which fails CLOSED (returns a `"configuration"` `BackendErrorKind`,
+no network request attempted at all) if the token is unset or
+blank-only, rather than ever sending an unauthenticated request and
+hoping for a useful response.
+
+**Exact start workflow** (`POST /api/incidents/[incidentId]/investigations`,
+a Route Handler — deliberately not a Server Action, so the mutation
+boundary is one explicit, resource-oriented same-origin endpoint):
+
+```
+BFF reads the current incident (GET, unauthenticated)
+  → status open/acknowledged: PATCH status (expected=current, target=investigating)
+  → status investigating:     skip the PATCH entirely
+  → status remediating/resolved/closed: safe 409, no PATCH, no run created
+  → POST /api/v1/agent-runs {incident_id}   (seeds a durable checkpoint ONLY)
+  → respond { run_id, incident_id }
+```
+
+**The durable run-id-before-execution invariant (Phase 7's core
+guarantee) is preserved by construction**: this Route Handler NEVER
+calls `POST /api/v1/agent-runs/{run_id}/resume`, and the browser's
+`StartInvestigationControl` (the one Client Component in this stage)
+never calls it either, on mount or otherwise. A freshly created run is
+expected to render `status="running"`, `current_node="start"`,
+`completed_nodes=[]` on `/agent-runs/{run_id}` — genuinely unexecuted.
+Execution/resume is an explicit later stage's own boundary.
+
+**Partial-success semantics, by design, not by accident**: the
+lifecycle transition and agent-run creation are two separate durable
+systems, never one distributed transaction. If the PATCH succeeds but
+`createAgentRun` then fails, this handler does **not** attempt to roll
+the incident back to its prior status — that would invent a
+cross-service transaction this platform does not have, and might
+conflict with real state that changed again in the meantime. The
+incident genuinely *is* `investigating` at that point; a safe retry of
+the same request naturally skips the PATCH (per the algorithm above)
+and only re-attempts `createAgentRun`.
+
+**No automatic retry of `createAgentRun`, documented as a real
+limitation, not silently worked around**: `POST /api/v1/agent-runs` has
+no known idempotency key. One browser request therefore makes **at
+most one** `createAgentRun` call; an ambiguous/network failure returns
+a safe `"unavailable"`/`"malformed"` result rather than retrying,
+because a blind retry without an idempotency key could create a
+second durable run for the same incident. This is a real, open
+limitation of the current backend contract — Stage 4 does not modify
+agent-runtime-service to add one.
+
+**The `investigating`-status duplicate-run limitation is also real and
+undocumented-away**: there is no list-agent-runs-by-incident endpoint
+(Stage 3/4 both deliberately add none), so this console cannot prove
+whether an `investigating` incident already has a run in flight unless
+a remediation proposal happens to expose one. Allowing "Create
+investigation run" from `investigating` is a deliberate, named
+trade-off for partial-success recovery — `StartInvestigationControl`
+labels this variant distinctly and shows explicit helper text that a
+duplicate run is possible; it never claims "no run exists."
+
+Reused rather than extended: `BackendErrorKind` gained `conflict`
+(a real 409 — stale `expected_status` or an illegal transition, never
+a server outage), `unauthorized` (control-plane rejected THIS
+server's own token — never caused by anything the browser did), and
+`configuration` (the token is unset locally). All of Stage 1-3's
+existing read paths and their four original kinds are unchanged.
+
+Later stages will add, in order: the resume/execute boundary and
+remediation approve/reject BFF mutations; then polling (§4); then the
+layered test/acceptance strategy described in §8.

@@ -2,13 +2,35 @@ import "server-only";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
-// Narrow, safe failure categories a page can render a tailored
+// Narrow, safe failure categories a page/route can render a tailored
 // operator-facing state for -- never a raw backend exception body or
 // stack trace. "unavailable" covers both a network-level failure
 // (timeout, connection refused, DNS failure) and an unexpected non-2xx
 // status this caller did not explicitly handle; "malformed" covers a
 // response that could not even be parsed as JSON.
-export type BackendErrorKind = "not_found" | "validation" | "unavailable" | "malformed";
+//
+// Stage 4 additions, for the first mutation (lifecycle PATCH):
+//   - "conflict": the backend's own 409 -- `expected_status` went
+//     stale, or the transition is illegal per the real state machine.
+//     A real, meaningful state change, never a server outage.
+//   - "unauthorized": the backend's own 401 on OUR server's own
+//     outbound request -- never caused by anything the browser did
+//     (the browser never authenticates to either backend), so this is
+//     really an operator-facing configuration problem, not something
+//     a retry or a browser-side credential could fix.
+//   - "configuration": this server's own CONTROL_PLANE_LIFECYCLE_TOKEN
+//     is unset/blank -- detected and failed closed BEFORE any request
+//     is even attempted (see control-plane-client.ts's
+//     transitionIncidentStatus), never an unauthenticated request sent
+//     and hoped-for.
+export type BackendErrorKind =
+  | "not_found"
+  | "validation"
+  | "unavailable"
+  | "malformed"
+  | "conflict"
+  | "unauthorized"
+  | "configuration";
 
 export class BackendError extends Error {
   readonly kind: BackendErrorKind;
@@ -31,10 +53,22 @@ export function fail<T = never>(kind: BackendErrorKind, message: string): Backen
   return { ok: false, error: new BackendError(kind, message) };
 }
 
-type GetJsonResult =
+type JsonResult =
   | { status: number; body: unknown; parseError: false }
   | { status: number; body: null; parseError: true }
   | { networkError: true };
+
+async function parseResponse(response: Response): Promise<JsonResult> {
+  const text = await response.text();
+  if (text.length === 0) {
+    return { status: response.status, body: null, parseError: false };
+  }
+  try {
+    return { status: response.status, body: JSON.parse(text), parseError: false };
+  } catch {
+    return { status: response.status, body: null, parseError: true };
+  }
+}
 
 /**
  * Bounded-timeout GET. Never throws: a timeout, connection refusal, or
@@ -43,25 +77,72 @@ type GetJsonResult =
  * unreachable" from "the backend answered with an error" without a
  * try/catch of its own.
  */
-export async function getJson(url: string, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<GetJsonResult> {
+export async function getJson(url: string, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<JsonResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
-    const text = await response.text();
-    if (text.length === 0) {
-      return { status: response.status, body: null, parseError: false };
-    }
-    try {
-      return { status: response.status, body: JSON.parse(text), parseError: false };
-    } catch {
-      return { status: response.status, body: null, parseError: true };
-    }
+    return await parseResponse(response);
   } catch {
     return { networkError: true };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Bounded-timeout JSON mutation request, generic over the HTTP method
+ * -- the single place that actually calls `fetch` for a
+ * body-carrying request, so `postJson`/`patchJson` can never silently
+ * diverge from each other's timeout/parse/no-store/never-throws
+ * behavior. Same never-throws contract as getJson. `headers` is
+ * merged in on top of `Content-Type: application/json` -- used by
+ * transitionIncidentStatus to attach `Authorization: Bearer <token>`
+ * without this module ever needing to know what a token is.
+ */
+async function requestJson(
+  method: "POST" | "PATCH",
+  url: string,
+  payload: unknown,
+  headers: Record<string, string>,
+  timeoutMs: number,
+): Promise<JsonResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    return await parseResponse(response);
+  } catch {
+    return { networkError: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Bounded-timeout POST with a JSON body -- e.g. createAgentRun (resource creation). */
+export async function postJson(
+  url: string,
+  payload: unknown,
+  headers: Record<string, string> = {},
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<JsonResult> {
+  return requestJson("POST", url, payload, headers, timeoutMs);
+}
+
+/** Bounded-timeout PATCH with a JSON body -- e.g. transitionIncidentStatus (the real control-plane lifecycle contract is PATCH, never POST). */
+export async function patchJson(
+  url: string,
+  payload: unknown,
+  headers: Record<string, string> = {},
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<JsonResult> {
+  return requestJson("PATCH", url, payload, headers, timeoutMs);
 }
 
 /** Builds a query string, omitting any parameter whose value is undefined. */

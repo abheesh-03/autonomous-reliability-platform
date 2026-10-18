@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getAgentRun, getAgentRunHistory } from "../lib/server/agent-runtime-client";
+import { createAgentRun, getAgentRun, getAgentRunHistory } from "../lib/server/agent-runtime-client";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status });
@@ -165,5 +165,76 @@ describe("getAgentRunHistory", () => {
     const result = await getAgentRunHistory(VALID_HISTORY.run_id);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.kind).toBe("not_found");
+  });
+});
+
+describe("createAgentRun", () => {
+  const INCIDENT_ID = "22222222-2222-2222-2222-222222222222";
+
+  it("sends exactly one real POST (never PATCH) with {incident_id} and no more", async () => {
+    // Regression guard, paired with transitionIncidentStatus's own
+    // PATCH regression test in control-plane-client.test.ts: this
+    // observes the actual RequestInit.method agent-runtime-service's
+    // real POST /api/v1/agent-runs contract requires, so a future
+    // http.ts change that accidentally routes this call through
+    // patchJson (or any non-POST method) would fail this test.
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(201, { ...VALID_AGENT_RUN, incident_id: INCIDENT_ID }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createAgentRun(INCIDENT_ID);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://agent-runtime-service:8003/api/v1/agent-runs");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ incident_id: INCIDENT_ID });
+  });
+
+  it("returns the seeded AgentRun on 201", async () => {
+    const seeded = { ...VALID_AGENT_RUN, incident_id: INCIDENT_ID };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(201, seeded)));
+
+    const result = await createAgentRun(INCIDENT_ID);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data).toEqual(seeded);
+  });
+
+  it("categorizes a 422 as validation", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(422, { detail: "invalid incident_id" })));
+    const result = await createAgentRun(INCIDENT_ID);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("validation");
+  });
+
+  it("categorizes a network-level failure as unavailable, never throwing", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED")));
+    const result = await createAgentRun(INCIDENT_ID);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("unavailable");
+  });
+
+  it("categorizes a 503 as unavailable", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(503, { detail: "unavailable" })));
+    const result = await createAgentRun(INCIDENT_ID);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("unavailable");
+  });
+
+  it("categorizes a non-JSON body as malformed", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("<html>", { status: 201 })));
+    const result = await createAgentRun(INCIDENT_ID);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("malformed");
+  });
+
+  it("performs no automatic retry on an ambiguous/network failure -- exactly one call, ever", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("ETIMEDOUT"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createAgentRun(INCIDENT_ID);
+
+    expect(result.ok).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -84,18 +84,19 @@
 #     (it has no use for either — it never calls a write-capable
 #     control-plane endpoint) and holds no PostgreSQL credentials at
 #     all.
-#   - web-console (Phase 9 Stage 2): the operator web console. A
-#     Next.js App Router app rendering real, READ-ONLY control-plane
+#   - web-console (Phase 9 Stage 4): the operator web console. A
+#     Next.js App Router app rendering real control-plane/agent-runtime
 #     data server-side (incident list/detail, audit timeline,
-#     remediation history) plus a /system health fan-out across all
-#     four backends' own /health/live + /health/ready. Holds no
-#     PostgreSQL credential, and still holds neither
-#     CONTROL_PLANE_LIFECYCLE_TOKEN nor
-#     CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN (those arrive once a
-#     later stage actually implements a mutation through server-side
-#     BFF Route Handlers -- see
-#     docs/architecture/phase-9-web-console.md). Never given any of the
-#     other five write-capable control-plane/tool-gateway/payment
+#     remediation history, durable AgentRun/investigation view) plus a
+#     /system health fan-out across all four backends. Holds no
+#     PostgreSQL credential. As of Stage 4 it holds its first and only
+#     operator credential, CONTROL_PLANE_LIFECYCLE_TOKEN (server-side
+#     only, reused from the existing Phase 3D secret, never duplicated),
+#     to start a durable AI investigation (incident -> investigating
+#     -> a seeded, NOT YET EXECUTED AgentRun -- never a resume/execute
+#     call from this BFF). Still holds neither
+#     CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN nor any of the other
+#     five write-capable control-plane/tool-gateway/payment
 #     tokens under any circumstance.
 #
 # Configuration comes entirely from environment variables (see
@@ -840,23 +841,28 @@ services:
       retries: 5
       start_period: 15s
 
-  # Phase 9 Stage 2: the operator web console now reads real, read-only
-  # data from control-plane (incidents, audit timeline, remediation
-  # history) and fans out to all four backends' own /health/live +
-  # /health/ready for the /system page. Still holds no operator
-  # credential (CONTROL_PLANE_LIFECYCLE_TOKEN /
-  # CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN arrive only once a later
-  # stage implements a mutation -- see
-  # docs/architecture/phase-9-web-console.md). The four WEB_CONSOLE_*_URL
-  # variables below are plain internal Docker DNS URLs, never secrets,
-  # and are never exposed via NEXT_PUBLIC_*. Deliberately still has NO
-  # depends_on on any of the four backends: the /system page exists
-  # specifically to show a backend as unavailable, so this container
-  # must remain independently startable (and stay up) even if every
-  # monitored service is down -- a depends_on here would misrepresent
-  # that and could prevent this container from starting at all during
-  # a real backend outage, exactly when an operator most needs to load
-  # this page.
+  # Phase 9 Stage 4: the operator web console now has its first
+  # mutation boundary -- Start AI Investigation (BFF-only, same-origin;
+  # the browser never calls control-plane/agent-runtime-service
+  # directly and never holds any token). This is why
+  # CONTROL_PLANE_LIFECYCLE_TOKEN now appears here: it is the SAME
+  # Phase 3D secret control-plane already holds above, reused (never
+  # duplicated), held server-side only (lib/server/control-plane-client.ts),
+  # never via NEXT_PUBLIC_*. Still holds NONE of the other six
+  # protected tokens -- CONTROL_PLANE_WEBHOOK_TOKEN,
+  # CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN,
+  # CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN,
+  # CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN,
+  # TOOL_GATEWAY_EXECUTION_TOKEN, PAYMENT_FAULT_INJECTION_TOKEN,
+  # PAYMENT_REMEDIATION_TOKEN -- see
+  # docs/architecture/phase-9-web-console.md. The four
+  # WEB_CONSOLE_*_URL variables are plain internal Docker DNS URLs,
+  # never secrets, and are never exposed via NEXT_PUBLIC_*.
+  # Deliberately still has NO depends_on on any backend: the /system
+  # page exists specifically to show a backend as unavailable, and the
+  # Start action itself safely reports "unavailable" rather than
+  # requiring control-plane to be up merely for this container to
+  # start.
   web-console:
     build:
       context: ./services/web-console
@@ -866,6 +872,7 @@ services:
       WEB_CONSOLE_AGENT_RUNTIME_URL: http://agent-runtime-service:8003
       WEB_CONSOLE_INVESTIGATOR_URL: http://investigator-service:8001
       WEB_CONSOLE_RETRIEVAL_URL: http://retrieval-service:8002
+      CONTROL_PLANE_LIFECYCLE_TOKEN: ${CONTROL_PLANE_LIFECYCLE_TOKEN:-}
     ports:
       - "127.0.0.1:3101:3101"
     healthcheck:

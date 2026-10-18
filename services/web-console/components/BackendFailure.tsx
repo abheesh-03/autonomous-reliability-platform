@@ -8,6 +8,9 @@ const MESSAGES: Record<BackendErrorKind, string> = {
   validation: "The request was rejected as invalid.",
   unavailable: "Control plane unavailable. Try again shortly.",
   malformed: "Received an unexpected response from the backend.",
+  conflict: "The requested change is no longer valid for the current state.",
+  unauthorized: "This server could not authenticate to the backend.",
+  configuration: "This server is not configured correctly for this action.",
 };
 
 export function BackendFailure({ kind }: { kind: BackendErrorKind }) {

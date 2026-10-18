@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { BackendFailure } from "../../../components/BackendFailure";
+import { StartInvestigationControl } from "../../../components/StartInvestigationControl";
 import { SeverityBadge, StatusBadgePill } from "../../../components/StatusBadge";
 import { formatTimestamp } from "../../../lib/format";
 import { fail, type BackendResult } from "../../../lib/server/http";
@@ -84,6 +85,16 @@ export default async function IncidentDetailPage({
         <dt style={{ color: "#9fb3c8" }}>Incident ID</dt>
         <dd style={{ color: "#6b7f93", fontSize: "0.85rem" }}>{incident.id}</dd>
       </dl>
+
+      <section style={{ marginTop: "1.5rem" }}>
+        {incident.status === "open" || incident.status === "acknowledged" || incident.status === "investigating" ? (
+          <StartInvestigationControl incidentId={incident.id} incidentStatus={incident.status} />
+        ) : (
+          <p style={{ color: "#9fb3c8" }}>
+            Investigation cannot be started while the incident is {incident.status}.
+          </p>
+        )}
+      </section>
 
       <section style={{ marginTop: "2rem" }}>
         <h2>Audit timeline</h2>
