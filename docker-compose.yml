@@ -84,6 +84,17 @@
 #     (it has no use for either — it never calls a write-capable
 #     control-plane endpoint) and holds no PostgreSQL credentials at
 #     all.
+#   - web-console (Phase 9 Stage 1): the operator web console
+#     foundation. A Next.js App Router shell -- product identity,
+#     navigation structure, and a container healthcheck endpoint only.
+#     Makes no backend calls, holds no PostgreSQL credentials, and
+#     holds neither CONTROL_PLANE_LIFECYCLE_TOKEN nor
+#     CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN yet (those arrive once a
+#     later stage actually wires real incident/remediation data through
+#     server-side BFF Route Handlers -- see
+#     docs/architecture/phase-9-web-console.md). Never given any of the
+#     other five write-capable control-plane/tool-gateway/payment
+#     tokens under any circumstance.
 #
 # Configuration comes entirely from environment variables (see
 # .env.example). Copy .env.example to .env and adjust values locally;
@@ -822,6 +833,29 @@ services:
       GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Phase 9 Stage 1: the operator web console foundation only -- a
+  # minimal Next.js App Router shell with no backend calls, no incident
+  # data, and no operator credentials (CONTROL_PLANE_LIFECYCLE_TOKEN /
+  # CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN arrive in a later stage,
+  # once this service actually needs them -- see
+  # docs/architecture/phase-9-web-console.md). Deliberately has NO
+  # depends_on on control-plane/agent-runtime-service: this stage does
+  # not call either, so it is independently startable, and adding a
+  # dependency it does not yet need would misrepresent what this
+  # container actually requires to run.
+  web-console:
+    build:
+      context: ./services/web-console
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3101:3101"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3101/api/health', { signal: AbortSignal.timeout(3000) }).then(r => { if (!r.ok) process.exit(1); process.exit(0); }).catch(() => process.exit(1));"]
       interval: 5s
       timeout: 5s
       retries: 5

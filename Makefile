@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -69,6 +69,12 @@ help: ## Show available targets
 	@echo "  test-remediation-cleanup-resilience  Phase 8 correction-round focused test: EXIT cleanup tolerates a simulated payment_fault_get failure (no Docker required)"
 	@echo "  remediation-approve Approve a pending remediation proposal: make remediation-approve PROPOSAL_ID=<uuid> [COMMENT=\"...\"]"
 	@echo "  remediation-reject  Reject a pending remediation proposal: make remediation-reject PROPOSAL_ID=<uuid> [COMMENT=\"...\"]"
+	@echo "  web-console-install Install web-console dependencies (npm ci on Node 24, via Docker)"
+	@echo "  web-console-typecheck Run web-console TypeScript typecheck on Node 24 (via Docker)"
+	@echo "  web-console-lint    Run web-console ESLint on Node 24 (via Docker)"
+	@echo "  web-console-test    Run web-console unit/component tests on Node 24 (via Docker)"
+	@echo "  web-console-build   Build the web-console Docker image"
+	@echo "  web-console-logs    Show recent web-console logs"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -503,3 +509,33 @@ remediation-reject: ## Reject a pending remediation proposal: make remediation-r
 		-H "Authorization: Bearer $$token" \
 		-H "Content-Type: application/json" \
 		-d "$$body" | python3 -m json.tool
+
+# Phase 9 Stage 1: web-console foundation. Host Node differs from this
+# repo's Node 24 target; running npm inside node:24 keeps results
+# reproducible and consistent with CI regardless of the developer's
+# local Node version -- same convention as notification-test. Split
+# into separate targets (rather than one chained notification-test-style
+# target) since node_modules installed by web-console-install persists
+# on the host via the bind mount below and is reused by every
+# subsequent target.
+web-console-install: ## Install web-console dependencies (npm ci on Node 24, via Docker)
+	docker run --rm -v "$(CURDIR)/services/web-console:/app" -w /app node:24 \
+		npm ci
+
+web-console-typecheck: ## Run web-console TypeScript typecheck on Node 24 (via Docker)
+	docker run --rm -v "$(CURDIR)/services/web-console:/app" -w /app node:24 \
+		npm run typecheck
+
+web-console-lint: ## Run web-console ESLint on Node 24 (via Docker)
+	docker run --rm -v "$(CURDIR)/services/web-console:/app" -w /app node:24 \
+		npm run lint
+
+web-console-test: ## Run web-console unit/component tests on Node 24 (via Docker)
+	docker run --rm -v "$(CURDIR)/services/web-console:/app" -w /app node:24 \
+		npm test
+
+web-console-build: ## Build the web-console Docker image
+	docker compose build web-console
+
+web-console-logs: ## Show recent web-console logs
+	docker compose logs --tail=100 web-console

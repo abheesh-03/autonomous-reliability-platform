@@ -265,6 +265,34 @@ jobs:
         working-directory: services/notification-service
         run: npm run build
 
+      # Phase 9 Stage 1: web-console, the tenth backend/frontend
+      # service -- reuses the SAME Node 24 toolchain just set up above
+      # (no second actions/setup-node step needed; its own
+      # package-lock.json just isn't covered by the cache-dependency-path
+      # above, so its own npm ci below gets no cache hit -- a minor
+      # performance nuance, not a correctness issue). Stage 1 is a
+      # health-only shell: no backend calls, no operator credentials, so
+      # these steps need nothing from the Compose/.env setup below.
+      - name: Install web-console dependencies
+        working-directory: services/web-console
+        run: npm ci
+
+      - name: Run web-console typecheck
+        working-directory: services/web-console
+        run: npm run typecheck
+
+      - name: Run web-console lint
+        working-directory: services/web-console
+        run: npm run lint
+
+      - name: Run web-console tests
+        working-directory: services/web-console
+        run: npm test
+
+      - name: Build web-console
+        working-directory: services/web-console
+        run: npm run build
+
       - name: Create runtime .env from .env.example
         run: cp .env.example .env
 
