@@ -70,3 +70,16 @@ logs/
 coverage/
 *.cover
 .coverage
+
+# --- Phase 11A incident intelligence catalog ---
+# The generic build/ and coverage/ patterns above are unanchored, so
+# they would otherwise also swallow catalog/build/ (a real, partially
+# version-controlled generated-artifact directory) and catalog/coverage/
+# (a real Python source package -- tracker.py -- not a generated
+# coverage report). Explicitly un-ignore both, then re-ignore only the
+# genuinely ad-hoc, non-reviewable local outputs under catalog/build/
+# (anything written to a non-default --output path).
+!catalog/build/
+!catalog/coverage/
+catalog/build/local/
+catalog/build/*.local.json

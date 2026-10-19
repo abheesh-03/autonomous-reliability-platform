@@ -1,0 +1,429 @@
+{
+  "total_scenarios": 800,
+  "dimension_counts": {
+    "catalogued": 800,
+    "taxonomy_reviewed": 0,
+    "instrumented": 0,
+    "detector_implemented": 0,
+    "detection_validated": 0,
+    "investigation_validated": 0,
+    "remediation_supported": 0,
+    "recovery_verification_validated": 0
+  },
+  "coverage_by_domain": {
+    "D01": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D02": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D03": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D04": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D05": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D06": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D07": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D08": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D09": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D10": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D11": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D12": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D13": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D14": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D15": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D16": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D17": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D18": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D19": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D20": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D21": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D22": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D23": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D24": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D25": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D26": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D27": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D28": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D29": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D30": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D31": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D32": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D33": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D34": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D35": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D36": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D37": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D38": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D39": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    },
+    "D40": {
+      "catalogued": 20,
+      "taxonomy_reviewed": 0,
+      "instrumented": 0,
+      "detector_implemented": 0,
+      "detection_validated": 0,
+      "investigation_validated": 0,
+      "remediation_supported": 0,
+      "recovery_verification_validated": 0
+    }
+  },
+  "coverage_by_detector_family": {},
+  "unresolved_gaps": [
+    "no scenario has recorded evidence for dimension 'taxonomy_reviewed' yet",
+    "no scenario has recorded evidence for dimension 'instrumented' yet",
+    "no scenario has recorded evidence for dimension 'detector_implemented' yet",
+    "no scenario has recorded evidence for dimension 'detection_validated' yet",
+    "no scenario has recorded evidence for dimension 'investigation_validated' yet",
+    "no scenario has recorded evidence for dimension 'remediation_supported' yet",
+    "no scenario has recorded evidence for dimension 'recovery_verification_validated' yet"
+  ],
+  "submitted_evidence_count": 0,
+  "verified_evidence_count": 0,
+  "unverifiable_evidence_count": 0,
+  "rejected_evidence": []
+}

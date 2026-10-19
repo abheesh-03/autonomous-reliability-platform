@@ -325,6 +325,35 @@ jobs:
       - name: Run Phase 10 evaluation harness's own unit/regression/negative-control tests
         run: python -m pytest evals/tests -c evals/pyproject.toml -v
 
+      # Phase 11A: incident intelligence catalog -- deliberately placed
+      # HERE, immediately after Phase 10's own fast offline gate and
+      # still BEFORE the expensive Docker/Compose acceptance section
+      # below (same placement rationale as Phase 10's own comment
+      # above). Reuses the same Python 3.13 interpreter already set up
+      # for Phase 10; pydantic==2.13.5 and pytest==9.1.1 are already
+      # installed transitively (the same pins catalog/requirements.txt
+      # itself specifies), so this install is a no-op confirmation, not
+      # a second real dependency resolution. No Docker, no database, no
+      # LLM/embedding API call, no production credential -- this step
+      # only parses/validates/audits catalog/'s own synthetic and
+      # source-controlled data, and never touches services/**,
+      # database/**, observability/**, knowledge/**, or evals/**. See
+      # scripts/verify-incident-catalog.sh (the equivalent LOCAL,
+      # Docker-wrapped convenience) and
+      # docs/architecture/phase-11a-incident-intelligence.md.
+      - name: Install Phase 11A catalog dependencies
+        run: pip install -q -r catalog/requirements.txt
+
+      - name: Run Phase 11A catalog test suite (Gates B-G)
+        run: python -m pytest catalog/tests -v
+
+      - name: Run Phase 11A catalog CLI (build/validate/audit/coverage) against the real source
+        run: |
+          python -m catalog build
+          python -m catalog validate
+          python -m catalog audit
+          python -m catalog coverage
+
       - name: Create runtime .env from .env.example
         run: cp .env.example .env
 

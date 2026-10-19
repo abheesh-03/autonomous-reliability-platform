@@ -1,0 +1,4 @@
+# Phase 11A catalog's own direct dependencies -- pinned to match the
+# same versions already used elsewhere in this repo's Python services.
+pydantic==2.13.5
+pytest==9.1.1

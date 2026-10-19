@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -77,6 +77,9 @@ help: ## Show available targets
 	@echo "  web-console-logs    Show recent web-console logs"
 	@echo "  verify-web-console  Phase 9 real-evidence acceptance: browser-driven operator workflow, human-approved remediation, monitoring-resolved"
 	@echo "  eval-offline        Phase 10 deterministic offline AI evaluation: citation validity, retrieval relevance, investigation quality, remediation safety, regression"
+	@echo "  catalog-validate    Phase 11A: run the catalog/ test suite + CLI build/validate against the real 800-scenario source (no Docker Compose, no database)"
+	@echo "  catalog-audit       Phase 11A: run the Gate C taxonomy review heuristics, writing REVIEW_REQUIRED findings to catalog/build/taxonomy_review.v1.json"
+	@echo "  catalog-coverage    Phase 11A: compute the Gate F coverage report (honest, evidence-only; expect all-zero beyond 'catalogued' until real detectors exist)"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -562,3 +565,12 @@ verify-web-console: ## Phase 9 real-evidence acceptance: browser-driven operator
 # scripts/verify-evals-offline.sh and evals/README.md.
 eval-offline: ## Phase 10 deterministic offline AI evaluation: citation validity, retrieval relevance, investigation quality, remediation safety, regression
 	./scripts/verify-evals-offline.sh
+
+catalog-validate: ## Phase 11A: run the catalog/ test suite + CLI build/validate against the real 800-scenario source (no Docker Compose, no database)
+	./scripts/verify-incident-catalog.sh
+
+catalog-audit: ## Phase 11A: run the Gate C taxonomy review heuristics, writing REVIEW_REQUIRED findings to catalog/build/taxonomy_review.v1.json
+	docker run --rm -v "$(CURDIR):/app" -w /app python:3.13-slim bash -c "pip install -q -r catalog/requirements.txt && python -m catalog audit"
+
+catalog-coverage: ## Phase 11A: compute the Gate F coverage report (honest, evidence-only; expect all-zero beyond 'catalogued' until real detectors exist)
+	docker run --rm -v "$(CURDIR):/app" -w /app python:3.13-slim bash -c "pip install -q -r catalog/requirements.txt && python -m catalog coverage"
