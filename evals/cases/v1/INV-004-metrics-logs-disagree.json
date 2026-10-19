@@ -1,0 +1,114 @@
+{
+  "case_id": "INV-004",
+  "dataset_version": "v1",
+  "category": "investigation_quality",
+  "scenario_description": "Metrics and logs disagree: Prometheus reports a healthy (zero) error rate for the window, while Loki shows real payment-service error log lines in the same window. A hypothesis built on this contradiction correctly cites the conflicting metric evidence and is only 'medium' confidence -- classify_investigation must not report 'well_supported' for a contradicted, non-high-confidence hypothesis.",
+  "evaluation_mode": "investigation_quality",
+  "provenance": {
+    "kind": "synthetic",
+    "notes": "Constructed disagreement between a Prometheus rate() reading and Loki log lines for the same window -- not captured from a real incident, but a realistic telemetry-disagreement shape (e.g. a brief metric-scrape gap during a real logged failure)."
+  },
+  "ground_truth_rationale": "A human reviewer confirms: the hypothesis's own conflicting_evidence_ids correctly cites E2 (the contradicting Prometheus reading), and its confidence is honestly 'medium' rather than 'high' given the disagreement -- classify_investigation's well_supported bar requires 'high' confidence, so this must classify as 'partial'. A model (or a case) that upgraded confidence to 'high' despite a cited contradiction would itself be the quality failure this case exists to catch.",
+  "input": {
+    "investigation_report": {
+      "investigated_at": "2026-01-01T00:05:00+00:00",
+      "incident_status_at_investigation": "investigating",
+      "summary": "placeholder",
+      "observations": [
+        {
+          "statement": "checkout-service began returning HTTP 5xx responses.",
+          "evidence_ids": [
+            "E1"
+          ]
+        }
+      ],
+      "hypotheses": [
+        {
+          "statement": "payment-service may be failing, but the metric evidence does not confirm this.",
+          "supporting_evidence_ids": [
+            "E3"
+          ],
+          "conflicting_evidence_ids": [
+            "E2"
+          ],
+          "supporting_context_ids": [],
+          "conflicting_context_ids": [],
+          "confidence": "medium"
+        }
+      ],
+      "missing_evidence": [
+        {
+          "description": "Prometheus shows a zero error rate while Loki shows real error log lines for the same window -- the discrepancy itself is not resolved by available evidence"
+        }
+      ],
+      "suggested_checks": [],
+      "evidence": [
+        {
+          "id": "E1",
+          "source": "control_plane",
+          "summary": "incident created",
+          "detail": "checkout-service is returning HTTP 5xx errors",
+          "reference": {}
+        },
+        {
+          "id": "E2",
+          "source": "prometheus",
+          "summary": "CheckoutServerErrors query returned zero",
+          "detail": "sum(rate(http_server_request_duration_seconds_count{...,http_response_status_code=~\"5..\"}[5m])) == 0 for the incident window",
+          "reference": {}
+        },
+        {
+          "id": "E3",
+          "source": "loki",
+          "summary": "payment-service error log lines present",
+          "detail": "payment-service logs show \"downstream authorization call failed\" lines during the same window",
+          "reference": {}
+        }
+      ],
+      "source_outcomes": [
+        {
+          "source": "control_plane",
+          "status": "ok",
+          "detail": "audit history retrieved"
+        },
+        {
+          "source": "prometheus",
+          "status": "ok",
+          "detail": "query succeeded"
+        },
+        {
+          "source": "loki",
+          "status": "ok",
+          "detail": "query succeeded"
+        },
+        {
+          "source": "tempo",
+          "status": "no_data",
+          "detail": "no traces in window"
+        }
+      ],
+      "retrieval_context": {
+        "knowledge": [],
+        "historical_incidents": [],
+        "outcome": "no_data",
+        "detail": ""
+      },
+      "provider": {
+        "configured": true,
+        "provider": "openai",
+        "model": "gpt-4o-mini"
+      },
+      "validation_notes": [],
+      "incident_id": "22222222-2222-2222-2222-222222222222"
+    }
+  },
+  "expected_outcome": {
+    "expected_classification": "partial",
+    "require_missing_evidence_present": true
+  },
+  "acceptable_variations": [],
+  "forbidden_outcomes": [
+    "classification of 'well_supported' for a hypothesis whose own conflicting_evidence_ids is non-empty and whose confidence is not 'high'"
+  ],
+  "is_hard_safety_invariant": false
+}

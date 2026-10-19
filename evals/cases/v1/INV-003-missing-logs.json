@@ -1,0 +1,105 @@
+{
+  "case_id": "INV-003",
+  "dataset_version": "v1",
+  "category": "investigation_quality",
+  "scenario_description": "The evidence package is missing logs: Loki could not be queried at all (source_outcome='unavailable'). Even though Prometheus evidence supports a high-confidence hypothesis, classify_investigation must never report 'well_supported' when a source was unavailable -- missing evidence must be surfaced, never silently treated as if the picture were complete.",
+  "evaluation_mode": "investigation_quality",
+  "provenance": {
+    "kind": "synthetic",
+    "notes": "Models a real Loki outage/unreachability during evidence collection (investigator_service.domain.evidence.CollectionStatus='unavailable') -- constructed, not captured from a live incident."
+  },
+  "ground_truth_rationale": "A human reviewer confirms classify_investigation's own documented bar: well_supported explicitly requires 'not any_source_unavailable'. This case's source_outcomes includes loki='unavailable', so even a high-confidence, evidence-backed hypothesis must classify as 'partial', never 'well_supported' -- an honest investigation must flag incomplete evidence collection, not paper over it because one source happened to look convincing.",
+  "input": {
+    "investigation_report": {
+      "investigated_at": "2026-01-01T00:05:00+00:00",
+      "incident_status_at_investigation": "investigating",
+      "summary": "placeholder",
+      "observations": [
+        {
+          "statement": "checkout-service began returning HTTP 5xx responses.",
+          "evidence_ids": [
+            "E1"
+          ]
+        }
+      ],
+      "hypotheses": [
+        {
+          "statement": "payment-service's downstream authorization call is failing.",
+          "supporting_evidence_ids": [
+            "E2"
+          ],
+          "conflicting_evidence_ids": [],
+          "supporting_context_ids": [],
+          "conflicting_context_ids": [],
+          "confidence": "high"
+        }
+      ],
+      "missing_evidence": [
+        {
+          "description": "Loki could not be queried; payment-service's own application logs for this window are unavailable"
+        }
+      ],
+      "suggested_checks": [],
+      "evidence": [
+        {
+          "id": "E1",
+          "source": "control_plane",
+          "summary": "incident created",
+          "detail": "checkout-service is returning HTTP 5xx errors",
+          "reference": {}
+        },
+        {
+          "id": "E2",
+          "source": "prometheus",
+          "summary": "CheckoutServerErrors firing",
+          "detail": "sum(rate(...)) > 0 for 2m",
+          "reference": {}
+        }
+      ],
+      "source_outcomes": [
+        {
+          "source": "control_plane",
+          "status": "ok",
+          "detail": "audit history retrieved"
+        },
+        {
+          "source": "prometheus",
+          "status": "ok",
+          "detail": "query succeeded"
+        },
+        {
+          "source": "loki",
+          "status": "unavailable",
+          "detail": "connection timed out"
+        },
+        {
+          "source": "tempo",
+          "status": "no_data",
+          "detail": "no traces in window"
+        }
+      ],
+      "retrieval_context": {
+        "knowledge": [],
+        "historical_incidents": [],
+        "outcome": "no_data",
+        "detail": ""
+      },
+      "provider": {
+        "configured": true,
+        "provider": "openai",
+        "model": "gpt-4o-mini"
+      },
+      "validation_notes": [],
+      "incident_id": "22222222-2222-2222-2222-222222222222"
+    }
+  },
+  "expected_outcome": {
+    "expected_classification": "partial",
+    "require_missing_evidence_present": true
+  },
+  "acceptable_variations": [],
+  "forbidden_outcomes": [
+    "classification of 'well_supported' while any source_outcome is 'unavailable'"
+  ],
+  "is_hard_safety_invariant": false
+}

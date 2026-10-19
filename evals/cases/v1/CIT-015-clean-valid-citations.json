@@ -1,0 +1,55 @@
+{
+  "case_id": "CIT-015",
+  "dataset_version": "v1",
+  "category": "citation",
+  "scenario_description": "POSITIVE CONTROL: the provider cites only REAL evidence ids that were actually shown. The real parse_and_validate must retain both the observation and the hypothesis unchanged (aside from the always-rebuilt summary), with zero fabrication notes -- proving the harness does not simply fail/strip everything regardless of input.",
+  "evaluation_mode": "citation",
+  "provenance": {
+    "kind": "synthetic",
+    "notes": "A clean, well-formed provider response citing only real ids -- the baseline this dataset's adversarial citation cases (CIT-008, CIT-009) are deliberately contrasted against."
+  },
+  "ground_truth_rationale": "A human reviewer confirms E1 and E2 are both real items in this package and were both within build_prompts' own shown_evidence_ids (a 2-item package well under any size bound). A citation validator that dropped a well-formed, real citation would be exactly as broken as one that kept a fabricated one.",
+  "input": {
+    "evidence_package": {
+      "incident": {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "source": "alertmanager",
+        "source_fingerprint": "fp-1",
+        "title": "checkout-service is returning HTTP 5xx errors",
+        "description": null,
+        "severity": "critical",
+        "status": "investigating",
+        "first_seen_at": "2026-01-01T00:00:00+00:00",
+        "last_seen_at": "2026-01-01T00:00:00+00:00",
+        "resolved_at": null,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00"
+      },
+      "events": [],
+      "events_total": 0,
+      "items": [
+        {"id": "E1", "source": "control_plane", "summary": "incident created", "detail": "checkout-service is returning HTTP 5xx errors", "reference": {}},
+        {"id": "E2", "source": "prometheus", "summary": "CheckoutServerErrors firing", "detail": "sum(rate(...)) > 0 for 2m", "reference": {}}
+      ],
+      "source_outcomes": [
+        {"source": "control_plane", "status": "ok", "detail": "audit history retrieved"},
+        {"source": "prometheus", "status": "ok", "detail": "query succeeded"}
+      ],
+      "collected_at": "2026-01-01T00:05:00+00:00"
+    },
+    "retrieval_context": null,
+    "provider_response_text": "{\"summary\": \"x\", \"observations\": [{\"statement\": \"checkout-service began returning HTTP 5xx responses\", \"evidence_ids\": [\"E1\"]}], \"hypotheses\": [{\"statement\": \"a real, evidence-backed hypothesis\", \"supporting_evidence_ids\": [\"E2\"], \"conflicting_evidence_ids\": [], \"supporting_context_ids\": [], \"conflicting_context_ids\": [], \"confidence\": \"medium\"}], \"missing_evidence\": [], \"suggested_checks\": []}"
+  },
+  "expected_outcome": {
+    "min_surviving_observations": 1,
+    "max_surviving_observations": 1,
+    "min_surviving_hypotheses": 1,
+    "max_surviving_hypotheses": 1,
+    "fabricated_evidence_ids_must_be_absent": ["E99"]
+  },
+  "acceptable_variations": [],
+  "forbidden_outcomes": [
+    "a real, well-formed citation being dropped despite citing only real, shown ids"
+  ],
+  "is_hard_safety_invariant": false
+}

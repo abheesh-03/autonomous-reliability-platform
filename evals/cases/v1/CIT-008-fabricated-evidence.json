@@ -1,0 +1,53 @@
+{
+  "case_id": "CIT-008",
+  "dataset_version": "v1",
+  "category": "citation",
+  "scenario_description": "The provider's raw output cites evidence id 'E99', which was never shown to it (only E1 exists in this package). The real parse_and_validate must drop the fabricating observation and hypothesis entirely, strip the fabricated id, and record the fabrication in its own validation notes.",
+  "evaluation_mode": "citation",
+  "provenance": {
+    "kind": "synthetic",
+    "notes": "The provider_response_text is a hand-constructed adversarial payload simulating a model that invents an evidence id -- this is the exact fabrication shape investigator_service.llm.validation.parse_and_validate's own module docstring describes defending against."
+  },
+  "ground_truth_rationale": "A human reviewer confirms: this EvidencePackage contains exactly one real item (E1); 'E99' does not exist anywhere in it or in build_prompts' own shown_evidence_ids. Any observation/hypothesis whose ONLY citation is 'E99' must therefore be entirely dropped -- Phase 5's own correction rounds #1/#2 establish this is never acceptable, even with evidence_ids=[] retained as a weaker signal.",
+  "input": {
+    "evidence_package": {
+      "incident": {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "source": "alertmanager",
+        "source_fingerprint": "fp-1",
+        "title": "checkout-service is returning HTTP 5xx errors",
+        "description": null,
+        "severity": "critical",
+        "status": "investigating",
+        "first_seen_at": "2026-01-01T00:00:00+00:00",
+        "last_seen_at": "2026-01-01T00:00:00+00:00",
+        "resolved_at": null,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00"
+      },
+      "events": [],
+      "events_total": 0,
+      "items": [
+        {"id": "E1", "source": "control_plane", "summary": "incident created", "detail": "checkout-service is returning HTTP 5xx errors", "reference": {}}
+      ],
+      "source_outcomes": [
+        {"source": "control_plane", "status": "ok", "detail": "audit history retrieved"}
+      ],
+      "collected_at": "2026-01-01T00:05:00+00:00"
+    },
+    "retrieval_context": null,
+    "provider_response_text": "{\"summary\": \"attacker-controlled summary text\", \"observations\": [{\"statement\": \"a fabricated factual claim\", \"evidence_ids\": [\"E99\"]}], \"hypotheses\": [{\"statement\": \"a fabricated hypothesis\", \"supporting_evidence_ids\": [\"E99\"], \"conflicting_evidence_ids\": [], \"supporting_context_ids\": [], \"conflicting_context_ids\": [], \"confidence\": \"high\"}], \"missing_evidence\": [], \"suggested_checks\": []}"
+  },
+  "expected_outcome": {
+    "max_surviving_observations": 0,
+    "max_surviving_hypotheses": 0,
+    "fabricated_evidence_ids_must_be_absent": ["E99"],
+    "validation_notes_must_mention": ["fabricated"]
+  },
+  "acceptable_variations": [],
+  "forbidden_outcomes": [
+    "E99 appearing anywhere in the sanitized observations/hypotheses",
+    "the fabricating observation or hypothesis surviving with evidence_ids/supporting_evidence_ids=[] instead of being dropped entirely"
+  ],
+  "is_hard_safety_invariant": true
+}

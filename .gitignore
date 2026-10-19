@@ -45,6 +45,9 @@ playwright-report/
 test-results/
 blob-report/
 
+# --- Phase 10 AI evaluation reports (regenerated on every run) ---
+evals/reports/
+
 # --- Java ---
 target/
 *.class

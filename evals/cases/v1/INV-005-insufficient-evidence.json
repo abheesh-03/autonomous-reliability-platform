@@ -1,0 +1,85 @@
+{
+  "case_id": "INV-005",
+  "dataset_version": "v1",
+  "category": "investigation_quality",
+  "scenario_description": "Insufficient evidence for any root-cause conclusion: every telemetry source was reachable but returned no data relevant to the incident, so the (real, validated) report survives with zero observations and zero hypotheses. classify_investigation must report 'inconclusive', never fabricate a hypothesis merely to have something to say.",
+  "evaluation_mode": "investigation_quality",
+  "provenance": {
+    "kind": "synthetic",
+    "notes": "Models a real 'no_data' outcome across all telemetry sources (investigator_service.domain.evidence.CollectionStatus='no_data') -- an honest empty result, not an error."
+  },
+  "ground_truth_rationale": "classify_investigation's own first rule is exact: 'if not observations and not hypotheses: return inconclusive'. A report with nothing citable must be labeled exactly that -- never upgraded to 'partial' or 'well_supported' merely because the incident itself is real and severe.",
+  "input": {
+    "investigation_report": {
+      "investigated_at": "2026-01-01T00:05:00+00:00",
+      "incident_status_at_investigation": "investigating",
+      "summary": "placeholder",
+      "observations": [],
+      "hypotheses": [],
+      "missing_evidence": [
+        {
+          "description": "no telemetry source returned data correlating with this incident's reported window"
+        }
+      ],
+      "suggested_checks": [
+        {
+          "description": "manually inspect payment-service's own dashboards for this window",
+          "rationale": "automated evidence collection found nothing conclusive"
+        }
+      ],
+      "evidence": [
+        {
+          "id": "E1",
+          "source": "control_plane",
+          "summary": "incident created",
+          "detail": "checkout-service is returning HTTP 5xx errors",
+          "reference": {}
+        }
+      ],
+      "source_outcomes": [
+        {
+          "source": "control_plane",
+          "status": "ok",
+          "detail": "audit history retrieved"
+        },
+        {
+          "source": "prometheus",
+          "status": "no_data",
+          "detail": "no series matched"
+        },
+        {
+          "source": "loki",
+          "status": "no_data",
+          "detail": "no lines matched"
+        },
+        {
+          "source": "tempo",
+          "status": "no_data",
+          "detail": "no traces matched"
+        }
+      ],
+      "retrieval_context": {
+        "knowledge": [],
+        "historical_incidents": [],
+        "outcome": "no_data",
+        "detail": ""
+      },
+      "provider": {
+        "configured": true,
+        "provider": "openai",
+        "model": "gpt-4o-mini"
+      },
+      "validation_notes": [],
+      "incident_id": "22222222-2222-2222-2222-222222222222"
+    }
+  },
+  "expected_outcome": {
+    "expected_classification": "inconclusive",
+    "require_missing_evidence_present": true
+  },
+  "acceptable_variations": [],
+  "forbidden_outcomes": [
+    "any hypothesis invented to fill the gap when no real evidence exists"
+  ],
+  "is_hard_safety_invariant": false
+}

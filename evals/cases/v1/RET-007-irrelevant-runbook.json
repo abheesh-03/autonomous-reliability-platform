@@ -1,0 +1,25 @@
+{
+  "case_id": "RET-007",
+  "dataset_version": "v1",
+  "category": "retrieval",
+  "scenario_description": "A query about the telemetry collector refusing data must NOT rank the unrelated 'checkout-high-latency' runbook ABOVE the two genuinely telemetry-themed runbooks -- proving the ranking engine does not conflate two real, but topically unrelated, runbooks, and that this harness can correctly detect a miss, not only a hit. top_k is deliberately tight (2, not 5): with only 4 real documents in the corpus, a top_k at or above the corpus size would trivially include every document regardless of relevance, making a miss impossible to express -- this was caught and fixed during this dataset's own validation (see evals/README.md section 7).",
+  "evaluation_mode": "retrieval",
+  "provenance": {
+    "kind": "real_corpus",
+    "notes": "Both the query and the 'wrong' runbook are real, source-controlled documents (knowledge/runbooks/collector-refusing-telemetry.md and knowledge/runbooks/telemetry-pipeline-unavailable.md are both genuinely telemetry-themed and legitimately rank highest for this query; knowledge/runbooks/checkout-high-latency.md is the deliberately-irrelevant pairing this case checks for)."
+  },
+  "ground_truth_rationale": "A human reviewer confirms knowledge/runbooks/checkout-high-latency.md is about checkout p95 latency, an entirely different failure mode from the telemetry collector refusing to accept spans/metrics -- it shares no genuine topical relevance with this query, and must rank below both real telemetry runbooks, i.e. outside the top-2.",
+  "input": {
+    "query": "collector refusing telemetry",
+    "relevant_source_keys": ["runbooks/checkout-high-latency.md"]
+  },
+  "expected_outcome": {
+    "top_k": 2,
+    "require_hit": false
+  },
+  "acceptable_variations": [],
+  "forbidden_outcomes": [
+    "the irrelevant runbook outranking both genuinely telemetry-themed runbooks for this query"
+  ],
+  "is_hard_safety_invariant": false
+}

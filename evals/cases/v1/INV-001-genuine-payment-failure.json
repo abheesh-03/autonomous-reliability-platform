@@ -1,0 +1,115 @@
+{
+  "case_id": "INV-001",
+  "dataset_version": "v1",
+  "category": "investigation_quality",
+  "scenario_description": "A genuine checkout/payment authorization failure: Prometheus shows a real nonzero 5xx rate, Loki shows real payment-service error log lines, and the model's own hypothesis cites that real evidence with high confidence and no missing evidence -- this is the ground-truth-positive case classify_investigation's own well_supported bar exists for.",
+  "evaluation_mode": "investigation_quality",
+  "provenance": {
+    "kind": "synthetic",
+    "notes": "Evidence text is constructed to mirror the real shape of Phase 2/4's own CheckoutServerErrors telemetry (see observability/prometheus/rules/alerts.yml and scripts/simulate-failure.sh's payment-outage scenario) -- not captured from a live run, but modeled on it. Labeled synthetic per Gate B's own instruction; never claimed as observed production truth."
+  },
+  "ground_truth_rationale": "A human reviewer confirms: the hypothesis is grounded in two real, current-incident evidence items (E2 Prometheus, E3 Loki) that are mutually consistent (both indicate payment-service failures), the model declared high confidence, and no evidence source was unavailable and nothing is flagged missing -- classify_investigation's own well_supported bar should be met honestly, not because the harness lowered the bar to make this case pass.",
+  "input": {
+    "investigation_report": {
+      "investigated_at": "2026-01-01T00:05:00+00:00",
+      "incident_status_at_investigation": "investigating",
+      "summary": "placeholder -- classify_investigation never reads this field",
+      "observations": [
+        {
+          "statement": "checkout-service began returning HTTP 5xx responses.",
+          "evidence_ids": [
+            "E1"
+          ]
+        }
+      ],
+      "hypotheses": [
+        {
+          "statement": "payment-service's downstream authorization call is failing, causing checkout-service's 5xx responses.",
+          "supporting_evidence_ids": [
+            "E2",
+            "E3"
+          ],
+          "conflicting_evidence_ids": [],
+          "supporting_context_ids": [],
+          "conflicting_context_ids": [],
+          "confidence": "high"
+        }
+      ],
+      "missing_evidence": [],
+      "suggested_checks": [
+        {
+          "description": "check payment-service's own authorization dependency health dashboard",
+          "rationale": "narrow the failure to the authorization call specifically"
+        }
+      ],
+      "evidence": [
+        {
+          "id": "E1",
+          "source": "control_plane",
+          "summary": "incident created",
+          "detail": "checkout-service is returning HTTP 5xx errors",
+          "reference": {}
+        },
+        {
+          "id": "E2",
+          "source": "prometheus",
+          "summary": "CheckoutServerErrors firing",
+          "detail": "sum(rate(http_server_request_duration_seconds_count{service_name=\"checkout-service\",http_response_status_code=~\"5..\"}[5m])) > 0 for 2m",
+          "reference": {}
+        },
+        {
+          "id": "E3",
+          "source": "loki",
+          "summary": "payment-service authorization errors",
+          "detail": "payment-service logs show repeated \"downstream authorization call failed\" error lines during the incident window",
+          "reference": {}
+        }
+      ],
+      "source_outcomes": [
+        {
+          "source": "control_plane",
+          "status": "ok",
+          "detail": "audit history retrieved"
+        },
+        {
+          "source": "prometheus",
+          "status": "ok",
+          "detail": "query succeeded"
+        },
+        {
+          "source": "loki",
+          "status": "ok",
+          "detail": "query succeeded"
+        },
+        {
+          "source": "tempo",
+          "status": "no_data",
+          "detail": "no traces in window"
+        }
+      ],
+      "retrieval_context": {
+        "knowledge": [],
+        "historical_incidents": [],
+        "outcome": "no_data",
+        "detail": "no retrieval-service results"
+      },
+      "provider": {
+        "configured": true,
+        "provider": "openai",
+        "model": "gpt-4o-mini"
+      },
+      "validation_notes": [],
+      "incident_id": "22222222-2222-2222-2222-222222222222"
+    }
+  },
+  "expected_outcome": {
+    "expected_classification": "well_supported"
+  },
+  "acceptable_variations": [
+    "the exact wording of the hypothesis statement may vary across providers; only the structural fields (confidence, supporting_evidence_ids, missing_evidence, source_outcomes) govern classify_investigation's own output"
+  ],
+  "forbidden_outcomes": [
+    "classification of 'inconclusive' or 'partial' would mean classify_investigation's own well_supported bar regressed or this fixture's own shape drifted from the real schema"
+  ],
+  "is_hard_safety_invariant": false
+}

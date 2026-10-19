@@ -51,7 +51,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/test-failure-simulation-settling.sh && bash -n scripts/test-canonical-incident-selection.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh && bash -n scripts/verify-web-console.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/test-failure-simulation-settling.sh && bash -n scripts/test-canonical-incident-selection.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh && bash -n scripts/verify-web-console.sh && bash -n scripts/verify-evals-offline.sh
 
       - name: Verify Makefile is usable
         run: make help
@@ -300,6 +300,30 @@ jobs:
       - name: Build web-console
         working-directory: services/web-console
         run: npm run build
+
+      # Phase 10: deterministic offline AI evaluation -- deliberately
+      # placed HERE, as the fast offline gate BEFORE the expensive
+      # Docker/Compose acceptance section below (per this phase's own
+      # CI-placement requirement), reusing the SAME Python 3.13
+      # interpreter and the SAME already-installed, already-editable
+      # investigator-service/retrieval-service/agent-runtime-service
+      # packages the "Install X dependencies"/"Run X tests" steps
+      # above already set up earlier in this job -- no second install
+      # of any of them, no Docker, no database, no real LLM/embedding
+      # API call, no privileged production credential. Only this
+      # harness's own minimal pytest/pytest-asyncio dev dependency is
+      # installed here. See scripts/verify-evals-offline.sh (the
+      # equivalent LOCAL, Docker-wrapped convenience for a developer
+      # who may not have Python 3.13 natively) and
+      # docs/architecture/phase-10-ai-evaluation.md.
+      - name: Install Phase 10 evaluation harness dependencies
+        run: pip install -q -r evals/requirements.txt
+
+      - name: Run Phase 10 deterministic offline AI evaluation
+        run: python -m evals.runner
+
+      - name: Run Phase 10 evaluation harness's own unit/regression/negative-control tests
+        run: python -m pytest evals/tests -c evals/pyproject.toml -v
 
       - name: Create runtime .env from .env.example
         run: cp .env.example .env

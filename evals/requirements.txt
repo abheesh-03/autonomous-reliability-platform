@@ -1,0 +1,8 @@
+# Phase 10 evaluation harness's OWN direct dependencies -- deliberately
+# minimal. pydantic/httpx/openai/langgraph/psycopg all come
+# TRANSITIVELY from editable-installing the three reused services
+# (investigator-service, retrieval-service, agent-runtime-service --
+# see evals/README.md section 8/9 for the exact install commands), so
+# they are never re-pinned here.
+pytest==9.1.1
+pytest-asyncio==1.4.0

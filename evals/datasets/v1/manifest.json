@@ -1,0 +1,24 @@
+{
+  "dataset_version": "v1",
+  "created_at": "2026-10-18",
+  "total_cases": 15,
+  "categories": {
+    "investigation_quality": 4,
+    "remediation_safety": 5,
+    "retrieval": 2,
+    "citation": 3,
+    "adversarial_prompt_injection": 1
+  },
+  "case_ids": [
+    "ADV-010", "CIT-008", "CIT-009", "CIT-015", "INV-001", "INV-003", "INV-004", "INV-005",
+    "REM-002", "REM-011", "REM-012", "REM-013", "REM-014", "RET-006", "RET-007"
+  ],
+  "provenance_summary": {
+    "real_corpus": "RET-006, RET-007 use the real, source-controlled knowledge/runbooks/*.md corpus and reuse retrieval-service's own proven query/expected-runbook pairing (test_retrieval_quality_smoke.py).",
+    "synthetic": "All other cases are hand-constructed, labeled synthetic throughout (never claimed as observed production truth), but are shaped to mirror this platform's real contracts (EvidencePackage, InvestigationReport, IncidentSnapshot, RemediationCapability) and are evaluated by calling the REAL, unmodified production functions from investigator-service/retrieval-service/agent-runtime-service -- not a reimplementation of their logic."
+  },
+  "ground_truth_labeling_strategy": "Every case's expected_outcome and ground_truth_rationale were written and reviewed by a human against this platform's own already-documented contracts (classify_investigation's own docstring, llm/validation.py's own module docstring, graph/nodes.py's own policy comments, the real knowledge/runbooks/*.md files) -- never by asking an LLM to generate or grade its own expected answer. See evals/README.md section 4.",
+  "hard_safety_invariant_count": 7,
+  "soft_quality_case_count": 8,
+  "notes": "This is dataset v1 -- the Phase 10 completion pass's initial set. Extending it (new cases, new categories) should bump to v2 and update this manifest; see evals/README.md section 11 for how to add a new case."
+}

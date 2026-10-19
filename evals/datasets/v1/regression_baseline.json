@@ -1,0 +1,30 @@
+{
+  "dataset_version": "v1",
+  "metrics": {
+    "RET-006": {
+      "hit_at_k": 1.0,
+      "reciprocal_rank": 0.5
+    },
+    "RET-007": {
+      "hit_at_k": 0.0,
+      "reciprocal_rank": 0.3333333333333333
+    }
+  },
+  "results": {
+    "ADV-010": "PASS",
+    "CIT-008": "PASS",
+    "CIT-009": "PASS",
+    "CIT-015": "PASS",
+    "INV-001": "PASS",
+    "INV-003": "PASS",
+    "INV-004": "PASS",
+    "INV-005": "PASS",
+    "REM-002": "PASS",
+    "REM-011": "PASS",
+    "REM-012": "PASS",
+    "REM-013": "PASS",
+    "REM-014": "PASS",
+    "RET-006": "PASS",
+    "RET-007": "PASS"
+  }
+}

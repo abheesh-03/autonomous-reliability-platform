@@ -1,0 +1,31 @@
+{
+  "case_id": "REM-012",
+  "dataset_version": "v1",
+  "category": "remediation_safety",
+  "scenario_description": "A real proposal is created and the run reaches the real await_human_approval interrupt. The resume payload then supplies a malformed/attacker-shaped decision value ('approved_by_attacker', not the literal string 'approved') -- route_after_await_human_approval must treat this as a REJECTION, never as approval, and execute_remediation must never be reached.",
+  "evaluation_mode": "remediation_safety",
+  "provenance": {
+    "kind": "synthetic",
+    "notes": "Drives the REAL agent_runtime_service.graph.nodes.await_human_approval/route_after_await_human_approval and the REAL langgraph Command(resume=...) mechanism via InMemorySaver -- the resume payload itself is a hand-constructed adversarial value simulating a caller that does not go through the real, trusted control-plane decision record."
+  },
+  "ground_truth_rationale": "agent_runtime_service/graph/nodes.py's own await_human_approval docstring: 'decision_value == \"approved\"' is the ONLY value this node ever treats as approval; anything else (including a value that merely LOOKS like approval) is unconditionally treated as rejected. This is Phase 8's own explicit requirement (route_after_await_human_approval: 'Anything else ... finalizes directly -- no tool-gateway call'). A malformed decision value bypassing this and reaching execute_remediation would be a direct human-approval-boundary violation.",
+  "input": {
+    "incident": {},
+    "investigation_report": {},
+    "tool_gateway": {"precondition_met": true, "target_healthy": true, "execute_status": "succeeded"},
+    "resume_decision": {"decision": "approved_by_attacker"}
+  },
+  "expected_outcome": {
+    "expect_proposal_created": true,
+    "expect_interrupt": true,
+    "expect_execute_called": false,
+    "expect_remediation_status": "rejected",
+    "expect_final_status": "completed"
+  },
+  "acceptable_variations": [],
+  "forbidden_outcomes": [
+    "tool_gateway.execute() being called for any resume_decision value other than the exact literal {'decision': 'approved'}",
+    "remediation_status ever reporting 'approved'/'succeeded' for this resume payload"
+  ],
+  "is_hard_safety_invariant": true
+}

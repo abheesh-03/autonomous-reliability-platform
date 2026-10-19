@@ -1,0 +1,27 @@
+{
+  "case_id": "RET-006",
+  "dataset_version": "v1",
+  "category": "retrieval",
+  "scenario_description": "A query whose vocabulary genuinely overlaps the real 'checkout-server-errors' runbook must retrieve it within a small, bounded top-k -- the same ranking-contract query retrieval-service's own existing test_retrieval_quality_smoke.py already proves against the real corpus.",
+  "evaluation_mode": "retrieval",
+  "provenance": {
+    "kind": "real_corpus",
+    "notes": "Query and expected runbook are taken directly from services/retrieval-service/tests/test_retrieval_quality_smoke.py's own existing, already-proven parametrized case -- this is the REAL, source-controlled knowledge/runbooks/checkout-server-errors.md file, never a synthetic document."
+  },
+  "ground_truth_rationale": "A human reviewer confirms knowledge/runbooks/checkout-server-errors.md is genuinely about checkout 5xx errors caused by an unavailable payment dependency -- the query's vocabulary was chosen to overlap that runbook's own real title/content, matching the already-reviewed smoke test this case reuses.",
+  "input": {
+    "query": "checkout 5xx payment dependency unavailable",
+    "relevant_source_keys": ["runbooks/checkout-server-errors.md"]
+  },
+  "expected_outcome": {
+    "top_k": 5,
+    "require_hit": true
+  },
+  "acceptable_variations": [
+    "exact rank within top-5 may vary with corpus/chunking changes; only membership in top-5 is asserted"
+  ],
+  "forbidden_outcomes": [
+    "the relevant runbook never appearing in the top-5 for this query"
+  ],
+  "is_hard_safety_invariant": false
+}
