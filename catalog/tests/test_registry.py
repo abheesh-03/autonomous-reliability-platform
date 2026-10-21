@@ -1,11 +1,27 @@
 """Gate E tests: the detector family registry describes CAPABILITIES
-only -- every entry must honestly default to `implemented=False`
-(none of this registry processes any real signal), ids must be unique,
-and a new family must be addable without touching the 800 scenarios
-the catalog already validated in Gates A-C."""
+-- a registry entry's `implemented=True` means exactly what
+Phase 11B's own `detectors/` package actually built and tested for it
+(see `catalog/tests/test_registry.py::test_implemented_families_match_
+phase_11b_detectors_package`), never a self-reported claim with no
+backing code. ids must be unique, and a new family must be addable
+without touching the 800 scenarios the catalog already validated in
+Gates A-C."""
 
 from catalog.importer.build import build_catalog
 from catalog.registry.detector_families import DETECTOR_FAMILIES, DetectorFamily, get_detector_family
+
+# Updated by Phase 11B: these 5 families are now backed by real,
+# tested code in detectors/ -- see each family's own gaps_and_
+# limitations field for exactly what was (and was not) implemented.
+PHASE_11B_IMPLEMENTED_FAMILY_IDS = frozenset(
+    {
+        "api_error_rates",
+        "latency_anomalies",
+        "distributed_trace_anomalies",
+        "business_invariant_violations",
+        "incident_correlation",
+    }
+)
 
 
 def test_registry_has_at_least_the_starting_families():
@@ -17,12 +33,17 @@ def test_detector_family_ids_are_unique():
     assert len(ids) == len(set(ids))
 
 
-def test_no_family_claims_to_be_implemented():
-    """A registry entry is a description of a capability, never a
-    functioning detector -- see this module's own docstring. None of
-    the starting families may claim `implemented=True` since none of
-    them processes any real signal yet."""
-    assert all(f.implemented is False for f in DETECTOR_FAMILIES)
+def test_implemented_families_match_phase_11b_detectors_package():
+    """Exactly the 5 families Phase 11B actually built real, tested
+    code for may claim `implemented=True` -- every other family (14 of
+    the 19 starting families) remains honestly `implemented=False`,
+    since no code in this repository processes a real signal for them
+    yet."""
+    actually_implemented = {f.detector_family_id for f in DETECTOR_FAMILIES if f.implemented}
+    assert actually_implemented == PHASE_11B_IMPLEMENTED_FAMILY_IDS
+    assert all(
+        f.implemented is False for f in DETECTOR_FAMILIES if f.detector_family_id not in PHASE_11B_IMPLEMENTED_FAMILY_IDS
+    )
 
 
 def test_every_family_has_required_descriptive_fields():

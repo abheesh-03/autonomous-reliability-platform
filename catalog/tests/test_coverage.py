@@ -133,18 +133,20 @@ def test_coverage_by_domain_reflects_catalogued_baseline():
 
 
 def test_coverage_by_detector_family_excludes_unimplemented_family_reference():
-    """Every family in the Phase 11A starting registry is
-    implemented=False -- a DETECTOR_IMPLEMENTATION_REFERENCE pointing
-    at one must be REJECTED (a registry description is not an
-    implementation), so coverage_by_detector_family must stay empty."""
+    """`resource_saturation` remains implemented=False (it is NOT one
+    of the 5 families Phase 11B implemented real code for -- see
+    catalog/tests/test_registry.py) -- a DETECTOR_IMPLEMENTATION_
+    REFERENCE pointing at it must be REJECTED (a registry description
+    is not an implementation), so coverage_by_detector_family must
+    stay empty."""
     evidence = [
         CapabilityEvidence(
             scenario_id="D03-F05",
             dimension=CoverageDimension.DETECTOR_IMPLEMENTED,
             evidence_kind=EvidenceKind.DETECTOR_IMPLEMENTATION_REFERENCE,
-            evidence_reference="catalog/registry/detector_families.py::latency_anomalies",
+            evidence_reference="catalog/registry/detector_families.py::resource_saturation",
             recorded_by="tester",
-            detector_family_id="latency_anomalies",
+            detector_family_id="resource_saturation",
         )
     ]
     report = compute_coverage(_MANIFEST, evidence)

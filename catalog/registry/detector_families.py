@@ -54,8 +54,14 @@ DETECTOR_FAMILIES: tuple[DetectorFamily, ...] = (
         detection_prerequisites=["consistent status-code logging across services"],
         expected_observation_schema="per-endpoint status-code distribution over time",
         supported_incident_categories=["Availability / timeouts", "External dependency / integration"],
-        gaps_and_limitations=["no implementation yet"],
-        planned_verification_approach="unit tests against synthetic log fixtures with injected error bursts",
+        gaps_and_limitations=[
+            "Phase 11B implements a real 5xx-fraction detector (detectors/anomaly/detector.py:"
+            "detect_error_rate_deviation) against the real http_server_request_duration_seconds_count "
+            "metric for the 4 OTel-instrumented services only (checkout/payment/inventory/notification) "
+            "-- no 4xx or new-error-code-appearance detection yet, no API-gateway log source used"
+        ],
+        planned_verification_approach="unit tests against synthetic Prometheus query_range fixtures with injected error bursts (implemented -- detectors/tests/test_anomaly_detector.py)",
+        implemented=True,
     ),
     DetectorFamily(
         detector_family_id="latency_anomalies",
@@ -65,8 +71,14 @@ DETECTOR_FAMILIES: tuple[DetectorFamily, ...] = (
         detection_prerequisites=["tracing instrumentation on the request path"],
         expected_observation_schema="per-endpoint latency percentile series vs. rolling baseline",
         supported_incident_categories=["Latency / capacity"],
-        gaps_and_limitations=["no implementation yet; baseline-drift handling undesigned"],
-        planned_verification_approach="replay recorded latency-degradation traces offline",
+        gaps_and_limitations=[
+            "Phase 11B implements a real p95-deviation detector (detectors/anomaly/detector.py:"
+            "detect_latency_deviation) against the real histogram_quantile(0.95, ...) query, with a "
+            "request-volume guard, for the 4 OTel-instrumented services only -- baseline-drift (a "
+            "baseline that is itself slowly degrading over weeks) is still undesigned"
+        ],
+        planned_verification_approach="unit tests against synthetic Prometheus query_range fixtures (implemented -- detectors/tests/test_anomaly_detector.py)",
+        implemented=True,
     ),
     DetectorFamily(
         detector_family_id="resource_saturation",
@@ -176,10 +188,15 @@ DETECTOR_FAMILIES: tuple[DetectorFamily, ...] = (
         expected_observation_schema="invariant-check pass/fail series with violation detail",
         supported_incident_categories=["Financial / numeric correctness", "Consistency / duplicate processing"],
         gaps_and_limitations=[
-            "no implementation yet; this family can NEVER authorize a corrective financial write on its own "
-            "-- see Gate G"
+            "Phase 11B implements ONE real checker (detectors/invariants/lifecycle_checker.py: "
+            "check_incident_lifecycle_consistency) against control-plane's real incident/audit-event "
+            "GET APIs -- this validates control-plane's OWN audit-trail consistency, not a financial/"
+            "inventory ledger (neither payment-service nor inventory-service persists any queryable "
+            "history, so no real invariant could be built there -- see Gate A). This family can NEVER "
+            "authorize a corrective financial write on its own -- see Gate G"
         ],
-        planned_verification_approach="synthetic reconciliation-mismatch fixture against a non-production ledger",
+        planned_verification_approach="synthetic control-plane event-history fixtures (implemented -- detectors/tests/test_invariant_lifecycle.py); a reconciliation-mismatch checker remains undesigned pending a real ledger source",
+        implemented=True,
     ),
     DetectorFamily(
         detector_family_id="auth_anomalies",
@@ -211,8 +228,17 @@ DETECTOR_FAMILIES: tuple[DetectorFamily, ...] = (
         detection_prerequisites=["tracing is propagated consistently across service boundaries"],
         expected_observation_schema="trace-topology and span-error-rate summaries",
         supported_incident_categories=["Latency / capacity", "External dependency / integration"],
-        gaps_and_limitations=["no implementation yet"],
-        planned_verification_approach="synthetic trace-fixture replay with injected span anomalies",
+        gaps_and_limitations=[
+            "Phase 11B implements real OTLP-JSON span parsing (detectors/traces/parser.py), cycle "
+            "detection, an OBSERVED-only dependency graph builder (detectors/dependencies/graph.py), "
+            "and evidence-gated candidate-propagation reasoning (detectors/dependencies/propagation.py) "
+            "against Tempo's real GET /api/v2/traces/{traceID} shape -- the "
+            "startTimeUnixNano/endTimeUnixNano/status field extensions were NOT independently "
+            "re-verified against a live Tempo this round (see architecture doc section 7); no "
+            "orphaned-span-specific detector yet"
+        ],
+        planned_verification_approach="synthetic OTLP-JSON trace fixtures with injected cycles/missing parents (implemented -- detectors/tests/test_trace_parser_and_graph.py)",
+        implemented=True,
     ),
     DetectorFamily(
         detector_family_id="incident_correlation",
@@ -223,9 +249,14 @@ DETECTOR_FAMILIES: tuple[DetectorFamily, ...] = (
         expected_observation_schema="grouped-finding clusters with shared-identifier evidence",
         supported_incident_categories=["cross-cutting -- not tied to one failure class"],
         gaps_and_limitations=[
-            "no implementation yet; correlation is explicitly NEVER treated as proof of a shared root cause"
+            "Phase 11B implements a real deterministic correlation engine (detectors/correlation/"
+            "engine.py: correlate) -- union-find grouping gated on shared trace id, matching "
+            "fingerprint, or overlapping window + shared service/observed dependency edge; pure "
+            "temporal proximity alone never links two findings. Correlation is explicitly NEVER "
+            "treated as proof of a shared root cause"
         ],
-        planned_verification_approach="synthetic multi-finding correlation fixture replay",
+        planned_verification_approach="synthetic multi-finding correlation fixtures, including independent-incident negative controls (implemented -- detectors/tests/test_correlation_engine.py)",
+        implemented=True,
     ),
     DetectorFamily(
         detector_family_id="configuration_credential_failures",

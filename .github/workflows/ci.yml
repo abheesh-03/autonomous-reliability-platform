@@ -354,6 +354,35 @@ jobs:
           python -m catalog audit
           python -m catalog coverage
 
+      # Phase 11B: autonomous failure discovery (detectors/) --
+      # deliberately placed HERE, immediately after Phase 11A's own
+      # fast offline gate and still BEFORE the expensive Docker/
+      # Compose acceptance section below (same placement rationale as
+      # Phase 10/11A's own comments above). Reuses the same Python 3.13
+      # interpreter already set up; pydantic==2.13.5/httpx==0.28.1/
+      # pytest==9.1.1/pytest-asyncio==1.4.0 are already installed
+      # transitively (the same pins detectors/requirements.txt itself
+      # specifies, and evals/requirements.txt already installed
+      # earlier in this job). No Docker,
+      # no database, no live Prometheus/Tempo/control-plane, no
+      # production credential -- every detectors/ test runs against
+      # synthetic (httpx.MockTransport) data only, and this step never
+      # touches services/**, database/**, observability/**,
+      # knowledge/**, evals/**, or catalog/source/**. See
+      # scripts/verify-detectors-offline.sh (the equivalent LOCAL,
+      # Docker-wrapped convenience) and
+      # docs/architecture/phase-11b-autonomous-failure-discovery.md.
+      - name: Install Phase 11B detectors dependencies
+        run: pip install -q -r detectors/requirements.txt
+
+      - name: Run Phase 11B detectors test suite (anomaly/dependency/invariant/correlation/pipeline/CLI/safety)
+        run: python -m pytest detectors/tests -c detectors/pyproject.toml -v
+
+      - name: Run Phase 11B detectors CLI (verify + replay) fully offline
+        run: |
+          python -m detectors verify
+          python -m detectors replay --fixture detectors/tests/fixtures/cascading_failure.json
+
       - name: Create runtime .env from .env.example
         run: cp .env.example .env
 

@@ -1,0 +1,7 @@
+# Phase 11B detectors/ package's own direct dependencies -- pinned to
+# match the same versions already used elsewhere in this repo's Python
+# services (see services/investigator-service/pyproject.toml).
+pydantic==2.13.5
+httpx==0.28.1
+pytest==9.1.1
+pytest-asyncio==1.4.0

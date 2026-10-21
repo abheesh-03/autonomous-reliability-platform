@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage detectors-validate detectors-replay verify-detectors-real-stack
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -80,6 +80,9 @@ help: ## Show available targets
 	@echo "  catalog-validate    Phase 11A: run the catalog/ test suite + CLI build/validate against the real 800-scenario source (no Docker Compose, no database)"
 	@echo "  catalog-audit       Phase 11A: run the Gate C taxonomy review heuristics, writing REVIEW_REQUIRED findings to catalog/build/taxonomy_review.v1.json"
 	@echo "  catalog-coverage    Phase 11A: compute the Gate F coverage report (honest, evidence-only; expect all-zero beyond 'catalogued' until real detectors exist)"
+	@echo "  detectors-validate  Phase 11B: run the detectors/ test suite + CLI verify/replay (no Docker Compose, no database, no live telemetry)"
+	@echo "  detectors-replay    Phase 11B: replay the synthetic cascading-failure fixture through the real pipeline, printing JSON + a human summary"
+	@echo "  verify-detectors-real-stack Phase 11B OPT-IN: read-only check against the ALREADY-RUNNING real stack (Prometheus/Tempo/control-plane) -- never starts/stops Compose, never writes"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -574,3 +577,12 @@ catalog-audit: ## Phase 11A: run the Gate C taxonomy review heuristics, writing 
 
 catalog-coverage: ## Phase 11A: compute the Gate F coverage report (honest, evidence-only; expect all-zero beyond 'catalogued' until real detectors exist)
 	docker run --rm -v "$(CURDIR):/app" -w /app python:3.13-slim bash -c "pip install -q -r catalog/requirements.txt && python -m catalog coverage"
+
+detectors-validate: ## Phase 11B: run the detectors/ test suite + CLI verify/replay (no Docker Compose, no database, no live telemetry)
+	./scripts/verify-detectors-offline.sh
+
+detectors-replay: ## Phase 11B: replay the synthetic cascading-failure fixture through the real pipeline, printing JSON + a human summary
+	docker run --rm -v "$(CURDIR):/app" -w /app python:3.13-slim bash -c "pip install -q -r detectors/requirements.txt -r catalog/requirements.txt && python -m detectors replay --fixture detectors/tests/fixtures/cascading_failure.json"
+
+verify-detectors-real-stack: ## Phase 11B OPT-IN: read-only check against the ALREADY-RUNNING real stack (Prometheus/Tempo/control-plane) -- never starts/stops Compose, never writes
+	./scripts/verify-detectors-real-stack.sh
