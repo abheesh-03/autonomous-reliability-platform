@@ -133,9 +133,9 @@ def test_coverage_by_domain_reflects_catalogued_baseline():
 
 
 def test_coverage_by_detector_family_excludes_unimplemented_family_reference():
-    """`resource_saturation` remains implemented=False (it is NOT one
-    of the 5 families Phase 11B implemented real code for -- see
-    catalog/tests/test_registry.py) -- a DETECTOR_IMPLEMENTATION_
+    """`availability_failures` remains implemented=False (it is not
+    one of the families Phase 11B/11C implemented real code for --
+    see catalog/tests/test_registry.py) -- a DETECTOR_IMPLEMENTATION_
     REFERENCE pointing at it must be REJECTED (a registry description
     is not an implementation), so coverage_by_detector_family must
     stay empty."""
@@ -144,9 +144,9 @@ def test_coverage_by_detector_family_excludes_unimplemented_family_reference():
             scenario_id="D03-F05",
             dimension=CoverageDimension.DETECTOR_IMPLEMENTED,
             evidence_kind=EvidenceKind.DETECTOR_IMPLEMENTATION_REFERENCE,
-            evidence_reference="catalog/registry/detector_families.py::resource_saturation",
+            evidence_reference="catalog/registry/detector_families.py::availability_failures",
             recorded_by="tester",
-            detector_family_id="resource_saturation",
+            detector_family_id="availability_failures",
         )
     ]
     report = compute_coverage(_MANIFEST, evidence)

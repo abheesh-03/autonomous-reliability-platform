@@ -134,16 +134,15 @@ def test_unregistered_detector_family_reference_is_rejected():
 
 def test_registered_but_unimplemented_detector_family_cannot_count_as_detection_validated():
     """A registry description must not count as implemented
-    detection: `resource_saturation` is a real, registered family that
-    remains implemented=False (it is not one of the 5 families
-    Phase 11B built real code for)."""
+    detection: `availability_failures` is a real, registered family
+    that remains implemented=False."""
     evidence = CapabilityEvidence(
         scenario_id="D03-F05",
         dimension=CoverageDimension.DETECTION_VALIDATED,
         evidence_kind=EvidenceKind.TEST_REFERENCE,
         evidence_reference="catalog/tests/test_taxonomy_audit.py::test_known_misclassified_scenarios_are_flagged",
         recorded_by="tester",
-        detector_family_id="resource_saturation",
+        detector_family_id="availability_failures",
     )
     result = verify_evidence(evidence, _REPO_ROOT)
     assert result.outcome == VerificationOutcome.REJECTED
@@ -158,7 +157,7 @@ def test_fabricated_evidence_cannot_increase_detector_implemented():
             evidence_kind=EvidenceKind.DETECTOR_IMPLEMENTATION_REFERENCE,
             evidence_reference="totally-fabricated-module.py::FakeDetector",
             recorded_by="invented",
-            detector_family_id="resource_saturation",  # real family, but not implemented
+            detector_family_id="availability_failures",  # real family, but not implemented
         ),
         CapabilityEvidence(
             scenario_id="D01-F02",

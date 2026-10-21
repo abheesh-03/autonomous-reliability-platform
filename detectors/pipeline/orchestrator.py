@@ -2,6 +2,7 @@
 
 READ-ONLY TELEMETRY COLLECTION -> STATISTICAL ANOMALY DETECTION ->
 TRACE + DEPENDENCY ANALYSIS -> BUSINESS INVARIANT CHECKS ->
+KUBERNETES OBSERVATION (Phase 12A, additive, opt-in) ->
 DETERMINISTIC INCIDENT CORRELATION -> EVIDENCE-GROUNDED FAILURE
 FINDINGS -> READ-ONLY INVESTIGATION SUMMARY.
 
@@ -11,7 +12,15 @@ explicit reason -- never silently skipped, and never a reason to fail
 the whole pipeline (partial results are always returned). Every stage
 failure (a bounded client-level exception) is caught per-check, so one
 unavailable source never prevents every other independent source from
-still contributing its own findings."""
+still contributing its own findings.
+
+Kubernetes observation (Phase 12A) is deliberately NOT fed into the
+cross-system correlation engine in this round: the sandbox kind
+cluster and the docker-compose Prometheus/Tempo/control-plane stack
+are genuinely separate environments with no real shared trace id,
+fingerprint, or observed dependency edge between them -- attempting to
+correlate them would fabricate evidence that does not exist (see
+`docs/architecture/phase-12a-kubernetes-observer.md`)."""
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -22,16 +31,26 @@ from detectors.anomaly.detector import (
     detect_telemetry_pipeline_health,
 )
 from detectors.clients.control_plane_client import ControlPlaneClient, ControlPlaneUnavailableError
+from detectors.clients.kubernetes_client import KubernetesClient
 from detectors.clients.prometheus_client import ALLOWED_SERVICES, PrometheusClient, PrometheusClientError, PrometheusUnavailableError
 from detectors.clients.tempo_client import TempoClient, TempoClientError, TempoUnavailableError
 from detectors.correlation.engine import correlate
 from detectors.dependencies.graph import build_dependency_graph
 from detectors.dependencies.propagation import build_propagation_paths
 from detectors.invariants.lifecycle_checker import INVARIANT_DEFINITION, check_incident_lifecycle_consistency
+from detectors.kubernetes.collector import collect_deployments, collect_events, collect_pods, collect_replicasets
+from detectors.kubernetes.detectors import (
+    detect_crash_loop_backoff,
+    detect_deployment_rollout_failure,
+    detect_image_pull_failures,
+    detect_oom_killed,
+    detect_pod_readiness_degradation,
+)
 from detectors.schemas.anomaly import AnomalyDetectionResult, DetectionResult
 from detectors.schemas.correlation import CorrelationGroup, CorrelationInput, TentativeAssociation
 from detectors.schemas.dependency import DependencyGraph, PropagationPath
 from detectors.schemas.invariant import InvariantCheckReport, InvariantCheckResult
+from detectors.schemas.kubernetes import CollectionOutcome, CollectionResult, K8sDetectionFinding
 
 
 @dataclass(frozen=True)
@@ -52,6 +71,8 @@ class RawPipelineResult:
     dependency_graph: DependencyGraph | None = None
     propagation_paths: list[PropagationPath] = field(default_factory=list)
     invariant_reports: list[InvariantCheckReport] = field(default_factory=list)
+    k8s_collection_results: list[CollectionResult] = field(default_factory=list)
+    k8s_findings: list[K8sDetectionFinding] = field(default_factory=list)
     correlation_groups: list[CorrelationGroup] = field(default_factory=list)
     tentative_associations: list[TentativeAssociation] = field(default_factory=list)
     correlation_group_by_item_id: dict[str, str] = field(default_factory=dict)
@@ -59,11 +80,15 @@ class RawPipelineResult:
     checks_not_executed: list[tuple[str, str]] = field(default_factory=list)
 
 
+_USABLE_K8S_OUTCOMES = (CollectionOutcome.SUCCESS, CollectionOutcome.EMPTY, CollectionOutcome.PARTIAL)
+
+
 async def collect_and_detect(
     *,
     prometheus_client: PrometheusClient | None,
     tempo_client: TempoClient | None,
     control_plane_client: ControlPlaneClient | None,
+    kubernetes_client: KubernetesClient | None = None,
     config: PipelineConfig = PipelineConfig(),
     now: datetime | None = None,
 ) -> RawPipelineResult:
@@ -137,6 +162,62 @@ async def collect_and_detect(
                 result.checks_executed.append(INVARIANT_DEFINITION.invariant_id)
         except ControlPlaneUnavailableError as exc:
             result.checks_not_executed.append((INVARIANT_DEFINITION.invariant_id, str(exc)))
+
+    # -- KUBERNETES OBSERVATION (Phase 12A, additive, opt-in) --
+    if kubernetes_client is None:
+        result.checks_not_executed.append(("kubernetes_observation", "no Kubernetes client was supplied"))
+    else:
+        pods_result, pods = await collect_pods(kubernetes_client)
+        deployments_result, deployments = await collect_deployments(kubernetes_client)
+        _replicasets_result, _replicasets = await collect_replicasets(kubernetes_client)
+        events_result, events = await collect_events(kubernetes_client)
+        result.k8s_collection_results = [pods_result, deployments_result, _replicasets_result, events_result]
+
+        for cr in result.k8s_collection_results:
+            check_name = f"kubernetes_collect_{cr.resource_kind.lower()}"
+            if cr.outcome in _USABLE_K8S_OUTCOMES:
+                result.checks_executed.append(check_name)
+                if cr.outcome == CollectionOutcome.PARTIAL:
+                    # Correction round (Issue 1): classification still
+                    # runs on whatever real evidence WAS collected, but
+                    # incomplete coverage is propagated into pipeline
+                    # status explicitly -- never silently absorbed into
+                    # an unqualified "executed" result.
+                    result.checks_not_executed.append((f"{check_name}_complete_coverage", f"partial collection: {cr.detail}"))
+            else:
+                result.checks_not_executed.append((check_name, f"{cr.outcome.value}: {cr.detail}"))
+
+        # Classification only ever runs on a SUCCESS/EMPTY/PARTIAL
+        # collection -- a failed (UNAVAILABLE/FORBIDDEN/MALFORMED/
+        # NOT_FOUND) pod collection must NEVER be treated as "zero pods
+        # exist" (a false healthy result). PARTIAL still carries real,
+        # preserved evidence (Issues 1/2), so classification still runs
+        # on it -- the incomplete-coverage caveat is propagated
+        # separately, above, into `checks_not_executed`, never silently
+        # dropped. Events are best-effort supporting evidence only, so
+        # a failed events collection still lets pod-based classification
+        # proceed (with empty supporting_event_reasons, never
+        # fabricated ones).
+        events_usable = events if events_result.outcome in _USABLE_K8S_OUTCOMES else []
+
+        if pods_result.outcome in _USABLE_K8S_OUTCOMES:
+            result.k8s_findings.extend(detect_image_pull_failures(pods, events_usable))
+            result.k8s_findings.extend(detect_crash_loop_backoff(pods, events_usable))
+            result.k8s_findings.extend(detect_oom_killed(pods))
+            result.k8s_findings.extend(detect_pod_readiness_degradation(pods, events_usable))
+            result.checks_executed.append("kubernetes_pod_detectors")
+        else:
+            result.checks_not_executed.append(
+                ("kubernetes_pod_detectors", f"pod collection outcome was {pods_result.outcome.value}, not SUCCESS/EMPTY")
+            )
+
+        if deployments_result.outcome in _USABLE_K8S_OUTCOMES:
+            result.k8s_findings.extend(detect_deployment_rollout_failure(deployments))
+            result.checks_executed.append("kubernetes_deployment_detector")
+        else:
+            result.checks_not_executed.append(
+                ("kubernetes_deployment_detector", f"deployment collection outcome was {deployments_result.outcome.value}")
+            )
 
     # -- DETERMINISTIC INCIDENT CORRELATION --
     correlation_items: list[CorrelationInput] = []

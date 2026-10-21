@@ -28,12 +28,14 @@ configured at all, a malformed fixture, an unknown --service).
 
 import argparse
 import asyncio
+import contextlib
 import json
 import pathlib
 import sys
 from datetime import UTC, datetime
 
 from detectors.clients.control_plane_client import ControlPlaneClient
+from detectors.clients.kubernetes_client import KubernetesConfigError, kubernetes_client_from_kubeconfig
 from detectors.clients.prometheus_client import ALLOWED_SERVICES, PrometheusClient
 from detectors.clients.tempo_client import TempoClient
 from detectors.cli.fixture_loader import FixtureError, load_fixture_clients
@@ -59,6 +61,8 @@ def _report_to_dict(report: PipelineReport) -> dict:
         "dependency_graph": report.dependency_graph.model_dump(mode="json") if report.dependency_graph else None,
         "propagation_paths": [p.model_dump(mode="json") for p in report.propagation_paths],
         "invariant_reports": [r.model_dump(mode="json") for r in report.invariant_reports],
+        "k8s_collection_results": [r.model_dump(mode="json") for r in report.k8s_collection_results],
+        "k8s_findings": [f.model_dump(mode="json") for f in report.k8s_findings],
         "correlation_groups": [g.model_dump(mode="json") for g in report.correlation_groups],
         "tentative_associations": [t.model_dump(mode="json") for t in report.tentative_associations],
         "checks_executed": report.checks_executed,
@@ -90,27 +94,54 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     tempo_client = TempoClient(args.tempo_url) if args.tempo_url else None
     control_plane_client = ControlPlaneClient(args.control_plane_url) if args.control_plane_url else None
 
-    if prometheus_client is None and tempo_client is None and control_plane_client is None:
+    # Kubernetes observation is opt-in and requires all three of
+    # --kubeconfig/--kube-context/--kube-namespace together -- never a
+    # silent default context or namespace (see kubernetes_client.py's
+    # own "context_name is REQUIRED" discipline).
+    kube_args_given = (args.kubeconfig, args.kube_context, args.kube_namespace)
+    if any(kube_args_given) and not all(kube_args_given):
         print(
-            "VALIDATION ERROR: at least one of --prometheus-url/--tempo-url/--control-plane-url is required "
-            "for 'analyze' (live mode) -- use 'replay --fixture ...' for a fully offline run",
+            "VALIDATION ERROR: --kubeconfig, --kube-context, and --kube-namespace must all be supplied together "
+            "for Kubernetes observation, or all omitted",
+            file=sys.stderr,
+        )
+        return 1
+
+    if prometheus_client is None and tempo_client is None and control_plane_client is None and not all(kube_args_given):
+        print(
+            "VALIDATION ERROR: at least one of --prometheus-url/--tempo-url/--control-plane-url/"
+            "(--kubeconfig + --kube-context + --kube-namespace) is required for 'analyze' (live mode) -- "
+            "use 'replay --fixture ...' for a fully offline run",
             file=sys.stderr,
         )
         return 1
 
     config = PipelineConfig(services=services)
-    try:
-        report = asyncio.run(
-            run_pipeline(
-                prometheus_client=prometheus_client,
-                tempo_client=tempo_client,
-                control_plane_client=control_plane_client,
-                config=config,
+
+    with contextlib.ExitStack() as stack:
+        kubernetes_client = None
+        if all(kube_args_given):
+            try:
+                kubernetes_client = stack.enter_context(
+                    kubernetes_client_from_kubeconfig(args.kubeconfig, args.kube_context, args.kube_namespace)
+                )
+            except KubernetesConfigError as exc:
+                print(f"VALIDATION ERROR: {exc}", file=sys.stderr)
+                return 1
+
+        try:
+            report = asyncio.run(
+                run_pipeline(
+                    prometheus_client=prometheus_client,
+                    tempo_client=tempo_client,
+                    control_plane_client=control_plane_client,
+                    kubernetes_client=kubernetes_client,
+                    config=config,
+                )
             )
-        )
-    except Exception as exc:  # noqa: BLE001 -- a safe, non-leaking top-level error message, never a raw traceback with secrets
-        print(f"OPERATIONAL ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
+        except Exception as exc:  # noqa: BLE001 -- a safe, non-leaking top-level error message, never a raw traceback with secrets
+            print(f"OPERATIONAL ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
 
     _emit(report, args.output)
     return 0
@@ -177,6 +208,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_analyze.add_argument("--prometheus-url", default=None)
     p_analyze.add_argument("--tempo-url", default=None)
     p_analyze.add_argument("--control-plane-url", default=None)
+    p_analyze.add_argument(
+        "--kubeconfig", default=None, help="path to a kubeconfig file (requires --kube-context and --kube-namespace)"
+    )
+    p_analyze.add_argument(
+        "--kube-context", default=None, help="explicit kubeconfig context name -- never defaults to the active context"
+    )
+    p_analyze.add_argument("--kube-namespace", default=None, help="Kubernetes namespace to observe (read-only, scoped)")
     p_analyze.add_argument("--output", type=pathlib.Path, default=None)
     p_analyze.set_defaults(func=_cmd_analyze)
 

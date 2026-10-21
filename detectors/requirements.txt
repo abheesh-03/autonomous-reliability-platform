@@ -5,3 +5,8 @@ pydantic==2.13.5
 httpx==0.28.1
 pytest==9.1.1
 pytest-asyncio==1.4.0
+# Phase 12A: parsing a standard kubeconfig file (YAML) to build a
+# bounded, read-only Kubernetes REST client -- this repo's first use
+# of PyYAML, added only because kubeconfig has no other standard
+# format; nothing else in detectors/ needs it.
+PyYAML==6.0.2

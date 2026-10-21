@@ -1,18 +1,18 @@
 """Gate E tests: the detector family registry describes CAPABILITIES
--- a registry entry's `implemented=True` means exactly what
-Phase 11B's own `detectors/` package actually built and tested for it
-(see `catalog/tests/test_registry.py::test_implemented_families_match_
-phase_11b_detectors_package`), never a self-reported claim with no
-backing code. ids must be unique, and a new family must be addable
-without touching the 800 scenarios the catalog already validated in
-Gates A-C."""
+-- a registry entry's `implemented=True` means exactly what the
+`detectors/` package actually built and tested for it (see
+`catalog/tests/test_registry.py::test_implemented_families_match_
+detectors_package`), never a self-reported claim with no backing
+code. ids must be unique, and a new family must be addable without
+touching the 800 scenarios the catalog already validated in Gates
+A-C."""
 
 from catalog.importer.build import build_catalog
 from catalog.registry.detector_families import DETECTOR_FAMILIES, DetectorFamily, get_detector_family
 
-# Updated by Phase 11B: these 5 families are now backed by real,
-# tested code in detectors/ -- see each family's own gaps_and_
-# limitations field for exactly what was (and was not) implemented.
+# Updated by Phase 11B: these 5 families are backed by real, tested
+# code in detectors/anomaly, detectors/traces+dependencies,
+# detectors/invariants, detectors/correlation.
 PHASE_11B_IMPLEMENTED_FAMILY_IDS = frozenset(
     {
         "api_error_rates",
@@ -22,6 +22,19 @@ PHASE_11B_IMPLEMENTED_FAMILY_IDS = frozenset(
         "incident_correlation",
     }
 )
+
+# Updated by Phase 12A: these 3 families are backed by real, tested
+# code in detectors/kubernetes -- see each family's own gaps_and_
+# limitations field for exactly what was (and was not) implemented.
+PHASE_12A_IMPLEMENTED_FAMILY_IDS = frozenset(
+    {
+        "resource_saturation",
+        "process_service_health",
+        "deployment_regressions",
+    }
+)
+
+ALL_IMPLEMENTED_FAMILY_IDS = PHASE_11B_IMPLEMENTED_FAMILY_IDS | PHASE_12A_IMPLEMENTED_FAMILY_IDS
 
 
 def test_registry_has_at_least_the_starting_families():
@@ -33,16 +46,16 @@ def test_detector_family_ids_are_unique():
     assert len(ids) == len(set(ids))
 
 
-def test_implemented_families_match_phase_11b_detectors_package():
-    """Exactly the 5 families Phase 11B actually built real, tested
-    code for may claim `implemented=True` -- every other family (14 of
-    the 19 starting families) remains honestly `implemented=False`,
-    since no code in this repository processes a real signal for them
-    yet."""
+def test_implemented_families_match_detectors_package():
+    """Exactly the 8 families Phase 11B/12A actually built real,
+    tested code for may claim `implemented=True` -- every other
+    family (11 of the 19 starting families) remains honestly
+    `implemented=False`, since no code in this repository processes a
+    real signal for them yet."""
     actually_implemented = {f.detector_family_id for f in DETECTOR_FAMILIES if f.implemented}
-    assert actually_implemented == PHASE_11B_IMPLEMENTED_FAMILY_IDS
+    assert actually_implemented == ALL_IMPLEMENTED_FAMILY_IDS
     assert all(
-        f.implemented is False for f in DETECTOR_FAMILIES if f.detector_family_id not in PHASE_11B_IMPLEMENTED_FAMILY_IDS
+        f.implemented is False for f in DETECTOR_FAMILIES if f.detector_family_id not in ALL_IMPLEMENTED_FAMILY_IDS
     )
 
 

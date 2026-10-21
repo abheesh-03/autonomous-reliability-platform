@@ -80,9 +80,30 @@ async def test_no_client_ever_sends_an_authorization_header():
 
 
 def test_no_source_file_references_a_bearer_token_or_credential_constant():
-    text = _all_source_text()
-    for forbidden in ("Authorization", "Bearer ", "api_key", "API_KEY", "password", "PASSWORD"):
-        assert forbidden not in text, f"unexpected credential-shaped string {forbidden!r} found in detectors/ source"
+    """`kubernetes_client.py` is excluded: it is Phase 12A's one
+    legitimately AUTHENTICATED client and must construct a real
+    `Authorization: Bearer {token}` header to support a restricted
+    ServiceAccount token identity -- that is correct, intended use,
+    never a leak (the token value itself comes from the caller's own
+    kubeconfig at runtime, never hardcoded -- checked separately
+    below). No other client in this package is authenticated at all,
+    so the blanket ban still applies to every other file."""
+    excluded_files = {"kubernetes_client.py"}
+    for path in _PY_FILES:
+        if path.name in excluded_files:
+            continue
+        text = path.read_text()
+        for forbidden in ("Authorization", "Bearer ", "api_key", "API_KEY", "password", "PASSWORD"):
+            assert forbidden not in text, f"{path}: unexpected credential-shaped string {forbidden!r}"
+
+
+def test_kubernetes_client_never_hardcodes_a_credential_value():
+    text = (_DETECTORS_ROOT / "clients" / "kubernetes_client.py").read_text()
+    for forbidden in ("api_key", "API_KEY", "password=", "PASSWORD=", 'Bearer "', "Bearer '"):
+        assert forbidden not in text, f"unexpected hardcoded-credential-shaped string {forbidden!r}"
+    # The only legitimate use is building the header from a
+    # caller-supplied variable, never a literal token value.
+    assert "self._bearer_token}" in text
 
 
 # ---------------------------------------------------------------------
@@ -176,3 +197,38 @@ def test_detectors_package_has_no_subprocess_or_eval_exec_calls():
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 assert node.func.id not in ("eval", "exec"), f"{path}: unexpected {node.func.id}() call"
+
+
+# ---------------------------------------------------------------------
+# Phase 12A: Kubernetes-specific safety controls
+# ---------------------------------------------------------------------
+
+
+def test_kubernetes_client_never_references_secrets_exec_attach_or_portforward():
+    """Checks for the actual Kubernetes API SUBRESOURCE path segments
+    (e.g. '/exec', '/attach') -- not a bare substring match, which
+    would also false-positive on ordinary English words like
+    'exception'/'execute' in this module's own docstrings."""
+    text = (_DETECTORS_ROOT / "clients" / "kubernetes_client.py").read_text()
+    for forbidden in ("/secrets", "/exec", "/attach", "/portforward", "/port-forward"):
+        assert forbidden not in text, f"unexpected API subresource path {forbidden!r} in kubernetes_client.py"
+
+
+def test_kubernetes_client_has_exactly_four_get_only_resource_methods():
+    import inspect
+
+    from detectors.clients.kubernetes_client import KubernetesClient
+
+    public_methods = {name for name, _ in inspect.getmembers(KubernetesClient, predicate=inspect.isfunction) if not name.startswith("_")}
+    assert public_methods == {"list_pods", "list_deployments", "list_replicasets", "list_events"}
+
+
+def test_kubernetes_client_rejects_arbitrary_namespace_strings():
+    from detectors.clients.kubernetes_client import KubernetesClient, KubernetesConfigError
+
+    for malicious in ("../../etc/passwd", "ns; rm -rf /", "ns/../other-ns", "", "A_BAD_NAMESPACE"):
+        try:
+            KubernetesClient("https://k8s.invalid", malicious)
+            raise AssertionError(f"expected KubernetesConfigError for namespace {malicious!r}")
+        except KubernetesConfigError:
+            pass

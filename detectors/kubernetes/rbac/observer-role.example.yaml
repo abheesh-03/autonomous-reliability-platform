@@ -1,0 +1,70 @@
+# Phase 12A, Gate 6: an EXAMPLE least-privilege, namespace-scoped,
+# READ-ONLY RBAC policy for a future Kubernetes observer identity.
+#
+# THIS FILE IS NOT DEPLOYED BY ANY SCRIPT OR MAKE TARGET IN THIS REPO.
+# Applying it (and minting the ServiceAccount token it would be bound
+# to) is a separate, explicitly-approved step -- Phase 12A's own scope
+# is read-only OBSERVATION CODE, never cluster credential provisioning.
+# No authentication material is, or should ever be, committed to this
+# repository.
+#
+# Design:
+#   - Namespace-scoped (Role + RoleBinding, NEVER ClusterRole/
+#     ClusterRoleBinding) -- this identity can only ever act within
+#     the one namespace it is bound to (e.g. "reliability-sandbox"),
+#     mirroring KubernetesClient's own single-namespace scoping.
+#   - Only the 4 resource types this observer's 4 client methods
+#     actually call: pods, deployments, replicasets, events.
+#   - Only "get"/"list"/"watch" verbs -- no "create", "update",
+#     "patch", "delete", "deletecollection", or "*".
+#   - No access to secrets, configmaps, pods/exec, pods/attach,
+#     pods/portforward, or any other subresource -- those rules are
+#     deliberately absent, not merely unused.
+#   - No "impersonate", "bind", or "escalate" verbs on anything --
+#     this identity can never grant itself (or anything else) broader
+#     permissions than it already has.
+#
+# Future live verification against the real reliability-lab cluster
+# should bind THIS identity (not the cluster-admin kind kubeconfig
+# used for read-only verification during this phase) to a dedicated
+# ServiceAccount, and use ITS token -- never the admin/mutual-TLS
+# identity in ~/kubernetes-reliability-lab/kubeconfig.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: reliability-observer
+  namespace: reliability-sandbox
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: reliability-observer-read-only
+  namespace: reliability-sandbox
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # Deliberately NO rules for: secrets, configmaps, pods/log,
+  # pods/exec, pods/attach, pods/portforward, serviceaccounts/token,
+  # or any resource outside this exact list.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: reliability-observer-read-only-binding
+  namespace: reliability-sandbox
+subjects:
+  - kind: ServiceAccount
+    name: reliability-observer
+    namespace: reliability-sandbox
+roleRef:
+  kind: Role
+  name: reliability-observer-read-only
+  apiGroup: rbac.authorization.k8s.io

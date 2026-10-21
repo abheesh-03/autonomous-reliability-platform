@@ -88,8 +88,14 @@ DETECTOR_FAMILIES: tuple[DetectorFamily, ...] = (
         detection_prerequisites=["resource metrics exported per service instance"],
         expected_observation_schema="per-instance resource-utilization series with configured thresholds",
         supported_incident_categories=["Resource exhaustion"],
-        gaps_and_limitations=["no implementation yet"],
-        planned_verification_approach="synthetic load-injection fixtures in a sandboxed test environment",
+        gaps_and_limitations=[
+            "Phase 12A implements a real Kubernetes OOMKilled detector (detectors/kubernetes/"
+            "detectors.py:detect_oom_killed) against the real container terminated.reason field, "
+            "requiring the explicit 'OOMKilled' reason -- exit code 137 alone is never sufficient proof. "
+            "Disk pressure, connection-pool exhaustion, and FD exhaustion remain unimplemented"
+        ],
+        planned_verification_approach="synthetic Kubernetes API fixtures, grounded in real captured OOMKilled evidence (implemented -- detectors/tests/test_kubernetes_detectors.py)",
+        implemented=True,
     ),
     DetectorFamily(
         detector_family_id="process_service_health",
@@ -99,8 +105,15 @@ DETECTOR_FAMILIES: tuple[DetectorFamily, ...] = (
         detection_prerequisites=["restart events are emitted with timestamps and reason codes"],
         expected_observation_schema="restart-count and reason-code series per service instance",
         supported_incident_categories=["Availability / timeouts", "Rollout / compatibility"],
-        gaps_and_limitations=["no implementation yet"],
-        planned_verification_approach="synthetic crash-loop fixture replay",
+        gaps_and_limitations=[
+            "Phase 12A implements real Kubernetes CrashLoopBackOff and pod-readiness-degradation "
+            "detectors (detectors/kubernetes/detectors.py:detect_crash_loop_backoff, "
+            "detect_pod_readiness_degradation) against real container waiting/termination state and "
+            "pod conditions -- never fabricates a root cause from readiness=False alone. Liveness-probe-"
+            "specific signal extraction (vs. the broader Ready condition) remains unimplemented"
+        ],
+        planned_verification_approach="synthetic Kubernetes API fixtures (implemented -- detectors/tests/test_kubernetes_detectors.py)",
+        implemented=True,
     ),
     DetectorFamily(
         detector_family_id="deployment_regressions",
@@ -110,8 +123,17 @@ DETECTOR_FAMILIES: tuple[DetectorFamily, ...] = (
         detection_prerequisites=["deployment events are timestamped and linkable to a service version"],
         expected_observation_schema="pre/post-release metric comparison windowed around a deploy event",
         supported_incident_categories=["Rollout / compatibility"],
-        gaps_and_limitations=["no implementation yet; correlation != causation must be enforced explicitly"],
-        planned_verification_approach="A/B replay of pre- and post-deploy synthetic metric fixtures",
+        gaps_and_limitations=[
+            "Phase 12A implements real Kubernetes ImagePullBackOff/ErrImagePull and deployment-rollout-"
+            "failure detectors (detectors/kubernetes/detectors.py:detect_image_pull_failures, "
+            "detect_deployment_rollout_failure) against real container waiting state and real "
+            "Deployment conditions (requiring the official ProgressDeadlineExceeded signal, never a "
+            "briefly-unavailable-but-progressing rollout) -- the originally intended pre/post-release "
+            "Prometheus metric comparison remains unimplemented; correlation != causation is still "
+            "enforced explicitly"
+        ],
+        planned_verification_approach="synthetic Kubernetes API fixtures (implemented -- detectors/tests/test_kubernetes_detectors.py); A/B replay of pre/post-deploy metric fixtures remains planned",
+        implemented=True,
     ),
     DetectorFamily(
         detector_family_id="database_performance",

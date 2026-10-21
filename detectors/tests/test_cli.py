@@ -32,6 +32,13 @@ def test_analyze_with_unknown_service_is_a_validation_error():
     assert "unknown service" in result.stderr
 
 
+def test_analyze_with_partial_kube_args_is_a_validation_error():
+    result = _run_cli(["analyze", "--kubeconfig", "/tmp/does-not-matter.yaml", "--kube-context", "some-context"])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+    assert "--kubeconfig" in result.stderr
+
+
 def test_replay_with_missing_fixture_is_a_validation_error():
     result = _run_cli(["replay", "--fixture", "/tmp/does-not-exist-detectors-fixture.json"])
     assert result.returncode == 1
@@ -52,6 +59,12 @@ def test_replay_with_real_fixture_produces_deterministic_json(tmp_path):
     assert len(report["tentative_associations"]) == 1
     assert all(f["candidate_known_scenario_matches"] == [] for f in report["findings"])
     assert all(f["remediation_proposals"] == [] for f in report["findings"])
+    # `replay` never supplies a Kubernetes client -- these fields are
+    # always present but empty (Phase 12A's observation stage is
+    # live-analyze-only in this round, never part of the offline
+    # fixture-replay path).
+    assert report["k8s_collection_results"] == []
+    assert report["k8s_findings"] == []
 
 
 def test_replay_is_byte_identical_across_two_runs():

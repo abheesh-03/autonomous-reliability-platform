@@ -68,6 +68,33 @@ def test_real_evidence_for_a_genuinely_implemented_family_is_still_unverifiable_
     assert report.rejected_evidence == []
 
 
+def test_phase_12a_kubernetes_oom_evidence_is_also_unverifiable_not_verified():
+    """Same boundary, re-confirmed for a Phase 12A Kubernetes
+    detector: `resource_saturation` is now `implemented=True`
+    (detectors/kubernetes/detectors.py:detect_oom_killed), but a real,
+    passing test reference for it STILL resolves to UNVERIFIABLE, not
+    VERIFIED -- the trust boundary does not weaken for a new detector
+    family."""
+    manifest = build_catalog()
+    family = get_detector_family("resource_saturation")
+    assert family is not None and family.implemented is True
+
+    evidence = CapabilityEvidence(
+        scenario_id="D01-F02",
+        dimension=CoverageDimension.DETECTION_VALIDATED,
+        evidence_kind=EvidenceKind.TEST_REFERENCE,
+        evidence_reference="detectors/tests/test_kubernetes_detectors.py::test_oom_killed_confirmed_via_explicit_reason",
+        recorded_by="phase-12a-gate-k-integration",
+        detector_family_id="resource_saturation",
+    )
+    result = verify_evidence(evidence, _REPO_ROOT)
+    assert result.outcome == VerificationOutcome.UNVERIFIABLE
+
+    report = compute_coverage(manifest, [evidence])
+    assert report.dimension_counts["detection_validated"] == 0
+    assert report.verified_evidence_count == 0
+
+
 def test_phase_11b_capability_is_tracked_separately_not_via_scenario_coverage_inflation():
     """The 800-scenario catalog's own coverage report must never
     reflect Phase 11B's real capabilities as scenario-level coverage --

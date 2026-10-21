@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage detectors-validate detectors-replay verify-detectors-real-stack
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage detectors-validate detectors-replay verify-detectors-real-stack verify-kubernetes-observer-real-stack test-verify-kubernetes-observer-quoting
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -83,6 +83,8 @@ help: ## Show available targets
 	@echo "  detectors-validate  Phase 11B: run the detectors/ test suite + CLI verify/replay (no Docker Compose, no database, no live telemetry)"
 	@echo "  detectors-replay    Phase 11B: replay the synthetic cascading-failure fixture through the real pipeline, printing JSON + a human summary"
 	@echo "  verify-detectors-real-stack Phase 11B OPT-IN: read-only check against the ALREADY-RUNNING real stack (Prometheus/Tempo/control-plane) -- never starts/stops Compose, never writes"
+	@echo "  verify-kubernetes-observer-real-stack Phase 12A OPT-IN: read-only check against a real kind cluster via explicit kubeconfig -- never touches ~/.kube/config, never starts/stops/modifies the cluster"
+	@echo "  test-verify-kubernetes-observer-quoting Correction-round regression test: proves KUBE_CONTEXT/KUBE_NAMESPACE are never shell-injectable (no Docker required)"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -586,3 +588,14 @@ detectors-replay: ## Phase 11B: replay the synthetic cascading-failure fixture t
 
 verify-detectors-real-stack: ## Phase 11B OPT-IN: read-only check against the ALREADY-RUNNING real stack (Prometheus/Tempo/control-plane) -- never starts/stops Compose, never writes
 	./scripts/verify-detectors-real-stack.sh
+
+# Phase 12A OPT-IN: talks to a SEPARATE real kind cluster (not the
+# Compose stack) via an explicit kubeconfig/context -- SKIPS (exit 0)
+# if that kubeconfig is not present, since the Kubernetes observer is
+# an additive capability. See scripts/verify-kubernetes-observer-real-stack.sh
+# and docs/architecture/phase-12a-kubernetes-observer.md.
+verify-kubernetes-observer-real-stack: ## Phase 12A OPT-IN: read-only check against a real kind cluster via explicit kubeconfig -- never touches ~/.kube/config, never starts/stops/modifies the cluster
+	./scripts/verify-kubernetes-observer-real-stack.sh
+
+test-verify-kubernetes-observer-quoting: ## Correction-round regression test: proves KUBE_CONTEXT/KUBE_NAMESPACE are never shell-injectable (no Docker required)
+	./scripts/test-verify-kubernetes-observer-quoting.sh
