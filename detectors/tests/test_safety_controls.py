@@ -235,6 +235,68 @@ def test_kubernetes_client_has_exactly_four_get_only_resource_methods():
     assert public_methods == {"list_pods", "list_deployments", "list_replicasets", "list_events"}
 
 
+# ---------------------------------------------------------------------
+# Phase 13: AWS-specific safety controls
+# ---------------------------------------------------------------------
+
+
+def test_no_mutating_aws_operation_name_appears_anywhere_in_this_package():
+    forbidden_operations = (
+        "start_instances", "stop_instances", "reboot_instances", "terminate_instances",
+        "update_service(", "run_task(", "create_service(", "delete_service(",
+        "put_metric_alarm", "delete_alarms", "create_trail", "delete_trail",
+        "put_log_events", "create_log_group",
+    )
+    text = _all_source_text()
+    for op in forbidden_operations:
+        assert op not in text, f"unexpected mutating AWS operation name {op!r} found in detectors/ source"
+
+
+def test_fixture_loader_never_imports_aws_client_or_boto3():
+    """`replay` (the fully offline mode) must never require boto3 or
+    construct a real AWS client -- it stays 100% httpx.MockTransport-
+    backed, exactly as before Phase 13."""
+    text = (_DETECTORS_ROOT / "cli" / "fixture_loader.py").read_text()
+    assert "boto3" not in text
+    assert "aws_client" not in text
+    assert "Boto3AwsClient" not in text
+
+
+def test_replay_command_never_constructs_a_real_aws_client():
+    """`_cmd_replay` in cli/commands.py must never reference
+    Boto3AwsClient at all -- only `_cmd_analyze` (live mode, opt-in)
+    may."""
+    text = (_DETECTORS_ROOT / "cli" / "commands.py").read_text()
+    replay_fn = text.split("def _cmd_replay(")[1].split("def _cmd_verify(")[0]
+    assert "Boto3AwsClient" not in replay_fn
+    assert "aws_client" not in replay_fn.replace("# noqa", "")
+
+
+def test_get_metric_data_is_disabled_by_default():
+    import inspect
+
+    from detectors.clients.aws_client import Boto3AwsClient
+
+    sig = inspect.signature(Boto3AwsClient.__init__)
+    assert sig.parameters["enable_get_metric_data"].default is False
+
+
+def test_aws_client_module_never_hardcodes_a_credential_value():
+    text = (_DETECTORS_ROOT / "clients" / "aws_client.py").read_text()
+    for forbidden in ("api_key", "API_KEY", "password=", "PASSWORD=", 'Bearer "', "Bearer '", "aws_access_key_id=", "aws_secret_access_key="):
+        assert forbidden not in text, f"unexpected hardcoded-credential-shaped string {forbidden!r}"
+
+
+def test_aws_client_error_classification_never_includes_the_full_exception_message():
+    """`_classify_client_error` must build its own typed exception's
+    message ONLY from the AWS-reported error Code -- never the
+    original exception's full `str(exc)`, which botocore can populate
+    with echoed request parameters."""
+    text = (_DETECTORS_ROOT / "clients" / "aws_client.py").read_text()
+    classify_fn = text.split("def _classify_client_error(")[1].split("\nclass ")[0]
+    assert "str(exc)" not in classify_fn
+
+
 def test_kubernetes_client_rejects_arbitrary_namespace_strings():
     from detectors.clients.kubernetes_client import KubernetesClient, KubernetesConfigError
 

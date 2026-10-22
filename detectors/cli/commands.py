@@ -35,6 +35,8 @@ import pathlib
 import sys
 from datetime import UTC, datetime
 
+from detectors.aws.publisher import publish_aws_findings
+from detectors.clients.aws_client import AwsConfigError, AwsObserverScope, Boto3AwsClient
 from detectors.clients.control_plane_client import ControlPlaneClient
 from detectors.clients.kubernetes_client import KubernetesConfigError, kubernetes_client_from_kubeconfig
 from detectors.clients.prometheus_client import ALLOWED_SERVICES, PrometheusClient
@@ -65,6 +67,8 @@ def _report_to_dict(report: PipelineReport) -> dict:
         "invariant_reports": [r.model_dump(mode="json") for r in report.invariant_reports],
         "k8s_collection_results": [r.model_dump(mode="json") for r in report.k8s_collection_results],
         "k8s_findings": [f.model_dump(mode="json") for f in report.k8s_findings],
+        "aws_collection_results": [r.model_dump(mode="json") for r in report.aws_collection_results],
+        "aws_findings": [f.model_dump(mode="json") for f in report.aws_findings],
         "correlation_groups": [g.model_dump(mode="json") for g in report.correlation_groups],
         "tentative_associations": [t.model_dump(mode="json") for t in report.tentative_associations],
         "checks_executed": report.checks_executed,
@@ -109,10 +113,55 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         )
         return 1
 
-    if prometheus_client is None and tempo_client is None and control_plane_client is None and not all(kube_args_given):
+    # AWS observation is opt-in via --aws-observe and requires an
+    # explicit account id, region, AND at least one resource enrollment
+    # together -- never a silent "observe the whole account" default
+    # (Gate 1: "Require explicit resource enrollment/scope" / "Do not
+    # automatically scan every resource in an AWS account").
+    aws_enroll_ecs_services: list[tuple[str, str]] = []
+    for raw_pair in args.aws_enroll_ecs_service or []:
+        if ":" not in raw_pair:
+            print(
+                f"VALIDATION ERROR: --aws-enroll-ecs-service must be 'cluster:service', got {raw_pair!r}",
+                file=sys.stderr,
+            )
+            return 1
+        cluster, _, service = raw_pair.partition(":")
+        aws_enroll_ecs_services.append((cluster, service))
+
+    aws_any_scope_given = any(
+        (
+            args.aws_account_id, args.aws_region, args.aws_enroll_cloudwatch_alarm,
+            args.aws_enroll_ec2_instance, args.aws_enroll_ecs_cluster, aws_enroll_ecs_services,
+        )
+    )
+    if args.aws_observe or aws_any_scope_given:
+        if not (args.aws_observe and args.aws_account_id and args.aws_region):
+            print(
+                "VALIDATION ERROR: AWS observation requires --aws-observe, --aws-account-id, and --aws-region "
+                "all together, or all omitted",
+                file=sys.stderr,
+            )
+            return 1
+        if not (
+            args.aws_enroll_cloudwatch_alarm or args.aws_enroll_ec2_instance
+            or args.aws_enroll_ecs_cluster or aws_enroll_ecs_services
+        ):
+            print(
+                "VALIDATION ERROR: AWS observation requires at least one explicit resource enrollment "
+                "(--aws-enroll-cloudwatch-alarm/--aws-enroll-ec2-instance/--aws-enroll-ecs-cluster/"
+                "--aws-enroll-ecs-service) -- never an implicit whole-account scan",
+                file=sys.stderr,
+            )
+            return 1
+
+    aws_configured = bool(args.aws_observe and args.aws_account_id and args.aws_region)
+
+    if prometheus_client is None and tempo_client is None and control_plane_client is None and not all(kube_args_given) and not aws_configured:
         print(
             "VALIDATION ERROR: at least one of --prometheus-url/--tempo-url/--control-plane-url/"
-            "(--kubeconfig + --kube-context + --kube-namespace) is required for 'analyze' (live mode) -- "
+            "(--kubeconfig + --kube-context + --kube-namespace)/(--aws-observe + --aws-account-id + "
+            "--aws-region + a resource enrollment) is required for 'analyze' (live mode) -- "
             "use 'replay --fixture ...' for a fully offline run",
             file=sys.stderr,
         )
@@ -149,6 +198,30 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             )
             return 1
 
+    # Correction round-equivalent discipline for AWS (Phase 13): the
+    # publish token is read ONLY from the environment -- never a CLI
+    # argument, which would otherwise appear in shell history/process
+    # listings.
+    aws_ingestion_token = os.environ.get("CONTROL_PLANE_AWS_INGESTION_TOKEN", "")
+    if args.publish_aws_findings_to_control_plane:
+        if not aws_configured:
+            print(
+                "VALIDATION ERROR: --publish-aws-findings-to-control-plane requires AWS observation to be "
+                "configured (--aws-observe/--aws-account-id/--aws-region/a resource enrollment)",
+                file=sys.stderr,
+            )
+            return 1
+        if control_plane_client is None:
+            print("VALIDATION ERROR: --publish-aws-findings-to-control-plane requires --control-plane-url", file=sys.stderr)
+            return 1
+        if not aws_ingestion_token:
+            print(
+                "VALIDATION ERROR: --publish-aws-findings-to-control-plane requires "
+                "CONTROL_PLANE_AWS_INGESTION_TOKEN to be set in the environment",
+                file=sys.stderr,
+            )
+            return 1
+
     config = PipelineConfig(services=services)
     # ONE wall-clock instant, captured once, reused as BOTH the
     # pipeline's own observation window end AND the published
@@ -167,6 +240,24 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                 print(f"VALIDATION ERROR: {exc}", file=sys.stderr)
                 return 1
 
+        aws_client = None
+        if aws_configured:
+            try:
+                aws_scope = AwsObserverScope(
+                    account_id=args.aws_account_id,
+                    region=args.aws_region,
+                    enrolled_alarm_names=tuple(args.aws_enroll_cloudwatch_alarm or ()),
+                    enrolled_instance_ids=tuple(args.aws_enroll_ec2_instance or ()),
+                    enrolled_ecs_clusters=tuple(args.aws_enroll_ecs_cluster or ()),
+                    enrolled_ecs_services=tuple(aws_enroll_ecs_services),
+                )
+                aws_client = Boto3AwsClient(
+                    aws_scope, profile=args.aws_profile, enable_get_metric_data=args.enable_aws_get_metric_data
+                )
+            except AwsConfigError as exc:
+                print(f"VALIDATION ERROR: {exc}", file=sys.stderr)
+                return 1
+
         try:
             report = asyncio.run(
                 run_pipeline(
@@ -174,6 +265,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                     tempo_client=tempo_client,
                     control_plane_client=control_plane_client,
                     kubernetes_client=kubernetes_client,
+                    aws_client=aws_client,
                     config=config,
                     now=run_now,
                 )
@@ -211,6 +303,28 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             failed = sum(1 for r in publish_results if r.outcome == "failed")
             if failed:
                 print(f"  {failed} of {len(publish_results)} finding(s) could not be published", file=sys.stderr)
+
+        if args.publish_aws_findings_to_control_plane:
+            print("=== publishing this run's own AWS findings to control-plane (opt-in) ===", file=sys.stderr)
+            aws_publish_results = asyncio.run(
+                publish_aws_findings(
+                    report.aws_findings,
+                    report.aws_collection_results,
+                    collected_at=run_now,
+                    control_plane_url=args.control_plane_url,
+                    ingestion_token=aws_ingestion_token,
+                )
+            )
+            for r in aws_publish_results:
+                print(
+                    f"  {r.resource_kind}/{r.resource_id} ({r.detector_id}): {r.outcome}"
+                    + (f" incident_id={r.incident_id}" if r.incident_id else "")
+                    + (f" -- {r.detail}" if r.detail else ""),
+                    file=sys.stderr,
+                )
+            aws_failed = sum(1 for r in aws_publish_results if r.outcome == "failed")
+            if aws_failed:
+                print(f"  {aws_failed} of {len(aws_publish_results)} AWS finding(s) could not be published", file=sys.stderr)
 
     _emit(report, args.output)
     return 0
@@ -291,6 +405,48 @@ def build_parser() -> argparse.ArgumentParser:
             "opt-in: POST this run's own Kubernetes findings to control-plane's authenticated "
             "ingestion endpoint (requires --control-plane-url, Kubernetes observation configured, and "
             "CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN set in the environment). A single point-in-time "
+            "publish pass -- never a loop or scheduler."
+        ),
+    )
+    p_analyze.add_argument(
+        "--aws-observe",
+        action="store_true",
+        help=(
+            "deliberate opt-in for live, read-only AWS observation (Phase 13) -- requires "
+            "--aws-account-id, --aws-region, and at least one explicit resource enrollment together"
+        ),
+    )
+    p_analyze.add_argument("--aws-account-id", default=None, help="the one explicit 12-digit AWS account id to observe")
+    p_analyze.add_argument("--aws-region", default=None, help="the one explicit AWS region to observe")
+    p_analyze.add_argument("--aws-profile", default=None, help="SDK credential provider chain profile name (optional)")
+    p_analyze.add_argument(
+        "--aws-enroll-cloudwatch-alarm", action="append", default=None,
+        help="repeatable; an explicitly enrolled CloudWatch alarm name (never 'all alarms')",
+    )
+    p_analyze.add_argument(
+        "--aws-enroll-ec2-instance", action="append", default=None,
+        help="repeatable; an explicitly enrolled EC2 instance id",
+    )
+    p_analyze.add_argument(
+        "--aws-enroll-ecs-cluster", action="append", default=None,
+        help="repeatable; an explicitly enrolled ECS cluster (every service in it is observed)",
+    )
+    p_analyze.add_argument(
+        "--aws-enroll-ecs-service", action="append", default=None,
+        help="repeatable; 'cluster:service' -- an explicitly enrolled single ECS service",
+    )
+    p_analyze.add_argument(
+        "--enable-aws-get-metric-data",
+        action="store_true",
+        help="opt-in: allow CloudWatch GetMetricData (has a real per-request AWS cost) -- disabled by default",
+    )
+    p_analyze.add_argument(
+        "--publish-aws-findings-to-control-plane",
+        action="store_true",
+        help=(
+            "opt-in: POST this run's own AWS findings to control-plane's authenticated ingestion "
+            "endpoint (requires --control-plane-url, AWS observation configured, and "
+            "CONTROL_PLANE_AWS_INGESTION_TOKEN set in the environment). A single point-in-time "
             "publish pass -- never a loop or scheduler."
         ),
     )

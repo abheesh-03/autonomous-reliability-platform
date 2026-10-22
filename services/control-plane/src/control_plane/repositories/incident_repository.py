@@ -372,6 +372,25 @@ class IncidentRepository:
         result = await self._session.execute(stmt)
         return result.mappings().first()
 
+    async def get_latest_aws_evidence_event(self, incident_id: uuid.UUID) -> Mapping | None:
+        """Phase 13: the ONE trusted, persisted source of an AWS-
+        sourced incident's own resource identity -- the most recent
+        actor_type='aws' event's metadata. Mirrors
+        get_latest_kubernetes_evidence_event's own query/ordering
+        exactly. Returns None if this incident has no AWS-actor event
+        at all -- never a fabricated evidence row."""
+        stmt = (
+            sa.select(incident_events_table)
+            .where(
+                incident_events_table.c.incident_id == incident_id,
+                incident_events_table.c.actor_type == "aws",
+            )
+            .order_by(incident_events_table.c.occurred_at.desc(), incident_events_table.c.id.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.mappings().first()
+
     # ------------------------------------------------------------------
     # Phase 3D: incident lifecycle (manual transitions + Alertmanager-
     # driven automatic resolution).

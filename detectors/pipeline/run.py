@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from catalog.schemas.finding import FailureFinding
+from detectors.aws.findings import build_findings_from_aws
+from detectors.clients.aws_client import AwsClientProtocol
 from detectors.clients.control_plane_client import ControlPlaneClient
 from detectors.clients.kubernetes_client import KubernetesClient
 from detectors.clients.prometheus_client import PrometheusClient
@@ -15,6 +17,7 @@ from detectors.kubernetes.findings import build_findings_from_kubernetes
 from detectors.pipeline.findings import build_findings_from_anomalies, build_findings_from_invariant_violations
 from detectors.pipeline.orchestrator import PipelineConfig, RawPipelineResult, collect_and_detect
 from detectors.schemas.anomaly import AnomalyDetectionResult, DetectionResult
+from detectors.schemas.aws import AwsCollectionResult, AwsDetectionFinding, AwsDetectionResult
 from detectors.schemas.correlation import CorrelationGroup, TentativeAssociation
 from detectors.schemas.dependency import DependencyGraph, PropagationPath
 from detectors.schemas.invariant import InvariantCheckReport, InvariantCheckResult
@@ -30,6 +33,8 @@ class PipelineReport:
     invariant_reports: list[InvariantCheckReport]
     k8s_collection_results: list[CollectionResult]
     k8s_findings: list[K8sDetectionFinding]
+    aws_collection_results: list[AwsCollectionResult]
+    aws_findings: list[AwsDetectionFinding]
     correlation_groups: list[CorrelationGroup]
     tentative_associations: list[TentativeAssociation]
     checks_executed: list[str]
@@ -73,6 +78,13 @@ def build_summary(raw: RawPipelineResult, findings: list[FailureFinding]) -> str
         lines.append(f"Kubernetes collection: {outcomes}")
         lines.append(f"Kubernetes findings: {len(raw.k8s_findings)} ({confirmed} CONFIRMED, {insufficient} INSUFFICIENT_EVIDENCE)")
 
+    if raw.aws_collection_results:
+        outcomes = ", ".join(f"{cr.resource_kind}={cr.outcome.value}" for cr in raw.aws_collection_results)
+        confirmed = sum(1 for f in raw.aws_findings if f.result == AwsDetectionResult.CONFIRMED)
+        insufficient = sum(1 for f in raw.aws_findings if f.result == AwsDetectionResult.INSUFFICIENT_EVIDENCE)
+        lines.append(f"AWS collection: {outcomes}")
+        lines.append(f"AWS findings: {len(raw.aws_findings)} ({confirmed} CONFIRMED, {insufficient} INSUFFICIENT_EVIDENCE)")
+
     lines.append(f"Correlation groups: {len(raw.correlation_groups)}")
     lines.append(f"Tentative (weak, unmerged) associations: {len(raw.tentative_associations)}")
     lines.append(
@@ -87,6 +99,7 @@ async def run_pipeline(
     tempo_client: TempoClient | None,
     control_plane_client: ControlPlaneClient | None,
     kubernetes_client: KubernetesClient | None = None,
+    aws_client: AwsClientProtocol | None = None,
     config: PipelineConfig = PipelineConfig(),
     now: datetime | None = None,
 ) -> PipelineReport:
@@ -95,6 +108,7 @@ async def run_pipeline(
         tempo_client=tempo_client,
         control_plane_client=control_plane_client,
         kubernetes_client=kubernetes_client,
+        aws_client=aws_client,
         config=config,
         now=now,
     )
@@ -103,6 +117,7 @@ async def run_pipeline(
         build_findings_from_anomalies(raw.anomaly_results, raw.propagation_paths, raw.correlation_group_by_item_id)
         + build_findings_from_invariant_violations(raw.invariant_reports)
         + build_findings_from_kubernetes(raw.k8s_findings, collected_at)
+        + build_findings_from_aws(raw.aws_findings, collected_at)
     )
     summary = build_summary(raw, findings)
 
@@ -114,6 +129,8 @@ async def run_pipeline(
         invariant_reports=raw.invariant_reports,
         k8s_collection_results=raw.k8s_collection_results,
         k8s_findings=raw.k8s_findings,
+        aws_collection_results=raw.aws_collection_results,
+        aws_findings=raw.aws_findings,
         correlation_groups=raw.correlation_groups,
         tentative_associations=raw.tentative_associations,
         checks_executed=raw.checks_executed,

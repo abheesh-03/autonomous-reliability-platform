@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from control_plane.domain.incident import Status
 
 EventType = Literal["created", "observed", "status_transition"]
-ActorType = Literal["alertmanager", "operator"]
+ActorType = Literal["alertmanager", "operator", "kubernetes", "aws"]
 
 
 class IncidentEvent(BaseModel):

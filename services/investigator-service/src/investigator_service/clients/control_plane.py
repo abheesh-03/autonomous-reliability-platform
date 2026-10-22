@@ -89,6 +89,29 @@ class ControlPlaneClient:
         body = resp.json()
         return body if isinstance(body, dict) else None
 
+    async def get_aws_evidence(self, incident_id: str) -> dict | None:
+        """GET /api/v1/incidents/{id}/aws-evidence (Phase 13) -- the
+        ONE trusted, persisted source of an AWS-sourced incident's own
+        resource identity. Mirrors `get_kubernetes_evidence`'s own
+        contract and error handling exactly: returns the raw,
+        already-bounded response dict, or None for a 404 (no recorded
+        AWS evidence for this incident -- a real, honest outcome,
+        never an error that would abort the whole investigation)."""
+        url = f"{self._base_url}/api/v1/incidents/{incident_id}/aws-evidence"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+                resp = await client.get(url)
+        except httpx.HTTPError as exc:
+            raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
+
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise ControlPlaneUnavailableError(f"control-plane returned HTTP {resp.status_code} for {url}")
+
+        body = resp.json()
+        return body if isinstance(body, dict) else None
+
     async def get_all_events(self, incident_id: str, *, page_size: int = 100, max_events: int = 200) -> tuple[list[IncidentEventSnapshot], int]:
         """Fully paginates the audit timeline via the endpoint's own
         limit/offset contract (page_size capped at the API's documented

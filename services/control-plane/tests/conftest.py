@@ -52,6 +52,12 @@ os.environ.setdefault("CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN", "test-remediat
 # the Kubernetes finding-ingestion endpoint — test_kubernetes_ingestion.py
 # asserts it is not interchangeable with any of the other five.
 os.environ.setdefault("CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN", "test-kubernetes-ingestion-token")
+# Phase 13: a SEPARATE deterministic, known-in-tests Bearer token for
+# the AWS finding-ingestion endpoint — test_aws_ingestion.py asserts it
+# is not interchangeable with any of the other six (including the
+# Kubernetes ingestion token specifically -- Gate 4's own explicit
+# requirement).
+os.environ.setdefault("CONTROL_PLANE_AWS_INGESTION_TOKEN", "test-aws-ingestion-token")
 
 # Exported so test_webhook.py/test_lifecycle.py can build a correct
 # `Authorization: Bearer <token>` header without hard-coding the
@@ -64,6 +70,7 @@ REMEDIATION_PROPOSAL_TOKEN = os.environ["CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKE
 REMEDIATION_APPROVER_TOKEN = os.environ["CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN"]
 REMEDIATION_EXECUTOR_TOKEN = os.environ["CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN"]
 KUBERNETES_INGESTION_TOKEN = os.environ["CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN"]
+AWS_INGESTION_TOKEN = os.environ["CONTROL_PLANE_AWS_INGESTION_TOKEN"]
 
 import pytest
 from fastapi.testclient import TestClient
@@ -311,6 +318,12 @@ class FakeIncidentRepository:
 
     async def get_latest_kubernetes_evidence_event(self, incident_id):
         matched = [e for e in self.events if e["incident_id"] == incident_id and e["actor_type"] == "kubernetes"]
+        if not matched:
+            return None
+        return max(matched, key=lambda e: (e["occurred_at"], e["id"]))
+
+    async def get_latest_aws_evidence_event(self, incident_id):
+        matched = [e for e in self.events if e["incident_id"] == incident_id and e["actor_type"] == "aws"]
         if not matched:
             return None
         return max(matched, key=lambda e: (e["occurred_at"], e["id"]))

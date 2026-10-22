@@ -20,7 +20,14 @@ cluster and the docker-compose Prometheus/Tempo/control-plane stack
 are genuinely separate environments with no real shared trace id,
 fingerprint, or observed dependency edge between them -- attempting to
 correlate them would fabricate evidence that does not exist (see
-`docs/architecture/phase-12a-kubernetes-observer.md`)."""
+`docs/architecture/phase-12a-kubernetes-observer.md`).
+
+AWS observation (Phase 13) is additive, opt-in, and -- for the exact
+same reason as Kubernetes above -- deliberately NOT fed into the
+cross-system correlation engine: a real AWS account and this stack's
+own sandbox/docker-compose services share no real trace id,
+fingerprint, or observed dependency edge either (see
+`docs/architecture/phase-13-aws-reliability-integration.md`)."""
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -30,6 +37,13 @@ from detectors.anomaly.detector import (
     detect_latency_deviation,
     detect_telemetry_pipeline_health,
 )
+from detectors.aws.collector import collect_cloudtrail_events, collect_cloudwatch_alarms, collect_ec2_instances, collect_ecs_services
+from detectors.aws.detectors import (
+    detect_cloudwatch_alarms_in_alarm_state,
+    detect_ec2_failed_status_checks,
+    detect_ecs_service_task_degradation,
+)
+from detectors.clients.aws_client import AwsClientProtocol
 from detectors.clients.control_plane_client import ControlPlaneClient, ControlPlaneUnavailableError
 from detectors.clients.kubernetes_client import KubernetesClient
 from detectors.clients.prometheus_client import ALLOWED_SERVICES, PrometheusClient, PrometheusClientError, PrometheusUnavailableError
@@ -47,10 +61,12 @@ from detectors.kubernetes.detectors import (
     detect_pod_readiness_degradation,
 )
 from detectors.schemas.anomaly import AnomalyDetectionResult, DetectionResult
+from detectors.schemas.aws import AwsCollectionOutcome, AwsCollectionResult, AwsDetectionFinding
 from detectors.schemas.correlation import CorrelationGroup, CorrelationInput, TentativeAssociation
 from detectors.schemas.dependency import DependencyGraph, PropagationPath
 from detectors.schemas.invariant import InvariantCheckReport, InvariantCheckResult
 from detectors.schemas.kubernetes import CollectionOutcome, CollectionResult, K8sDetectionFinding
+from detectors.clients.aws_client import AwsIdentityMismatchError, AwsUnavailableError
 
 
 @dataclass(frozen=True)
@@ -73,6 +89,8 @@ class RawPipelineResult:
     invariant_reports: list[InvariantCheckReport] = field(default_factory=list)
     k8s_collection_results: list[CollectionResult] = field(default_factory=list)
     k8s_findings: list[K8sDetectionFinding] = field(default_factory=list)
+    aws_collection_results: list[AwsCollectionResult] = field(default_factory=list)
+    aws_findings: list[AwsDetectionFinding] = field(default_factory=list)
     correlation_groups: list[CorrelationGroup] = field(default_factory=list)
     tentative_associations: list[TentativeAssociation] = field(default_factory=list)
     correlation_group_by_item_id: dict[str, str] = field(default_factory=dict)
@@ -81,6 +99,7 @@ class RawPipelineResult:
 
 
 _USABLE_K8S_OUTCOMES = (CollectionOutcome.SUCCESS, CollectionOutcome.EMPTY, CollectionOutcome.PARTIAL)
+_USABLE_AWS_OUTCOMES = (AwsCollectionOutcome.SUCCESS, AwsCollectionOutcome.EMPTY, AwsCollectionOutcome.PARTIAL)
 
 
 async def collect_and_detect(
@@ -89,6 +108,7 @@ async def collect_and_detect(
     tempo_client: TempoClient | None,
     control_plane_client: ControlPlaneClient | None,
     kubernetes_client: KubernetesClient | None = None,
+    aws_client: AwsClientProtocol | None = None,
     config: PipelineConfig = PipelineConfig(),
     now: datetime | None = None,
 ) -> RawPipelineResult:
@@ -218,6 +238,63 @@ async def collect_and_detect(
             result.checks_not_executed.append(
                 ("kubernetes_deployment_detector", f"deployment collection outcome was {deployments_result.outcome.value}")
             )
+
+    # -- AWS OBSERVATION (Phase 13, additive, opt-in) --
+    if aws_client is None:
+        result.checks_not_executed.append(("aws_observation", "no AWS client was supplied"))
+    else:
+        try:
+            await aws_client.verify_identity()
+        except AwsIdentityMismatchError as exc:
+            # Fail closed on the WHOLE AWS stage -- an account mismatch
+            # means every subsequent call here could be observing the
+            # wrong AWS account entirely; never silently proceed.
+            result.checks_not_executed.append(("aws_observation", f"identity verification failed: {exc}"))
+            aws_client = None  # type: ignore[assignment]
+        except AwsUnavailableError as exc:
+            result.checks_not_executed.append(("aws_observation", f"identity verification unavailable: {exc}"))
+            aws_client = None  # type: ignore[assignment]
+
+    if aws_client is not None:
+        alarms_result, alarms = await collect_cloudwatch_alarms(aws_client)
+        instances_result, instances = await collect_ec2_instances(aws_client)
+        services_result, services = await collect_ecs_services(aws_client)
+        cloudtrail_result, cloudtrail_events = await collect_cloudtrail_events(aws_client, start_time=boundary, end_time=observation_end)
+        result.aws_collection_results = [alarms_result, instances_result, services_result, cloudtrail_result]
+
+        for cr in result.aws_collection_results:
+            check_name = f"aws_collect_{cr.resource_kind.lower()}"
+            if cr.outcome in _USABLE_AWS_OUTCOMES:
+                result.checks_executed.append(check_name)
+                if cr.outcome == AwsCollectionOutcome.PARTIAL:
+                    result.checks_not_executed.append((f"{check_name}_complete_coverage", f"partial collection: {cr.detail}"))
+            else:
+                result.checks_not_executed.append((check_name, f"{cr.outcome.value}: {cr.detail}"))
+
+        # CloudTrail is best-effort SUPPORTING evidence only (Gate 2:
+        # "never automatically assumed to be the root cause") -- a
+        # failed CloudTrail collection never blocks the other three
+        # detectors; they simply proceed with no supporting change
+        # events attached (never fabricated ones).
+        cloudtrail_usable = cloudtrail_events if cloudtrail_result.outcome in _USABLE_AWS_OUTCOMES else []
+
+        if alarms_result.outcome in _USABLE_AWS_OUTCOMES:
+            result.aws_findings.extend(detect_cloudwatch_alarms_in_alarm_state(alarms, aws_client.scope.account_id, aws_client.scope.region, cloudtrail_usable))
+            result.checks_executed.append("aws_cloudwatch_detector")
+        else:
+            result.checks_not_executed.append(("aws_cloudwatch_detector", f"alarm collection outcome was {alarms_result.outcome.value}"))
+
+        if instances_result.outcome in _USABLE_AWS_OUTCOMES:
+            result.aws_findings.extend(detect_ec2_failed_status_checks(instances, aws_client.scope.account_id, aws_client.scope.region, cloudtrail_usable))
+            result.checks_executed.append("aws_ec2_detector")
+        else:
+            result.checks_not_executed.append(("aws_ec2_detector", f"EC2 collection outcome was {instances_result.outcome.value}"))
+
+        if services_result.outcome in _USABLE_AWS_OUTCOMES:
+            result.aws_findings.extend(detect_ecs_service_task_degradation(services, aws_client.scope.account_id, aws_client.scope.region, cloudtrail_usable))
+            result.checks_executed.append("aws_ecs_detector")
+        else:
+            result.checks_not_executed.append(("aws_ecs_detector", f"ECS collection outcome was {services_result.outcome.value}"))
 
     # -- DETERMINISTIC INCIDENT CORRELATION --
     correlation_items: list[CorrelationInput] = []

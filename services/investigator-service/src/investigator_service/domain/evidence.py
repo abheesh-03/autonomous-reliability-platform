@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from investigator_service.domain.incident_snapshot import IncidentEventSnapshot, IncidentSnapshot
 
-EvidenceSource = Literal["control_plane", "prometheus", "loki", "tempo", "kubernetes"]
+EvidenceSource = Literal["control_plane", "prometheus", "loki", "tempo", "kubernetes", "aws"]
 
 # "ok": the source was reachable and returned at least one relevant
 # item. "no_data": the source was reachable but genuinely had nothing

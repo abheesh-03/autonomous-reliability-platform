@@ -70,6 +70,66 @@ def test_analyze_publish_without_ingestion_token_env_var_is_a_validation_error(m
     assert "CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN" in result.stderr
 
 
+def test_analyze_with_aws_observe_but_no_account_or_region_is_a_validation_error():
+    result = _run_cli(["analyze", "--aws-observe"])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+    assert "--aws-account-id" in result.stderr
+
+
+def test_analyze_with_aws_account_and_region_but_no_observe_flag_is_a_validation_error():
+    result = _run_cli(["analyze", "--aws-account-id", "123456789012", "--aws-region", "us-east-1"])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+
+
+def test_analyze_with_aws_observe_but_no_resource_enrollment_is_a_validation_error():
+    result = _run_cli([
+        "analyze", "--aws-observe", "--aws-account-id", "123456789012", "--aws-region", "us-east-1",
+    ])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+    assert "resource enrollment" in result.stderr
+
+
+def test_analyze_with_malformed_aws_account_id_is_a_validation_error():
+    result = _run_cli([
+        "analyze", "--aws-observe", "--aws-account-id", "not-a-valid-id", "--aws-region", "us-east-1",
+        "--aws-enroll-cloudwatch-alarm", "my-alarm",
+    ])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+
+
+def test_analyze_publish_aws_without_aws_observation_is_a_validation_error():
+    result = _run_cli(["analyze", "--control-plane-url", "http://x.invalid", "--publish-aws-findings-to-control-plane"])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+    assert "AWS observation" in result.stderr
+
+
+def test_analyze_publish_aws_without_ingestion_token_env_var_is_a_validation_error(monkeypatch):
+    monkeypatch.delenv("CONTROL_PLANE_AWS_INGESTION_TOKEN", raising=False)
+    result = _run_cli([
+        "analyze", "--aws-observe", "--aws-account-id", "123456789012", "--aws-region", "us-east-1",
+        "--aws-enroll-cloudwatch-alarm", "my-alarm", "--control-plane-url", "http://x.invalid",
+        "--publish-aws-findings-to-control-plane",
+    ])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+    assert "CONTROL_PLANE_AWS_INGESTION_TOKEN" in result.stderr
+
+
+def test_analyze_with_malformed_ecs_service_enrollment_pair_is_a_validation_error():
+    result = _run_cli([
+        "analyze", "--aws-observe", "--aws-account-id", "123456789012", "--aws-region", "us-east-1",
+        "--aws-enroll-ecs-service", "no-colon-here",
+    ])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+    assert "cluster:service" in result.stderr
+
+
 def test_replay_with_missing_fixture_is_a_validation_error():
     result = _run_cli(["replay", "--fixture", "/tmp/does-not-exist-detectors-fixture.json"])
     assert result.returncode == 1

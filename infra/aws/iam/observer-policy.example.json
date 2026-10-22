@@ -1,0 +1,59 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowObserverIdentityVerification",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowObserverCloudWatchRead",
+      "Effect": "Allow",
+      "Action": ["cloudwatch:DescribeAlarms", "cloudwatch:GetMetricData"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "REGION" }
+      }
+    },
+    {
+      "Sid": "AllowObserverCloudTrailRead",
+      "Effect": "Allow",
+      "Action": "cloudtrail:LookupEvents",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "REGION" }
+      }
+    },
+    {
+      "Sid": "AllowObserverEc2Read",
+      "Effect": "Allow",
+      "Action": ["ec2:DescribeInstances", "ec2:DescribeInstanceStatus"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "REGION" }
+      }
+    },
+    {
+      "Sid": "AllowObserverEcsListServices",
+      "Effect": "Allow",
+      "Action": "ecs:ListServices",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "REGION" },
+        "ArnEquals": { "ecs:cluster": "arn:aws:ecs:REGION:ACCOUNT_ID:cluster/ENROLLED_CLUSTER_NAME" }
+      }
+    },
+    {
+      "Sid": "AllowObserverEcsDescribeServices",
+      "Effect": "Allow",
+      "Action": "ecs:DescribeServices",
+      "Resource": [
+        "arn:aws:ecs:REGION:ACCOUNT_ID:service/ENROLLED_CLUSTER_NAME/ENROLLED_SERVICE_NAME"
+      ],
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "REGION" }
+      }
+    }
+  ]
+}

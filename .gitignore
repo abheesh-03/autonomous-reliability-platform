@@ -63,6 +63,11 @@ target/
 *.tfstate.*
 .terraform/
 .terraform.lock.hcl
+# Phase 13: a filled-in tfvars file is where a real AWS account id
+# would otherwise land -- never committed. *.example files (e.g.
+# terraform.tfvars.example) are explicitly re-allowed below.
+*.tfvars
+!*.tfvars.example
 
 # --- Logs / coverage ---
 *.log

@@ -22,8 +22,14 @@ internal write endpoints:
   Kubernetes observation pipeline (detectors/kubernetes, Phase 12A) --
   never by Alertmanager, a human operator, agent-runtime-service, or
   tool-gateway. Checked against CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN.
+- `require_aws_ingestion_token` — POST /internal/v1/aws/findings
+  (Phase 13). Held ONLY by the AWS observation pipeline
+  (detectors/aws) -- never by Alertmanager, a human operator,
+  agent-runtime-service, tool-gateway, or the Kubernetes observation
+  pipeline (Gate 4: "Do not reuse the Kubernetes ingestion token").
+  Checked against CONTROL_PLANE_AWS_INGESTION_TOKEN.
 
-These are deliberately SIX SEPARATE secrets, never interchangeable:
+These are deliberately SEVEN SEPARATE secrets, never interchangeable:
 Alertmanager must never be able to invoke the human/operator lifecycle
 endpoint; agent-runtime-service must never be able to approve/reject a
 proposal or record an execution result; tool-gateway must never be
@@ -96,4 +102,7 @@ require_remediation_executor_token = _require_token(
 )
 require_kubernetes_ingestion_token = _require_token(
     state_attr="kubernetes_ingestion_token", env_var_name="CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN"
+)
+require_aws_ingestion_token = _require_token(
+    state_attr="aws_ingestion_token", env_var_name="CONTROL_PLANE_AWS_INGESTION_TOKEN"
 )

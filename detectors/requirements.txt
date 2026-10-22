@@ -10,3 +10,13 @@ pytest-asyncio==1.4.0
 # of PyYAML, added only because kubeconfig has no other standard
 # format; nothing else in detectors/ needs it.
 PyYAML==6.0.2
+# Phase 13: the official AWS SDK, used ONLY by
+# detectors/clients/aws_client.py's Boto3AwsClient (the real, live
+# implementation) -- never imported anywhere else in this package.
+# The full detector/pipeline/CLI test suite never constructs
+# Boto3AwsClient at all (every test uses a plain in-test fake
+# implementing AwsClientProtocol -- see that module's own docstring),
+# so these two packages are a build-time dependency only, never a
+# live-AWS-credential requirement for CI.
+boto3==1.35.36
+botocore==1.35.36

@@ -1,0 +1,46 @@
+# Phase 13, Gate 6: copy to terraform.tfvars and fill in real values
+# ONLY when a human has separately authorized a real deployment (see
+# the parent README's "Future provisioning checklist"). terraform.tfvars
+# itself is gitignored (see the repo's own .gitignore's *.tfvars entry)
+# so a filled-in copy is never committed.
+#
+# No real AWS account id, credential, or secret belongs in this
+# example file -- every value below is a clearly fake placeholder.
+
+aws_account_id = "123456789012" # REPLACE -- never commit a real account id
+aws_region     = "us-east-1"
+aws_profile    = "reliability-platform-observer" # an SDK credential profile name, never a literal key
+
+# Stays false until a human operator deliberately authorizes
+# provisioning, as a separate, reviewed decision.
+enable_provisioning = false
+
+# Stays true (never reaching a real AWS endpoint, not even for
+# `terraform plan`) until that SAME human operator also deliberately
+# sets this to false -- see provider.tf's own docstring.
+offline_validation = true
+
+trusted_principal_arns = [
+  # "arn:aws:iam::123456789012:role/some-reviewed-principal",
+]
+
+enrolled_ec2_instance_ids = [
+  # "i-0123456789abcdef0",
+]
+
+# ecs:ListServices is scoped via the ecs:cluster CONDITION key --
+# cluster ARNs, never used as a Resource value (ListServices does not
+# support resource-level ARNs at all; see README).
+enrolled_ecs_cluster_arns = [
+  # "arn:aws:ecs:us-east-1:123456789012:cluster/prod",
+]
+
+# ecs:DescribeServices is scoped via its own Resource list -- SERVICE
+# ARNs, never cluster ARNs.
+enrolled_ecs_service_arns = [
+  # "arn:aws:ecs:us-east-1:123456789012:service/prod/checkout",
+]
+
+enrolled_cloudwatch_alarm_arns = [
+  # "arn:aws:cloudwatch:us-east-1:123456789012:alarm:checkout-high-error-rate",
+]

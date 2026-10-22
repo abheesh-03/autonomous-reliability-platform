@@ -160,6 +160,45 @@ async def test_get_kubernetes_evidence_unreachable_maps_to_unavailable():
         await _client(handler).get_kubernetes_evidence(str(SAMPLE_INCIDENT_ID))
 
 
+# ---------------------------------------------------------------------
+# Phase 13: GET .../aws-evidence
+# ---------------------------------------------------------------------
+
+
+async def test_get_aws_evidence_success():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/api/v1/incidents/{SAMPLE_INCIDENT_ID}/aws-evidence"
+        return httpx.Response(
+            200,
+            json={
+                "account_id": "123456789012", "region": "us-east-1",
+                "resource_kind": "CloudWatchAlarm", "resource_id": "checkout-high-error-rate",
+                "detector_id": "cloudwatch_alarm_in_alarm_state", "result": "confirmed",
+                "collection_completeness": "complete", "collected_at": "2026-04-01T09:00:00+00:00",
+            },
+        )
+
+    evidence = await _client(handler).get_aws_evidence(str(SAMPLE_INCIDENT_ID))
+    assert evidence["account_id"] == "123456789012"
+    assert evidence["region"] == "us-east-1"
+
+
+async def test_get_aws_evidence_404_returns_none_not_an_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "this incident has no recorded AWS evidence"})
+
+    evidence = await _client(handler).get_aws_evidence(str(SAMPLE_INCIDENT_ID))
+    assert evidence is None
+
+
+async def test_get_aws_evidence_unreachable_maps_to_unavailable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(ControlPlaneUnavailableError):
+        await _client(handler).get_aws_evidence(str(SAMPLE_INCIDENT_ID))
+
+
 async def test_control_plane_client_never_issues_a_write_request():
     """Static/behavioral guarantee: regardless of inputs, this client
     only ever issues GET requests. Any non-GET request reaching the

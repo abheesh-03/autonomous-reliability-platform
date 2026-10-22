@@ -33,7 +33,7 @@ from tests.conftest import FakeIncidentRepository
 
 def test_resolve_write_tokens_returns_all_unchanged_when_distinct():
     assert resolve_write_tokens(
-        "webhook-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value", "k8s-value"
+        "webhook-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value", "k8s-value", "aws-value"
     ) == (
         "webhook-value",
         "lifecycle-value",
@@ -41,23 +41,24 @@ def test_resolve_write_tokens_returns_all_unchanged_when_distinct():
         "approver-value",
         "executor-value",
         "k8s-value",
+        "aws-value",
     )
 
 
 def test_resolve_write_tokens_returns_both_none_when_identical():
-    assert resolve_write_tokens("same-value", "same-value") == (None, None, None, None, None, None)
+    assert resolve_write_tokens("same-value", "same-value") == (None, None, None, None, None, None, None)
 
 
 def test_resolve_write_tokens_preserves_one_unconfigured_token():
     # Exactly one token being unconfigured (None) must be unaffected —
     # it continues to fail closed only for its own endpoint, same as
     # before this guard existed.
-    assert resolve_write_tokens(None, "lifecycle-value") == (None, "lifecycle-value", None, None, None, None)
-    assert resolve_write_tokens("webhook-value", None) == ("webhook-value", None, None, None, None, None)
+    assert resolve_write_tokens(None, "lifecycle-value") == (None, "lifecycle-value", None, None, None, None, None)
+    assert resolve_write_tokens("webhook-value", None) == ("webhook-value", None, None, None, None, None, None)
 
 
 def test_resolve_write_tokens_both_unconfigured_stays_both_none():
-    assert resolve_write_tokens(None, None) == (None, None, None, None, None, None)
+    assert resolve_write_tokens(None, None) == (None, None, None, None, None, None, None)
 
 
 def test_resolve_write_tokens_clears_only_the_colliding_pair():
@@ -65,7 +66,7 @@ def test_resolve_write_tokens_clears_only_the_colliding_pair():
     # actually collide, leaving every other distinct token untouched —
     # never a blanket "any collision anywhere clears everything".
     result = resolve_write_tokens("webhook-value", "lifecycle-value", "same-value", "same-value", "executor-value")
-    assert result == ("webhook-value", "lifecycle-value", None, None, "executor-value", None)
+    assert result == ("webhook-value", "lifecycle-value", None, None, "executor-value", None, None)
 
 
 def test_resolve_write_tokens_remediation_tokens_cannot_collide_with_webhook_or_lifecycle():
@@ -73,7 +74,7 @@ def test_resolve_write_tokens_remediation_tokens_cannot_collide_with_webhook_or_
     # webhook/lifecycle token must also fail closed — not just
     # collisions among the three new tokens themselves.
     result = resolve_write_tokens("same-value", "lifecycle-value", "same-value", "approver-value", "executor-value")
-    assert result == (None, "lifecycle-value", None, "approver-value", "executor-value", None)
+    assert result == (None, "lifecycle-value", None, "approver-value", "executor-value", None, None)
 
 
 def test_resolve_write_tokens_kubernetes_ingestion_token_cannot_collide_with_any_other():
@@ -84,7 +85,22 @@ def test_resolve_write_tokens_kubernetes_ingestion_token_cannot_collide_with_any
     result = resolve_write_tokens(
         "same-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value", "same-value"
     )
-    assert result == (None, "lifecycle-value", "proposal-value", "approver-value", "executor-value", None)
+    assert result == (None, "lifecycle-value", "proposal-value", "approver-value", "executor-value", None, None)
+
+
+def test_resolve_write_tokens_aws_ingestion_token_cannot_collide_with_any_other():
+    # Phase 13: the seventh token (AWS finding ingestion) must be
+    # caught by the exact same pairwise guard as every other one --
+    # including the Kubernetes ingestion token specifically (Gate 4's
+    # own explicit "do not reuse the Kubernetes ingestion token"
+    # requirement -- this proves that even an ACCIDENTAL collision
+    # between the two is still caught, not merely that they default to
+    # different literal values).
+    result = resolve_write_tokens(
+        "webhook-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value",
+        "same-value", "same-value",
+    )
+    assert result == ("webhook-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value", None, None)
 
 
 # ---------------------------------------------------------------------

@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
+from control_plane.api.aws import router as aws_router
 from control_plane.api.health import router as health_router
 from control_plane.api.incidents import router as incidents_router
 from control_plane.api.kubernetes import router as kubernetes_router
@@ -36,6 +37,7 @@ from control_plane.api.remediation import router as remediation_router
 from control_plane.api.webhook import router as webhook_router
 from control_plane.api.webhook_limits import WebhookBodySizeLimitMiddleware
 from control_plane.core.config import (
+    AwsIngestionTokenSettings,
     DatabaseSettings,
     KubernetesIngestionTokenSettings,
     LifecycleSettings,
@@ -67,6 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         remediation_approver_token,
         remediation_executor_token,
         kubernetes_ingestion_token,
+        aws_ingestion_token,
     ) = resolve_write_tokens(
         WebhookSettings.from_env().token,
         LifecycleSettings.from_env().token,
@@ -74,6 +77,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         remediation_tokens.approver_token,
         remediation_tokens.executor_token,
         KubernetesIngestionTokenSettings.from_env().token,
+        AwsIngestionTokenSettings.from_env().token,
     )
     app.state.webhook_token = webhook_token
     app.state.lifecycle_token = lifecycle_token
@@ -81,6 +85,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.remediation_approver_token = remediation_approver_token
     app.state.remediation_executor_token = remediation_executor_token
     app.state.kubernetes_ingestion_token = kubernetes_ingestion_token
+    app.state.aws_ingestion_token = aws_ingestion_token
     try:
         yield
     finally:
@@ -123,6 +128,7 @@ app.include_router(incidents_router)
 app.include_router(webhook_router)
 app.include_router(remediation_router)
 app.include_router(kubernetes_router)
+app.include_router(aws_router)
 
 
 async def _database_unavailable(request: Request, exc: Exception) -> JSONResponse:

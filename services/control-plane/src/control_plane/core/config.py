@@ -168,6 +168,24 @@ class KubernetesIngestionTokenSettings:
         return cls(token=raw if raw.strip() else None)
 
 
+@dataclass(frozen=True)
+class AwsIngestionTokenSettings:
+    """Phase 13: the shared secret the AWS finding-ingestion endpoint
+    (POST /internal/v1/aws/findings, api/auth.py's
+    require_aws_ingestion_token) checks incoming Bearer tokens against.
+    Same non-blocking-startup philosophy as every other token here. A
+    SEPARATE credential from every one of the other six -- Gate 4: "Do
+    not reuse the Kubernetes ingestion token" -- by construction, not
+    merely by convention."""
+
+    token: str | None
+
+    @classmethod
+    def from_env(cls) -> "AwsIngestionTokenSettings":
+        raw = os.environ.get("CONTROL_PLANE_AWS_INGESTION_TOKEN", "")
+        return cls(token=raw if raw.strip() else None)
+
+
 def resolve_write_tokens(
     webhook_token: str | None,
     lifecycle_token: str | None,
@@ -175,7 +193,8 @@ def resolve_write_tokens(
     remediation_approver_token: str | None = None,
     remediation_executor_token: str | None = None,
     kubernetes_ingestion_token: str | None = None,
-) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
+    aws_ingestion_token: str | None = None,
+) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None, str | None]:
     """Post-review correction: an application-level guard against any
     TWO of this service's write-endpoint tokens being configured
     identically.
@@ -219,6 +238,7 @@ def resolve_write_tokens(
         "CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN",
         "CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN",
         "CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN",
+        "CONTROL_PLANE_AWS_INGESTION_TOKEN",
     )
     values = [
         webhook_token,
@@ -227,6 +247,7 @@ def resolve_write_tokens(
         remediation_approver_token,
         remediation_executor_token,
         kubernetes_ingestion_token,
+        aws_ingestion_token,
     ]
     cleared = [False] * len(values)
     for i in range(len(values)):

@@ -63,6 +63,8 @@ class EvidenceCollector:
 
         if incident.source == "kubernetes":
             await self._collect_kubernetes_evidence(next_id, incident_id, items, outcomes)
+        if incident.source == "aws":
+            await self._collect_aws_evidence(next_id, incident_id, items, outcomes)
 
         await self._collect_prometheus(next_id, window_start, window_end, items, outcomes)
         await self._collect_loki(next_id, window_start, window_end, items, outcomes)
@@ -234,6 +236,109 @@ class EvidenceCollector:
                     f"(detector={detector_id}, result={result}, collection_completeness={completeness})"
                 ),
                 query_summary="GET /api/v1/incidents/{id}/kubernetes-evidence",
+            )
+        )
+
+    async def _collect_aws_evidence(self, next_id, incident_id, items, outcomes) -> None:
+        """Phase 13: surfaces an AWS-sourced incident's own trusted,
+        persisted evidence (control-plane's GET /api/v1/incidents/{id}/
+        aws-evidence) as ONE bounded, redacted, OBSERVED EvidenceItem --
+        never a hypothesis, never an inferred cause. Mirrors
+        `_collect_kubernetes_evidence`'s own discipline exactly.
+
+        Answers, in the one item this produces: WHAT AWS symptom was
+        observed (detector_id/result), WHICH resource/service was
+        affected (account/region/resource_kind/resource_id/arn), WHEN
+        the evidence was collected (collected_at), and WHETHER
+        CloudTrail offers a relevant preceding change event
+        (supporting_change_events -- surfaced as a FACT, never as an
+        established cause: temporal proximity alone never establishes
+        causation). `collection_completeness` honestly carries what
+        evidence is missing; the free-text decision_rationale (which
+        may ultimately trace back to CloudWatch-reported state reasons
+        -- untrusted external text per Gate 3) is bounded and redacted
+        exactly like every other piece of external text this collector
+        already handles."""
+        try:
+            evidence = await self._control_plane.get_aws_evidence(incident_id)
+        except ControlPlaneUnavailableError as exc:
+            outcomes.append(SourceOutcome(source="aws", status="unavailable", detail=str(exc)))
+            return
+
+        if evidence is None:
+            outcomes.append(
+                SourceOutcome(
+                    source="aws",
+                    status="no_data",
+                    detail="this incident is aws-sourced but has no recorded AWS evidence event",
+                    query_summary="GET /api/v1/incidents/{id}/aws-evidence",
+                )
+            )
+            return
+
+        account_id = str(evidence.get("account_id", ""))
+        region = str(evidence.get("region", ""))
+        resource_kind = str(evidence.get("resource_kind", ""))
+        resource_id = str(evidence.get("resource_id", ""))
+        resource_arn = evidence.get("resource_arn")
+        detector_id = str(evidence.get("detector_id", ""))
+        result = str(evidence.get("result", ""))
+        completeness = str(evidence.get("collection_completeness", ""))
+        collected_at = evidence.get("collected_at")
+        supporting_change_events = evidence.get("supporting_change_events") or []
+
+        rationale = redact(str(evidence.get("decision_rationale", "")))[: self._bounds.max_incident_text_length]
+        change_events_summary = (
+            "; ".join(redact(str(e))[:300] for e in supporting_change_events[:5])
+            if supporting_change_events
+            else "none recorded"
+        )
+        # Correction round, Issue 4: the detector's own bounded,
+        # allowlisted measurements (e.g. CloudWatch state_value/
+        # state_reason, EC2 instance_status/system_status, ECS
+        # desired_count/running_count) -- previously never read at all
+        # (control-plane's own GET response never exposed them, see
+        # domain/aws_finding.py's own fix), which meant the
+        # investigator could never actually see the original
+        # measurements behind a detector's decision, only its free-text
+        # rationale. Each key/value is redacted exactly like every
+        # other piece of external text here -- a measurement VALUE is
+        # still AWS-reported, externally-sourced text (e.g. a
+        # CloudWatch state_reason), never trusted blindly.
+        measured_evidence = evidence.get("evidence") or {}
+        measured_evidence_summary = (
+            "; ".join(f"{redact(str(k))}={redact(str(v))}" for k, v in sorted(measured_evidence.items()))[
+                : self._bounds.max_incident_text_length
+            ]
+            if isinstance(measured_evidence, dict) and measured_evidence
+            else "none recorded"
+        )
+
+        items.append(
+            EvidenceItem(
+                id=next_id.next(),
+                source="aws",
+                observed_at=collected_at,
+                summary=f"AWS {detector_id}: {resource_kind}/{resource_id} in {account_id}/{region} -> {result}",
+                detail=(
+                    f"resource_arn={resource_arn or 'unknown'} collection_completeness={completeness} "
+                    f"decision_rationale={rationale!r} measured_evidence={measured_evidence_summary!r} "
+                    f"nearby_cloudtrail_change_events={change_events_summary!r} "
+                    "(temporal proximity alone does not establish causation -- investigate further before "
+                    "treating any listed change event as the cause)"
+                ),
+                reference={"endpoint": "GET /api/v1/incidents/{id}/aws-evidence"},
+            )
+        )
+        outcomes.append(
+            SourceOutcome(
+                source="aws",
+                status="ok" if completeness == "complete" else "partial",
+                detail=(
+                    f"aws evidence retrieved for {resource_kind}/{resource_id} in {account_id}/{region} "
+                    f"(detector={detector_id}, result={result}, collection_completeness={completeness})"
+                ),
+                query_summary="GET /api/v1/incidents/{id}/aws-evidence",
             )
         )
 

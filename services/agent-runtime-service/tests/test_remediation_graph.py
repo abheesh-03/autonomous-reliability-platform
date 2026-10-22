@@ -441,6 +441,24 @@ async def test_kubernetes_policy_never_fires_for_an_alertmanager_sourced_inciden
     assert snap.values["remediation_action_type"] == "clear_payment_authorization_fault"
 
 
+async def test_aws_sourced_incident_never_authorizes_payment_or_kubernetes_remediation():
+    """Phase 13, Gate 4 cross-source policy negative control: AWS
+    ingestion must never automatically authorize payment remediation
+    or Kubernetes remediation. propose_remediation's deterministic
+    policy only ever matches source == 'alertmanager' (payment) or
+    source == 'kubernetes' -- an 'aws'-sourced incident falls through
+    to not_applicable unconditionally, regardless of how the payment/
+    Kubernetes capabilities independently report (both deliberately
+    set healthy-for-remediation here, to prove the source itself -- not
+    an unmet precondition -- is what blocks this)."""
+    control_plane = FakeControlPlaneClient(incident_overrides={"source": "aws"})
+    tool_gateway = FakeToolGatewayClient(precondition_met=True, k8s_precondition_met=True)
+    _graph, _config, result = await _run(control_plane, FakeInvestigatorClient(), tool_gateway)
+    assert result["status"] == "completed"
+    assert result["remediation_status"] == "not_applicable"
+    assert control_plane.create_calls == 0
+
+
 async def test_kubernetes_tool_gateway_output_error_during_capability_check_is_terminal():
     control_plane = FakeControlPlaneClient(incident_overrides={"source": "kubernetes"})
     tool_gateway = FakeToolGatewayClient(k8s_capability_raise=ToolGatewayOutputError("malformed"))
