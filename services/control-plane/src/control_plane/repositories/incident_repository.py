@@ -130,6 +130,8 @@ class IncidentRepository:
         first_seen_at: datetime,
         last_seen_at: datetime,
         occurrence_starts_at: datetime,
+        actor_type: str = "alertmanager",
+        extra_metadata: Mapping[str, object] | None = None,
     ) -> tuple[uuid.UUID, bool]:
         """Atomically create-or-update the single ACTIVE incident for
         (source, source_fingerprint) — Phase 3C's real, database-level
@@ -193,6 +195,14 @@ class IncidentRepository:
         (on conflict, see above), so the value RETURNING reports is
         simultaneously correct as both "previous" and "new" status —
         there is no window in which it could be stale.
+
+        Phase 12B-D: `actor_type` defaults to "alertmanager" (every
+        existing caller is unaffected) -- ingestion/kubernetes_service.py
+        is the one other caller, passing "kubernetes" explicitly, so
+        the audit trail honestly records which source actually caused
+        the event (database/migrations/V8__add_kubernetes_incident_actor.sql
+        is what makes 'kubernetes' a legal actor_type for 'created'/
+        'observed' events at all).
         """
         insert_stmt = pg_insert(incidents_table).values(
             source=source,
@@ -233,14 +243,16 @@ class IncidentRepository:
         # fingerprint and the observation's own startsAt. Never the
         # Authorization header, the Bearer token, or the raw webhook
         # payload — see docs/architecture/phase-3e-incident-audit.md.
-        metadata = {
+        metadata: dict[str, object] = {
             "source_fingerprint": source_fingerprint,
             "observed_starts_at": occurrence_starts_at.isoformat(),
         }
+        if extra_metadata:
+            metadata.update(extra_metadata)
         await self._record_event(
             incident_id,
             event_type="created" if created else "observed",
-            actor_type="alertmanager",
+            actor_type=actor_type,
             previous_status=None if created else status,
             new_status=status,
             metadata=metadata,
@@ -324,6 +336,41 @@ class IncidentRepository:
         result = await self._session.execute(page_stmt)
         rows = result.mappings().all()
         return rows, total
+
+    async def get_latest_kubernetes_evidence_event(self, incident_id: uuid.UUID) -> Mapping | None:
+        """Phase 12B-D correction round (Issue 1): the ONE trusted,
+        persisted source of a Kubernetes-sourced incident's own
+        resource identity -- the most recent actor_type='kubernetes'
+        event's metadata (cluster/namespace/resource_kind/
+        resource_name/resource_uid/detector_id/result/
+        collection_completeness/collected_at -- see
+        ingestion/kubernetes_mapping.py's own
+        kubernetes_finding_event_metadata()). Ordered DESCENDING
+        (newest first) directly, via the same
+        (incident_id, occurred_at, id) index
+        get_incident_events/incident_events_incident_id_occurred_at_idx
+        already use -- never a page-size assumption over the ascending
+        listing. Returns None if this incident has no Kubernetes-actor
+        event at all (e.g. an Alertmanager-sourced incident, or one
+        with no recorded history yet) -- never a fabricated evidence
+        row.
+
+        This is the ONLY way agent-runtime-service's propose_remediation
+        node may ever learn a Kubernetes incident's own resource
+        identity -- never inferred from the incident's title/
+        description text, and never from this service trusting an
+        agent-supplied claim."""
+        stmt = (
+            sa.select(incident_events_table)
+            .where(
+                incident_events_table.c.incident_id == incident_id,
+                incident_events_table.c.actor_type == "kubernetes",
+            )
+            .order_by(incident_events_table.c.occurred_at.desc(), incident_events_table.c.id.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.mappings().first()
 
     # ------------------------------------------------------------------
     # Phase 3D: incident lifecycle (manual transitions + Alertmanager-

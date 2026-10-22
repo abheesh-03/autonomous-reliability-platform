@@ -17,8 +17,13 @@ internal write endpoints:
   /internal/v1/remediation-proposals/{id}/execution/{start,result}
   (Phase 8). Held ONLY by tool-gateway. Checked against
   CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN.
+- `require_kubernetes_ingestion_token` — POST
+  /internal/v1/kubernetes/findings (Phase 12B-D). Held ONLY by the
+  Kubernetes observation pipeline (detectors/kubernetes, Phase 12A) --
+  never by Alertmanager, a human operator, agent-runtime-service, or
+  tool-gateway. Checked against CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN.
 
-These are deliberately FIVE SEPARATE secrets, never interchangeable:
+These are deliberately SIX SEPARATE secrets, never interchangeable:
 Alertmanager must never be able to invoke the human/operator lifecycle
 endpoint; agent-runtime-service must never be able to approve/reject a
 proposal or record an execution result; tool-gateway must never be
@@ -88,4 +93,7 @@ require_remediation_approver_token = _require_token(
 )
 require_remediation_executor_token = _require_token(
     state_attr="remediation_executor_token", env_var_name="CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN"
+)
+require_kubernetes_ingestion_token = _require_token(
+    state_attr="kubernetes_ingestion_token", env_var_name="CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN"
 )

@@ -80,15 +80,18 @@ async def test_no_client_ever_sends_an_authorization_header():
 
 
 def test_no_source_file_references_a_bearer_token_or_credential_constant():
-    """`kubernetes_client.py` is excluded: it is Phase 12A's one
-    legitimately AUTHENTICATED client and must construct a real
-    `Authorization: Bearer {token}` header to support a restricted
-    ServiceAccount token identity -- that is correct, intended use,
-    never a leak (the token value itself comes from the caller's own
-    kubeconfig at runtime, never hardcoded -- checked separately
-    below). No other client in this package is authenticated at all,
-    so the blanket ban still applies to every other file."""
-    excluded_files = {"kubernetes_client.py"}
+    """`kubernetes_client.py` and `publisher.py` are excluded: both are
+    legitimately AUTHENTICATED clients (the former to the Kubernetes
+    API server with a kubeconfig-derived ServiceAccount token, the
+    latter -- Phase 12B-D correction round, Issue 6B -- to
+    control-plane's own Kubernetes finding-ingestion endpoint with
+    CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN) and must construct a real
+    `Authorization: Bearer {token}` header -- that is correct, intended
+    use, never a leak (the token value itself comes from the caller's
+    own kubeconfig/environment at runtime, never hardcoded -- checked
+    separately below). No other client in this package is authenticated
+    at all, so the blanket ban still applies to every other file."""
+    excluded_files = {"kubernetes_client.py", "publisher.py"}
     for path in _PY_FILES:
         if path.name in excluded_files:
             continue
@@ -104,6 +107,15 @@ def test_kubernetes_client_never_hardcodes_a_credential_value():
     # The only legitimate use is building the header from a
     # caller-supplied variable, never a literal token value.
     assert "self._bearer_token}" in text
+
+
+def test_publisher_never_hardcodes_a_credential_value():
+    text = (_DETECTORS_ROOT / "kubernetes" / "publisher.py").read_text()
+    for forbidden in ("api_key", "API_KEY", "password=", "PASSWORD=", 'Bearer "', "Bearer '"):
+        assert forbidden not in text, f"unexpected hardcoded-credential-shaped string {forbidden!r}"
+    # The only legitimate use is building the header from a
+    # caller-supplied variable, never a literal token value.
+    assert "{ingestion_token}" in text
 
 
 # ---------------------------------------------------------------------

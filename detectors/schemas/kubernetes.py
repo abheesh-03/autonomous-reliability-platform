@@ -166,6 +166,18 @@ class K8sDetectionFinding(BaseModel):
     resource_kind: str  # "Pod" | "Deployment"
     namespace: str
     resource_name: str
+    # Correction round (Phase 12B-D, Issue 6): the resource's own UID,
+    # read directly from the already-collected PodObservation/
+    # DeploymentObservation this finding was built from -- never
+    # fabricated. This is what lets a downstream consumer (control-
+    # plane's Kubernetes finding-ingestion endpoint, and in turn
+    # agent-runtime-service's propose_remediation) demonstrate a real
+    # identity/ownership relationship between a specific incident and
+    # a specific live resource, rather than only a name/namespace
+    # match. None only when the underlying object genuinely had no uid
+    # field in the collected API response (never silently defaulted to
+    # a placeholder).
+    resource_uid: str | None = None
     container_name: str | None = None
     result: K8sDetectionResult
     evidence: dict[str, str] = {}

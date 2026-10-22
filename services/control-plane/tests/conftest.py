@@ -48,6 +48,10 @@ os.environ.setdefault("CONTROL_PLANE_LIFECYCLE_TOKEN", "test-lifecycle-token")
 os.environ.setdefault("CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN", "test-remediation-proposal-token")
 os.environ.setdefault("CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN", "test-remediation-approver-token")
 os.environ.setdefault("CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN", "test-remediation-executor-token")
+# Phase 12B-D: a SEPARATE deterministic, known-in-tests Bearer token for
+# the Kubernetes finding-ingestion endpoint — test_kubernetes_ingestion.py
+# asserts it is not interchangeable with any of the other five.
+os.environ.setdefault("CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN", "test-kubernetes-ingestion-token")
 
 # Exported so test_webhook.py/test_lifecycle.py can build a correct
 # `Authorization: Bearer <token>` header without hard-coding the
@@ -59,6 +63,7 @@ LIFECYCLE_TOKEN = os.environ["CONTROL_PLANE_LIFECYCLE_TOKEN"]
 REMEDIATION_PROPOSAL_TOKEN = os.environ["CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN"]
 REMEDIATION_APPROVER_TOKEN = os.environ["CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN"]
 REMEDIATION_EXECUTOR_TOKEN = os.environ["CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN"]
+KUBERNETES_INGESTION_TOKEN = os.environ["CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN"]
 
 import pytest
 from fastapi.testclient import TestClient
@@ -151,11 +156,15 @@ class FakeIncidentRepository:
         first_seen_at,
         last_seen_at,
         occurrence_starts_at,
+        actor_type="alertmanager",
+        extra_metadata=None,
     ):
         metadata = {
             "source_fingerprint": source_fingerprint,
             "observed_starts_at": occurrence_starts_at.isoformat(),
         }
+        if extra_metadata:
+            metadata.update(extra_metadata)
         for row in self.rows:
             if (
                 row["source"] == source
@@ -175,7 +184,7 @@ class FakeIncidentRepository:
                 self._record_event(
                     row["id"],
                     event_type="observed",
-                    actor_type="alertmanager",
+                    actor_type=actor_type,
                     previous_status=row["status"],
                     new_status=row["status"],
                     metadata=metadata,
@@ -204,7 +213,7 @@ class FakeIncidentRepository:
         self._record_event(
             new_id,
             event_type="created",
-            actor_type="alertmanager",
+            actor_type=actor_type,
             previous_status=None,
             new_status="open",
             metadata=metadata,
@@ -299,6 +308,12 @@ class FakeIncidentRepository:
         total = len(matched)
         page = matched[offset : offset + limit]
         return page, total
+
+    async def get_latest_kubernetes_evidence_event(self, incident_id):
+        matched = [e for e in self.events if e["incident_id"] == incident_id and e["actor_type"] == "kubernetes"]
+        if not matched:
+            return None
+        return max(matched, key=lambda e: (e["occurred_at"], e["id"]))
 
 
 def make_incident_row(**overrides) -> dict:

@@ -16,10 +16,12 @@ import (
 // this fake only approximates the STATUS MACHINE closely enough for
 // tool-gateway's own unit tests.
 type fakeProposal struct {
-	ID         string
-	Status     string
-	ActionType string
-	Target     string
+	ID                  string
+	Status              string
+	ActionType          string
+	Target              string
+	TargetCluster       string
+	ExpectedResourceUID string
 }
 
 type fakeControlPlane struct {
@@ -51,10 +53,12 @@ func (f *fakeControlPlane) server() *httptest.Server {
 
 func (f *fakeControlPlane) writeProposal(w http.ResponseWriter, p *fakeProposal) {
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"id":          p.ID,
-		"status":      p.Status,
-		"action_type": p.ActionType,
-		"target":      p.Target,
+		"id":                    p.ID,
+		"status":                p.Status,
+		"action_type":           p.ActionType,
+		"target":                p.Target,
+		"target_cluster":        p.TargetCluster,
+		"expected_resource_uid": p.ExpectedResourceUID,
 	})
 }
 

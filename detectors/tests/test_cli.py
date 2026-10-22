@@ -39,6 +39,37 @@ def test_analyze_with_partial_kube_args_is_a_validation_error():
     assert "--kubeconfig" in result.stderr
 
 
+def test_analyze_publish_without_kube_args_is_a_validation_error():
+    """Correction round (Issue 6B): --publish-k8s-findings-to-control-plane
+    requires Kubernetes observation to be configured at all."""
+    result = _run_cli(["analyze", "--control-plane-url", "http://x.invalid", "--publish-k8s-findings-to-control-plane"])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+    assert "Kubernetes observation" in result.stderr
+
+
+def test_analyze_publish_without_control_plane_url_is_a_validation_error():
+    result = _run_cli([
+        "analyze", "--kubeconfig", "/tmp/does-not-matter.yaml", "--kube-context", "some-context",
+        "--kube-namespace", "reliability-sandbox", "--publish-k8s-findings-to-control-plane",
+    ])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+    assert "--control-plane-url" in result.stderr
+
+
+def test_analyze_publish_without_ingestion_token_env_var_is_a_validation_error(monkeypatch):
+    monkeypatch.delenv("CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN", raising=False)
+    result = _run_cli([
+        "analyze", "--kubeconfig", "/tmp/does-not-matter.yaml", "--kube-context", "some-context",
+        "--kube-namespace", "reliability-sandbox", "--control-plane-url", "http://x.invalid",
+        "--publish-k8s-findings-to-control-plane",
+    ])
+    assert result.returncode == 1
+    assert "VALIDATION ERROR" in result.stderr
+    assert "CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN" in result.stderr
+
+
 def test_replay_with_missing_fixture_is_a_validation_error():
     result = _run_cli(["replay", "--fixture", "/tmp/does-not-exist-detectors-fixture.json"])
     assert result.returncode == 1

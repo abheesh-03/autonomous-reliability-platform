@@ -24,7 +24,10 @@ func newHarness(t *testing.T) (*fakeControlPlane, *httptest.Server, *fakePayment
 
 	cpClient := controlplane.New(cpSrv.URL, "executor-token", 5*time.Second)
 	paymentClient := payment.New(paymentSrv.URL, "remediation-token", 5*time.Second)
-	handler := ExecuteHandler(cpClient, paymentClient)
+	// nil k8sExecutor: these tests exercise only the payment action --
+	// see kubernetes_execute_test.go for the Kubernetes action's own
+	// harness.
+	handler := ExecuteHandler(cpClient, paymentClient, nil)
 	return fcp, cpSrv, fp, paymentSrv, handler
 }
 

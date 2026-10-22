@@ -56,6 +56,7 @@ def detect_image_pull_failures(pods: list[PodObservation], events: list[EventObs
                     resource_kind="Pod",
                     namespace=pod.namespace,
                     resource_name=pod.name,
+                    resource_uid=pod.uid,
                     container_name=cs.container_name,
                     result=K8sDetectionResult.CONFIRMED,
                     evidence={
@@ -128,6 +129,7 @@ def detect_crash_loop_backoff(pods: list[PodObservation], events: list[EventObse
                         resource_kind="Pod",
                         namespace=pod.namespace,
                         resource_name=pod.name,
+                        resource_uid=pod.uid,
                         container_name=cs.container_name,
                         result=K8sDetectionResult.CONFIRMED,
                         evidence=evidence,
@@ -150,6 +152,7 @@ def detect_crash_loop_backoff(pods: list[PodObservation], events: list[EventObse
                         resource_kind="Pod",
                         namespace=pod.namespace,
                         resource_name=pod.name,
+                        resource_uid=pod.uid,
                         container_name=cs.container_name,
                         result=K8sDetectionResult.INSUFFICIENT_EVIDENCE,
                         evidence={
@@ -183,6 +186,7 @@ def detect_crash_loop_backoff(pods: list[PodObservation], events: list[EventObse
                         resource_kind="Pod",
                         namespace=pod.namespace,
                         resource_name=pod.name,
+                        resource_uid=pod.uid,
                         container_name=cs.container_name,
                         result=K8sDetectionResult.INSUFFICIENT_EVIDENCE,
                         evidence={"restart_count": str(restart_count), "pod_creation_timestamp": pod.creation_timestamp or ""},
@@ -229,6 +233,7 @@ def detect_oom_killed(pods: list[PodObservation]) -> list[K8sDetectionFinding]:
                             resource_kind="Pod",
                             namespace=pod.namespace,
                             resource_name=pod.name,
+                            resource_uid=pod.uid,
                             container_name=cs.container_name,
                             result=K8sDetectionResult.CONFIRMED,
                             evidence=evidence,
@@ -245,6 +250,7 @@ def detect_oom_killed(pods: list[PodObservation]) -> list[K8sDetectionFinding]:
                             resource_kind="Pod",
                             namespace=pod.namespace,
                             resource_name=pod.name,
+                            resource_uid=pod.uid,
                             container_name=cs.container_name,
                             result=K8sDetectionResult.INSUFFICIENT_EVIDENCE,
                             evidence=evidence,
@@ -313,6 +319,7 @@ def detect_deployment_rollout_failure(deployments: list[DeploymentObservation]) 
                         resource_kind="Deployment",
                         namespace=d.namespace,
                         resource_name=d.name,
+                        resource_uid=d.uid,
                         result=K8sDetectionResult.CONFIRMED,
                         evidence=evidence,
                         decision_rationale=(
@@ -329,6 +336,7 @@ def detect_deployment_rollout_failure(deployments: list[DeploymentObservation]) 
                         resource_kind="Deployment",
                         namespace=d.namespace,
                         resource_name=d.name,
+                        resource_uid=d.uid,
                         result=K8sDetectionResult.INSUFFICIENT_EVIDENCE,
                         evidence=evidence,
                         decision_rationale=(
@@ -358,6 +366,7 @@ def detect_deployment_rollout_failure(deployments: list[DeploymentObservation]) 
                     resource_kind="Deployment",
                     namespace=d.namespace,
                     resource_name=d.name,
+                    resource_uid=d.uid,
                     result=K8sDetectionResult.INSUFFICIENT_EVIDENCE,
                     evidence=evidence,
                     decision_rationale=(
@@ -397,6 +406,7 @@ def detect_pod_readiness_degradation(pods: list[PodObservation], events: list[Ev
                 resource_kind="Pod",
                 namespace=pod.namespace,
                 resource_name=pod.name,
+                resource_uid=pod.uid,
                 result=K8sDetectionResult.CONFIRMED,
                 evidence={
                     "phase": pod.phase or "",

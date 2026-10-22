@@ -92,6 +92,8 @@ async def create_remediation_proposal(
             idempotency_key=body.idempotency_key,
             action_type=body.action_type,
             target=body.target,
+            target_cluster=body.target_cluster,
+            expected_resource_uid=body.expected_resource_uid,
             reason=body.reason,
             supporting_evidence_ids=body.supporting_evidence_ids,
             supporting_context_ids=body.supporting_context_ids,

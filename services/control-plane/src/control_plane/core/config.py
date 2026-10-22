@@ -148,13 +148,34 @@ class RemediationTokenSettings:
         )
 
 
+@dataclass(frozen=True)
+class KubernetesIngestionTokenSettings:
+    """Phase 12B-D: the shared secret the Kubernetes finding-ingestion
+    endpoint (POST /internal/v1/kubernetes/findings, api/auth.py's
+    require_kubernetes_ingestion_token) checks incoming Bearer tokens
+    against. Same non-blocking-startup philosophy as every other token
+    here: an unconfigured token just makes that one endpoint fail
+    closed (401). A SEPARATE credential from every one of the other
+    five -- Alertmanager, agent-runtime-service, a human operator, and
+    tool-gateway must never be able to present this one, by
+    construction, and this one must never be able to present theirs."""
+
+    token: str | None
+
+    @classmethod
+    def from_env(cls) -> "KubernetesIngestionTokenSettings":
+        raw = os.environ.get("CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN", "")
+        return cls(token=raw if raw.strip() else None)
+
+
 def resolve_write_tokens(
     webhook_token: str | None,
     lifecycle_token: str | None,
     remediation_proposal_token: str | None = None,
     remediation_approver_token: str | None = None,
     remediation_executor_token: str | None = None,
-) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    kubernetes_ingestion_token: str | None = None,
+) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
     """Post-review correction: an application-level guard against any
     TWO of this service's write-endpoint tokens being configured
     identically.
@@ -176,7 +197,7 @@ def resolve_write_tokens(
     (not reaching into app.state itself) so it is directly unit-testable
     without constructing the whole FastAPI app.
 
-    For every PAIR of the five tokens that are both configured
+    For every PAIR of the six tokens that are both configured
     (non-None) and equal, BOTH members of that pair are returned as
     None — i.e. every endpoint either of them would authorize fails
     closed, exactly as if neither token had ever been configured —
@@ -197,6 +218,7 @@ def resolve_write_tokens(
         "CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN",
         "CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN",
         "CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN",
+        "CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN",
     )
     values = [
         webhook_token,
@@ -204,6 +226,7 @@ def resolve_write_tokens(
         remediation_proposal_token,
         remediation_approver_token,
         remediation_executor_token,
+        kubernetes_ingestion_token,
     ]
     cleared = [False] * len(values)
     for i in range(len(values)):

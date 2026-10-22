@@ -31,11 +31,13 @@ from collections.abc import AsyncIterator
 
 from control_plane.api.health import router as health_router
 from control_plane.api.incidents import router as incidents_router
+from control_plane.api.kubernetes import router as kubernetes_router
 from control_plane.api.remediation import router as remediation_router
 from control_plane.api.webhook import router as webhook_router
 from control_plane.api.webhook_limits import WebhookBodySizeLimitMiddleware
 from control_plane.core.config import (
     DatabaseSettings,
+    KubernetesIngestionTokenSettings,
     LifecycleSettings,
     RemediationTokenSettings,
     WebhookSettings,
@@ -64,18 +66,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         remediation_proposal_token,
         remediation_approver_token,
         remediation_executor_token,
+        kubernetes_ingestion_token,
     ) = resolve_write_tokens(
         WebhookSettings.from_env().token,
         LifecycleSettings.from_env().token,
         remediation_tokens.proposal_token,
         remediation_tokens.approver_token,
         remediation_tokens.executor_token,
+        KubernetesIngestionTokenSettings.from_env().token,
     )
     app.state.webhook_token = webhook_token
     app.state.lifecycle_token = lifecycle_token
     app.state.remediation_proposal_token = remediation_proposal_token
     app.state.remediation_approver_token = remediation_approver_token
     app.state.remediation_executor_token = remediation_executor_token
+    app.state.kubernetes_ingestion_token = kubernetes_ingestion_token
     try:
         yield
     finally:
@@ -117,6 +122,7 @@ app.include_router(health_router)
 app.include_router(incidents_router)
 app.include_router(webhook_router)
 app.include_router(remediation_router)
+app.include_router(kubernetes_router)
 
 
 async def _database_unavailable(request: Request, exc: Exception) -> JSONResponse:

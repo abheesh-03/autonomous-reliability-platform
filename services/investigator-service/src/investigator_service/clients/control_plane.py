@@ -58,6 +58,37 @@ class ControlPlaneClient:
 
         return IncidentSnapshot.model_validate(resp.json())
 
+    async def get_kubernetes_evidence(self, incident_id: str) -> dict | None:
+        """GET /api/v1/incidents/{id}/kubernetes-evidence (Phase 12B-D
+        correction round, Issue 6A) -- the ONE trusted, persisted
+        source of a Kubernetes-sourced incident's own resource identity
+        (same endpoint agent-runtime-service's propose_remediation
+        already reads, Issue 1). Returns the raw, already-bounded
+        response dict (cluster/namespace/resource_kind/resource_name/
+        resource_uid/detector_id/result/collection_completeness/
+        collected_at) or None for a 404 (no recorded Kubernetes
+        evidence for this incident -- a real, honest "nothing to show"
+        outcome, never an error that would abort the whole
+        investigation). Deliberately returns a plain dict rather than a
+        new pydantic model: evidence_collector.py only ever reads a
+        handful of string/datetime fields out of it into a bounded,
+        redacted EvidenceItem -- it never needs a typed domain object
+        of its own."""
+        url = f"{self._base_url}/api/v1/incidents/{incident_id}/kubernetes-evidence"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+                resp = await client.get(url)
+        except httpx.HTTPError as exc:
+            raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
+
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise ControlPlaneUnavailableError(f"control-plane returned HTTP {resp.status_code} for {url}")
+
+        body = resp.json()
+        return body if isinstance(body, dict) else None
+
     async def get_all_events(self, incident_id: str, *, page_size: int = 100, max_events: int = 200) -> tuple[list[IncidentEventSnapshot], int]:
         """Fully paginates the audit timeline via the endpoint's own
         limit/offset contract (page_size capped at the API's documented

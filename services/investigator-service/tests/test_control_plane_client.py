@@ -117,6 +117,49 @@ async def test_get_all_events_not_found_maps_to_typed_error():
         await _client(handler).get_all_events(str(SAMPLE_INCIDENT_ID))
 
 
+# ---------------------------------------------------------------------
+# Correction round (Issue 6A): GET .../kubernetes-evidence
+# ---------------------------------------------------------------------
+
+
+async def test_get_kubernetes_evidence_success():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/api/v1/incidents/{SAMPLE_INCIDENT_ID}/kubernetes-evidence"
+        return httpx.Response(
+            200,
+            json={
+                "cluster": "kind-reliability-lab", "namespace": "reliability-sandbox",
+                "resource_kind": "Pod", "resource_name": "crashloop-demo-abc", "resource_uid": "uid-1",
+                "detector_id": "crash_loop_backoff", "result": "confirmed",
+                "collection_completeness": "complete", "collected_at": "2026-04-01T09:00:00+00:00",
+            },
+        )
+
+    evidence = await _client(handler).get_kubernetes_evidence(str(SAMPLE_INCIDENT_ID))
+    assert evidence["cluster"] == "kind-reliability-lab"
+    assert evidence["resource_uid"] == "uid-1"
+
+
+async def test_get_kubernetes_evidence_404_returns_none_not_an_error():
+    """A 404 here means 'no recorded Kubernetes evidence' -- a real,
+    honest outcome, never conflated with IncidentNotFoundError (the
+    incident's own existence was already established by get_incident)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "this incident has no recorded Kubernetes evidence"})
+
+    evidence = await _client(handler).get_kubernetes_evidence(str(SAMPLE_INCIDENT_ID))
+    assert evidence is None
+
+
+async def test_get_kubernetes_evidence_unreachable_maps_to_unavailable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(ControlPlaneUnavailableError):
+        await _client(handler).get_kubernetes_evidence(str(SAMPLE_INCIDENT_ID))
+
+
 async def test_control_plane_client_never_issues_a_write_request():
     """Static/behavioral guarantee: regardless of inputs, this client
     only ever issues GET requests. Any non-GET request reaching the

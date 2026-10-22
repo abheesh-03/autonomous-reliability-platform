@@ -12,7 +12,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from investigator_service.clients.control_plane import ControlPlaneClient
+from investigator_service.clients.control_plane import ControlPlaneClient, ControlPlaneUnavailableError
 from investigator_service.clients.loki import LokiClient, LokiUnavailableError
 from investigator_service.clients.prometheus import PrometheusClient, PrometheusUnavailableError
 from investigator_service.clients.tempo import TempoClient, TempoUnavailableError
@@ -60,6 +60,9 @@ class EvidenceCollector:
         items.append(self._incident_core_item(next_id, incident, self._bounds.max_incident_text_length))
         items.extend(self._event_items(next_id, events))
         outcomes.append(self._control_plane_outcome(events, events_total, self._bounds.max_audit_events))
+
+        if incident.source == "kubernetes":
+            await self._collect_kubernetes_evidence(next_id, incident_id, items, outcomes)
 
         await self._collect_prometheus(next_id, window_start, window_end, items, outcomes)
         await self._collect_loki(next_id, window_start, window_end, items, outcomes)
@@ -161,6 +164,78 @@ class EvidenceCollector:
                 )
             )
         return out
+
+    async def _collect_kubernetes_evidence(self, next_id, incident_id, items, outcomes) -> None:
+        """Phase 12B-D correction round (Issue 6A): surfaces a
+        Kubernetes-sourced incident's own trusted, persisted evidence
+        (control-plane's GET /api/v1/incidents/{id}/kubernetes-evidence
+        -- the SAME endpoint agent-runtime-service's propose_remediation
+        reads, Issue 1) as ONE bounded, redacted, OBSERVED EvidenceItem
+        -- never a hypothesis, never an inferred cause. Every field
+        here is a real, structured fact (cluster/namespace/resource
+        identity/detector_id/result/collection_completeness/
+        collected_at) copied verbatim from control-plane's own already-
+        validated response; the only free-text field (decision_rationale,
+        which may ultimately trace back to Kubernetes-reported waiting
+        reasons/messages -- untrusted external text per Gate 3) is
+        bounded and redacted exactly like every other piece of external
+        text this collector already handles (incident title/description,
+        Loki log lines)."""
+        try:
+            evidence = await self._control_plane.get_kubernetes_evidence(incident_id)
+        except ControlPlaneUnavailableError as exc:
+            outcomes.append(SourceOutcome(source="kubernetes", status="unavailable", detail=str(exc)))
+            return
+
+        if evidence is None:
+            outcomes.append(
+                SourceOutcome(
+                    source="kubernetes",
+                    status="no_data",
+                    detail="this incident is kubernetes-sourced but has no recorded Kubernetes evidence event",
+                    query_summary="GET /api/v1/incidents/{id}/kubernetes-evidence",
+                )
+            )
+            return
+
+        cluster = str(evidence.get("cluster", ""))
+        namespace = str(evidence.get("namespace", ""))
+        resource_kind = str(evidence.get("resource_kind", ""))
+        resource_name = str(evidence.get("resource_name", ""))
+        resource_uid = evidence.get("resource_uid")
+        detector_id = str(evidence.get("detector_id", ""))
+        result = str(evidence.get("result", ""))
+        completeness = str(evidence.get("collection_completeness", ""))
+        collected_at = evidence.get("collected_at")
+
+        rationale = redact(str(evidence.get("decision_rationale", "")))[: self._bounds.max_incident_text_length]
+
+        items.append(
+            EvidenceItem(
+                id=next_id.next(),
+                source="kubernetes",
+                observed_at=collected_at,
+                summary=(
+                    f"Kubernetes {detector_id}: {resource_kind}/{namespace}/{resource_name} -> {result}"
+                ),
+                detail=(
+                    f"cluster={cluster} resource_uid={resource_uid or 'unknown'} "
+                    f"collection_completeness={completeness} decision_rationale={rationale!r}"
+                ),
+                reference={"endpoint": "GET /api/v1/incidents/{id}/kubernetes-evidence"},
+            )
+        )
+        outcomes.append(
+            SourceOutcome(
+                source="kubernetes",
+                status="ok" if completeness == "complete" else "partial",
+                detail=(
+                    f"kubernetes evidence retrieved for {resource_kind}/{namespace}/{resource_name} "
+                    f"(detector={detector_id}, result={result}, collection_completeness={completeness})"
+                ),
+                query_summary="GET /api/v1/incidents/{id}/kubernetes-evidence",
+            )
+        )
 
     async def _collect_prometheus(self, next_id, window_start, window_end, items, outcomes) -> None:
         try:

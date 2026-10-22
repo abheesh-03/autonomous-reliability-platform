@@ -358,6 +358,36 @@ def test_pending_phase_is_not_readiness_degradation():
 # ---------------------------------------------------------------------
 
 
+def test_finding_carries_the_resource_uid_from_the_collected_observation():
+    """Correction round (Issue 6): resource_uid must be read directly
+    from the already-collected PodObservation/DeploymentObservation,
+    never fabricated -- this is what lets control-plane's finding-
+    ingestion endpoint and agent-runtime-service's propose_remediation
+    demonstrate a real ownership relationship downstream."""
+    pod = PodObservation(
+        namespace=NS, name="image-pull-demo-x", phase="Running", uid="pod-uid-123",
+        container_statuses=[ContainerStatusObservation(container_name="nginx", waiting=ContainerWaitingState(reason="ImagePullBackOff"))],
+    )
+    findings = detect_image_pull_failures([pod], [])
+    assert len(findings) == 1
+    assert findings[0].resource_uid == "pod-uid-123"
+
+    d = DeploymentObservation(
+        namespace=NS, name="stuck-rollout", uid="deploy-uid-456", generation=5, observed_generation=5,
+        replicas=3, ready_replicas=1, available_replicas=1,
+        conditions=[DeploymentConditionObservation(type="Progressing", status="False", reason="ProgressDeadlineExceeded")],
+    )
+    deployment_findings = detect_deployment_rollout_failure([d])
+    assert len(deployment_findings) == 1
+    assert deployment_findings[0].resource_uid == "deploy-uid-456"
+
+
+def test_finding_resource_uid_is_none_when_not_collected():
+    pod = _pod("some-pod", [ContainerStatusObservation(container_name="app", waiting=ContainerWaitingState(reason="ImagePullBackOff"))])
+    findings = detect_image_pull_failures([pod], [])
+    assert findings[0].resource_uid is None
+
+
 def test_missing_events_does_not_prevent_classification():
     pod = _pod("image-pull-demo-no-events", [ContainerStatusObservation(container_name="nginx", waiting=ContainerWaitingState(reason="ImagePullBackOff"))])
     findings = detect_image_pull_failures([pod], events=[])

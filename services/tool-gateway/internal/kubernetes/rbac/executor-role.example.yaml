@@ -1,0 +1,82 @@
+# Phase 12B-D, Gate 6: an EXAMPLE least-privilege, namespace-scoped
+# RBAC policy for the Kubernetes EXECUTOR identity tool-gateway would
+# use for a REAL restart_allowlisted_deployment write.
+#
+# THIS FILE IS NOT DEPLOYED BY ANY SCRIPT OR MAKE TARGET IN THIS REPO.
+# Applying it (and minting the ServiceAccount token it would be bound
+# to) is a separate, explicitly-approved step, after independent source
+# review of tool-gateway's own Kubernetes executor code
+# (internal/kubernetes/client.go, executor.go) -- Gate 6's own explicit
+# requirement: "DO NOT APPLY EXECUTOR RBAC OR EXECUTE MUTATIONS NOW."
+#
+# This is a SEPARATE, narrower identity from Phase 12A's own read-only
+# OBSERVER role (detectors/kubernetes/rbac/observer-role.example.yaml)
+# -- the executor additionally needs "patch" on exactly one resource
+# type (deployments), and ONLY within this one namespace. Never the
+# same ServiceAccount, never a shared token.
+#
+# Design:
+#   - Namespace-scoped (Role + RoleBinding, NEVER ClusterRole/
+#     ClusterRoleBinding) -- exactly like the Phase 12A observer role.
+#   - Exactly the 3 resource types tool-gateway's Kubernetes client
+#     (internal/kubernetes/client.go) actually calls: deployments,
+#     replicasets, pods.
+#   - "get"/"list" on all three; "patch" ONLY on deployments -- no
+#     "create", "update" (a full replace), "delete",
+#     "deletecollection", or "*" verb anywhere.
+#   - resourceNames restricts the "patch" verb to the ONE allowlisted
+#     Deployment name -- even a compromised executor token could never
+#     patch any OTHER deployment in this namespace, let alone another
+#     namespace.
+#   - No access to secrets, configmaps, serviceaccounts/token, or any
+#     pod subresource (exec/attach/portforward/log) -- those rules are
+#     deliberately absent, not merely unused.
+#   - No "impersonate", "bind", or "escalate" verb on anything.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: reliability-remediation-executor
+  namespace: reliability-sandbox
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: reliability-remediation-executor
+  namespace: reliability-sandbox
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  # The ONE write verb this entire identity ever holds -- restricted to
+  # the ONE allowlisted Deployment by name. A patch attempt against any
+  # other deployment name is rejected by the API server itself, not
+  # merely by tool-gateway's own application-layer allowlist
+  # (internal/allowlist/allowlist.go) -- defense in depth.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["crashloop-demo"]
+    verbs: ["patch"]
+  # Deliberately NO rules for: secrets, configmaps, pods/log,
+  # pods/exec, pods/attach, pods/portforward, serviceaccounts/token,
+  # events, or any resource/verb outside this exact list.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: reliability-remediation-executor-binding
+  namespace: reliability-sandbox
+subjects:
+  - kind: ServiceAccount
+    name: reliability-remediation-executor
+    namespace: reliability-sandbox
+roleRef:
+  kind: Role
+  name: reliability-remediation-executor
+  apiGroup: rbac.authorization.k8s.io

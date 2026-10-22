@@ -21,7 +21,11 @@ import logging
 import httpx
 from pydantic import ValidationError
 
-from agent_runtime_service.domain.remediation import RemediationCapability, RemediationExecutionResult
+from agent_runtime_service.domain.remediation import (
+    KubernetesRemediationCapability,
+    RemediationCapability,
+    RemediationExecutionResult,
+)
 
 logger = logging.getLogger("agent_runtime_service.tool_gateway")
 
@@ -108,6 +112,36 @@ class ToolGatewayClient:
             logger.warning("tool-gateway capability response failed shape validation (%d error(s))", exc.error_count())
             raise ToolGatewayOutputError(
                 "tool-gateway capability response did not match the expected response contract"
+            ) from exc
+
+    async def get_kubernetes_capability(self) -> KubernetesRemediationCapability:
+        """Phase 12B-D: GET /api/v1/remediation-capabilities/kubernetes
+        -- the Kubernetes analogue of get_capability() above. A
+        SEPARATE route (never overloading the payment capability
+        contract); same auth, same error-handling discipline."""
+        url = f"{self._base_url}/api/v1/remediation-capabilities/kubernetes"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+                resp = await client.get(url, headers=self._headers())
+        except httpx.HTTPError as exc:
+            raise ToolGatewayUnavailableError(f"could not reach tool-gateway at {url}: {exc}") from exc
+
+        if resp.status_code != 200:
+            raise ToolGatewayUnavailableError(f"tool-gateway returned HTTP {resp.status_code} for {url}")
+
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ToolGatewayOutputError("tool-gateway returned a non-JSON response") from exc
+
+        try:
+            return KubernetesRemediationCapability.model_validate(body)
+        except ValidationError as exc:
+            logger.warning(
+                "tool-gateway kubernetes capability response failed shape validation (%d error(s))", exc.error_count()
+            )
+            raise ToolGatewayOutputError(
+                "tool-gateway kubernetes capability response did not match the expected response contract"
             ) from exc
 
     async def execute(self, proposal_id: str) -> RemediationExecutionResult:

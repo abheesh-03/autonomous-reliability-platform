@@ -54,6 +54,11 @@ type Proposal struct {
 	Status     string `json:"status"`
 	ActionType string `json:"action_type"`
 	Target     string `json:"target"`
+	// Phase 12B-D: populated only for the Kubernetes action -- the
+	// identity-binding anchor Gate 6 requires be rechecked immediately
+	// before any write.
+	TargetCluster       string `json:"target_cluster"`
+	ExpectedResourceUID string `json:"expected_resource_uid"`
 }
 
 type Client struct {

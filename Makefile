@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage detectors-validate detectors-replay verify-detectors-real-stack verify-kubernetes-observer-real-stack test-verify-kubernetes-observer-quoting
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage detectors-validate detectors-replay verify-detectors-real-stack verify-kubernetes-observer-real-stack test-verify-kubernetes-observer-quoting verify-kubernetes-remediation-live
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -85,6 +85,7 @@ help: ## Show available targets
 	@echo "  verify-detectors-real-stack Phase 11B OPT-IN: read-only check against the ALREADY-RUNNING real stack (Prometheus/Tempo/control-plane) -- never starts/stops Compose, never writes"
 	@echo "  verify-kubernetes-observer-real-stack Phase 12A OPT-IN: read-only check against a real kind cluster via explicit kubeconfig -- never touches ~/.kube/config, never starts/stops/modifies the cluster"
 	@echo "  test-verify-kubernetes-observer-quoting Correction-round regression test: proves KUBE_CONTEXT/KUBE_NAMESPACE are never shell-injectable (no Docker required)"
+	@echo "  verify-kubernetes-remediation-live Phase 12B-D OPT-IN, NEVER RUN BY THIS SESSION: real Kubernetes remediation acceptance -- explicit operator confirmation required, never injects a failure"
 
 check: ## Verify local developer prerequisites
 	./scripts/check-env.sh
@@ -599,3 +600,15 @@ verify-kubernetes-observer-real-stack: ## Phase 12A OPT-IN: read-only check agai
 
 test-verify-kubernetes-observer-quoting: ## Correction-round regression test: proves KUBE_CONTEXT/KUBE_NAMESPACE are never shell-injectable (no Docker required)
 	./scripts/test-verify-kubernetes-observer-quoting.sh
+
+# Phase 12B-D, Gate 9: OPT-IN live Kubernetes remediation acceptance.
+# NEVER invoked by CI or any other make target -- requires
+# TOOL_GATEWAY_EXECUTION_TOKEN/CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN/
+# CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN already set, tool-gateway's
+# OWN TOOL_GATEWAY_KUBERNETES_EXECUTION_ENABLED=true already configured
+# separately, a REAL confirmed targeted failure already present on
+# Deployment/reliability-sandbox/crashloop-demo, and an interactive
+# operator to type the exact state-aware confirmation phrase. See the
+# script's own extensive header comment before ever running this.
+verify-kubernetes-remediation-live: ## Phase 12B-D OPT-IN, NEVER RUN BY THIS SESSION: real Kubernetes remediation acceptance -- explicit operator confirmation required, never injects a failure
+	./scripts/verify-kubernetes-remediation-live.sh

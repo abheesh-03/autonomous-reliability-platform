@@ -32,7 +32,7 @@ import httpx
 from pydantic import ValidationError
 
 from agent_runtime_service.domain.incident_snapshot import IncidentSnapshot
-from agent_runtime_service.domain.remediation import RemediationProposal
+from agent_runtime_service.domain.remediation import KubernetesIncidentEvidence, RemediationProposal
 
 logger = logging.getLogger("agent_runtime_service.control_plane")
 
@@ -161,6 +161,8 @@ class ControlPlaneClient:
         reason: str,
         supporting_evidence_ids: list[str],
         supporting_context_ids: list[str],
+        target_cluster: str | None = None,
+        expected_resource_uid: str | None = None,
     ) -> RemediationProposal:
         """POST /internal/v1/remediation-proposals. Idempotent on
         control-plane's own side (Phase 8 §PROPOSAL IDEMPOTENCY): the
@@ -179,6 +181,10 @@ class ControlPlaneClient:
             "supporting_evidence_ids": list(supporting_evidence_ids),
             "supporting_context_ids": list(supporting_context_ids),
         }
+        if target_cluster is not None:
+            body["target_cluster"] = target_cluster
+        if expected_resource_uid is not None:
+            body["expected_resource_uid"] = expected_resource_uid
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
                 resp = await client.post(
@@ -226,6 +232,43 @@ class ControlPlaneClient:
             raise RemediationProposalCreateAmbiguousError(
                 "control-plane's create-remediation-proposal response did not match the expected contract "
                 "-- the proposal may already exist durably under this idempotency_key"
+            ) from exc
+
+    async def get_kubernetes_incident_evidence(self, incident_id: str) -> KubernetesIncidentEvidence | None:
+        """GET /api/v1/incidents/{id}/kubernetes-evidence --
+        unauthenticated. Phase 12B-D correction round (Issue 1): the
+        ONE trusted, persisted source of a Kubernetes-sourced
+        incident's own resource identity. Returns None for a 404 (no
+        recorded Kubernetes evidence for this incident at all -- a
+        real, honest "nothing to act on" outcome, never an error) --
+        the incident's own existence was already established by
+        load_incident's earlier get_incident() call, so this method
+        does not re-raise IncidentNotFoundError."""
+        url = f"{self._base_url}/api/v1/incidents/{incident_id}/kubernetes-evidence"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+                resp = await client.get(url)
+        except httpx.HTTPError as exc:
+            raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
+
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise ControlPlaneUnavailableError(f"control-plane returned HTTP {resp.status_code} for {url}")
+
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ControlPlaneOutputError(f"control-plane returned a non-JSON response from {url}") from exc
+
+        try:
+            return KubernetesIncidentEvidence.model_validate(body)
+        except ValidationError as exc:
+            logger.warning(
+                "control-plane kubernetes-evidence response failed shape validation (%d error(s))", exc.error_count()
+            )
+            raise ControlPlaneOutputError(
+                "control-plane's kubernetes-evidence response did not match the expected contract"
             ) from exc
 
     async def get_remediation_proposal(self, proposal_id: uuid.UUID | str) -> RemediationProposal:

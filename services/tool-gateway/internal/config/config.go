@@ -14,6 +14,13 @@
 // database credential, or the Docker socket -- this module simply
 // never reads any of those environment variables at all, by
 // construction, not merely by convention.
+//
+// Phase 12B-D adds a FOURTH, SEPARATE credential family: the
+// Kubernetes EXECUTOR identity (TOOL_GATEWAY_KUBERNETES_*) -- never
+// the developer's own kubeconfig, never cluster-admin, and gated by
+// TOOL_GATEWAY_KUBERNETES_EXECUTION_ENABLED, which defaults to FALSE
+// (dry-run) -- a real Kubernetes write requires an explicit operator
+// opt-in, never merely configuring credentials.
 package config
 
 import (
@@ -41,6 +48,24 @@ type Settings struct {
 	PaymentRemediationToken string
 
 	RequestTimeout time.Duration
+
+	// Phase 12B-D: the Kubernetes executor identity + gating.
+	// KubernetesExecutionEnabled defaults to false (DRY-RUN) -- a real
+	// Kubernetes write requires this to be explicitly set "true" AFTER
+	// separate operator source review (Gate 6). Credential material is
+	// read as raw PEM/token VALUES (never a kubeconfig file path) --
+	// this service never parses a kubeconfig and never reads
+	// ~/.kube/config.
+	KubernetesExecutionEnabled bool
+	KubernetesAPIServerURL     string
+	KubernetesNamespace        string
+	KubernetesClusterName      string
+	KubernetesCACertPEM        string
+	KubernetesClientCertPEM    string
+	KubernetesClientKeyPEM     string
+	KubernetesBearerToken      string
+	KubernetesPollInterval     time.Duration
+	KubernetesPollDeadline     time.Duration
 }
 
 func getEnv(name, fallback string) string {
@@ -48,6 +73,18 @@ func getEnv(name, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getEnvBool(name string, fallback bool) bool {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func getEnvDuration(name string, fallbackSeconds int) time.Duration {
@@ -75,6 +112,19 @@ func FromEnv() Settings {
 		PaymentBaseURL:           getEnv("TOOL_GATEWAY_PAYMENT_URL", "http://payment-service:8081"),
 		PaymentRemediationToken:  os.Getenv("PAYMENT_REMEDIATION_TOKEN"),
 		RequestTimeout:           getEnvDuration("TOOL_GATEWAY_REQUEST_TIMEOUT_SECONDS", 10),
+
+		// Phase 12B-D: defaults to DISABLED (dry-run) -- see this
+		// file's own package docstring.
+		KubernetesExecutionEnabled: getEnvBool("TOOL_GATEWAY_KUBERNETES_EXECUTION_ENABLED", false),
+		KubernetesAPIServerURL:     os.Getenv("TOOL_GATEWAY_KUBERNETES_API_SERVER_URL"),
+		KubernetesNamespace:        getEnv("TOOL_GATEWAY_KUBERNETES_NAMESPACE", "reliability-sandbox"),
+		KubernetesClusterName:      getEnv("TOOL_GATEWAY_KUBERNETES_CLUSTER_NAME", "kind-reliability-lab"),
+		KubernetesCACertPEM:        os.Getenv("TOOL_GATEWAY_KUBERNETES_CA_CERT_PEM"),
+		KubernetesClientCertPEM:    os.Getenv("TOOL_GATEWAY_KUBERNETES_CLIENT_CERT_PEM"),
+		KubernetesClientKeyPEM:     os.Getenv("TOOL_GATEWAY_KUBERNETES_CLIENT_KEY_PEM"),
+		KubernetesBearerToken:      os.Getenv("TOOL_GATEWAY_KUBERNETES_BEARER_TOKEN"),
+		KubernetesPollInterval:     getEnvDuration("TOOL_GATEWAY_KUBERNETES_POLL_INTERVAL_SECONDS", 2),
+		KubernetesPollDeadline:     getEnvDuration("TOOL_GATEWAY_KUBERNETES_POLL_DEADLINE_SECONDS", 60),
 	}
 }
 

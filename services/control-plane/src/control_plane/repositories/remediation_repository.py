@@ -39,6 +39,8 @@ remediation_proposals_table = sa.table(
     sa.column("idempotency_key"),
     sa.column("action_type"),
     sa.column("target"),
+    sa.column("target_cluster"),
+    sa.column("expected_resource_uid"),
     sa.column("reason"),
     sa.column("supporting_evidence_ids", ARRAY(sa.Text())),
     sa.column("supporting_context_ids", ARRAY(sa.Text())),
@@ -141,6 +143,8 @@ class RemediationRepository:
         reason: str,
         supporting_evidence_ids: Sequence[str],
         supporting_context_ids: Sequence[str],
+        target_cluster: str | None = None,
+        expected_resource_uid: str | None = None,
     ) -> tuple[dict, bool]:
         """Atomically create-or-return-existing, keyed on
         `idempotency_key` (UNIQUE in V6). Returns (proposal, created).
@@ -172,6 +176,8 @@ class RemediationRepository:
                 idempotency_key=idempotency_key,
                 action_type=action_type,
                 target=target,
+                target_cluster=target_cluster,
+                expected_resource_uid=expected_resource_uid,
                 reason=reason,
                 supporting_evidence_ids=list(supporting_evidence_ids),
                 supporting_context_ids=list(supporting_context_ids),
@@ -202,6 +208,8 @@ class RemediationRepository:
             and existing["agent_run_id"] == agent_run_id
             and existing["action_type"] == action_type
             and existing["target"] == target
+            and existing.get("target_cluster") == target_cluster
+            and existing.get("expected_resource_uid") == expected_resource_uid
             and existing["reason"] == reason
             and existing["supporting_evidence_ids"] == list(supporting_evidence_ids)
             and existing["supporting_context_ids"] == list(supporting_context_ids)

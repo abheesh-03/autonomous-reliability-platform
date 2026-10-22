@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import pathlib
 import sys
 from datetime import UTC, datetime
@@ -39,6 +40,7 @@ from detectors.clients.kubernetes_client import KubernetesConfigError, kubernete
 from detectors.clients.prometheus_client import ALLOWED_SERVICES, PrometheusClient
 from detectors.clients.tempo_client import TempoClient
 from detectors.cli.fixture_loader import FixtureError, load_fixture_clients
+from detectors.kubernetes.publisher import publish_kubernetes_findings
 from detectors.pipeline.orchestrator import PipelineConfig
 from detectors.pipeline.run import PipelineReport, run_pipeline
 
@@ -116,7 +118,43 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # Correction round (Phase 12B-D, Issue 6B): publishing is a SEPARATE
+    # opt-in -- requires Kubernetes observation to be configured at all
+    # (--kube-context doubles as the published `cluster` identity, the
+    # same "kind-reliability-lab" naming convention this whole platform
+    # already uses), a control-plane URL to publish TO, and the
+    # ingestion token read ONLY from the environment -- never accepted
+    # as a CLI argument, which would otherwise appear in shell history
+    # and process listings.
+    ingestion_token = os.environ.get("CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN", "")
+    if args.publish_k8s_findings_to_control_plane:
+        if not all(kube_args_given):
+            print(
+                "VALIDATION ERROR: --publish-k8s-findings-to-control-plane requires Kubernetes observation to be "
+                "configured (--kubeconfig/--kube-context/--kube-namespace)",
+                file=sys.stderr,
+            )
+            return 1
+        if control_plane_client is None:
+            print(
+                "VALIDATION ERROR: --publish-k8s-findings-to-control-plane requires --control-plane-url",
+                file=sys.stderr,
+            )
+            return 1
+        if not ingestion_token:
+            print(
+                "VALIDATION ERROR: --publish-k8s-findings-to-control-plane requires "
+                "CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN to be set in the environment",
+                file=sys.stderr,
+            )
+            return 1
+
     config = PipelineConfig(services=services)
+    # ONE wall-clock instant, captured once, reused as BOTH the
+    # pipeline's own observation window end AND the published
+    # finding(s)' own collected_at -- never two independently-read
+    # clock values that could drift apart within the same run.
+    run_now = datetime.now(UTC)
 
     with contextlib.ExitStack() as stack:
         kubernetes_client = None
@@ -137,11 +175,42 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                     control_plane_client=control_plane_client,
                     kubernetes_client=kubernetes_client,
                     config=config,
+                    now=run_now,
                 )
             )
         except Exception as exc:  # noqa: BLE001 -- a safe, non-leaking top-level error message, never a raw traceback with secrets
             print(f"OPERATIONAL ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 1
+
+        if args.publish_k8s_findings_to_control_plane:
+            # This is a SINGLE, bounded, point-in-time publish pass --
+            # never a loop, never retried automatically, never a
+            # background task. Running this command again later (by
+            # hand, or from an operator's own external cron job) is
+            # what "repeated observation" would require; this process
+            # itself has no scheduler and makes no claim of ongoing
+            # monitoring.
+            print("=== publishing this run's own Kubernetes findings to control-plane (opt-in) ===", file=sys.stderr)
+            publish_results = asyncio.run(
+                publish_kubernetes_findings(
+                    report.k8s_findings,
+                    report.k8s_collection_results,
+                    cluster=args.kube_context,
+                    collected_at=run_now,
+                    control_plane_url=args.control_plane_url,
+                    ingestion_token=ingestion_token,
+                )
+            )
+            for r in publish_results:
+                print(
+                    f"  {r.resource_kind}/{r.namespace}/{r.resource_name} ({r.detector_id}): "
+                    f"{r.outcome}" + (f" incident_id={r.incident_id}" if r.incident_id else "")
+                    + (f" -- {r.detail}" if r.detail else ""),
+                    file=sys.stderr,
+                )
+            failed = sum(1 for r in publish_results if r.outcome == "failed")
+            if failed:
+                print(f"  {failed} of {len(publish_results)} finding(s) could not be published", file=sys.stderr)
 
     _emit(report, args.output)
     return 0
@@ -215,6 +284,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--kube-context", default=None, help="explicit kubeconfig context name -- never defaults to the active context"
     )
     p_analyze.add_argument("--kube-namespace", default=None, help="Kubernetes namespace to observe (read-only, scoped)")
+    p_analyze.add_argument(
+        "--publish-k8s-findings-to-control-plane",
+        action="store_true",
+        help=(
+            "opt-in: POST this run's own Kubernetes findings to control-plane's authenticated "
+            "ingestion endpoint (requires --control-plane-url, Kubernetes observation configured, and "
+            "CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN set in the environment). A single point-in-time "
+            "publish pass -- never a loop or scheduler."
+        ),
+    )
     p_analyze.add_argument("--output", type=pathlib.Path, default=None)
     p_analyze.set_defaults(func=_cmd_analyze)
 

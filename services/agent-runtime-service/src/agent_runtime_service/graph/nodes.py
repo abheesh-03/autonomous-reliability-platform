@@ -50,7 +50,7 @@ from the checkpoint remaining resumable either way.
 """
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from langgraph.types import interrupt
 
@@ -83,6 +83,43 @@ logger = logging.getLogger("agent_runtime_service.graph.nodes")
 # Never derived from LLM output; a pure, hardcoded constant.
 REMEDIATION_ACTION_TYPE = "clear_payment_authorization_fault"
 REMEDIATION_TARGET = "payment-service"
+
+# Phase 12B-D §GATE 4 DETERMINISTIC REMEDIATION POLICY: the ONE
+# Kubernetes action/target pair -- mirrors tool-gateway's own widened
+# Go allowlist and database/migrations/
+# V7__add_kubernetes_remediation_action.sql's own combined CHECK
+# constraint exactly. Never derived from LLM output.
+K8S_REMEDIATION_ACTION_TYPE = "restart_allowlisted_deployment"
+K8S_REMEDIATION_TARGET = "Deployment/reliability-sandbox/crashloop-demo"
+K8S_REMEDIATION_TARGET_CLUSTER = "kind-reliability-lab"
+K8S_REMEDIATION_TARGET_NAMESPACE = "reliability-sandbox"
+K8S_REMEDIATION_TARGET_DEPLOYMENT_NAME = "crashloop-demo"
+
+# Correction round (Issue 1): a detector_id is only ever treated as
+# capable of authorizing THIS Kubernetes action if it reports a
+# confirmed-failure-class detector result -- mirrors
+# detectors/kubernetes/detectors.py's own 3 failure-pattern detector
+# ids whose CONFIRMED result genuinely corresponds to the allowlisted
+# Deployment's own targeted failure (CrashLoopBackOff/ImagePullBackOff/
+# ErrImagePull/rollout failure). oom_killed and
+# pod_readiness_degradation are deliberately EXCLUDED: a restart does
+# not address an OOM resource-limit problem (Gate 4's own stated
+# limitation) or an unexplained readiness degradation with no
+# confirmed cause.
+_K8S_CONFIRMED_FAILURE_DETECTOR_IDS = frozenset(
+    {"crash_loop_backoff", "image_pull_backoff", "deployment_rollout_failure"}
+)
+
+# Correction round (Issue 1): a Kubernetes incident's own persisted
+# evidence must be this fresh (relative to wall-clock "now") to ever
+# authorize a proposal -- a previous, stale observation must never
+# establish a CURRENT failure. Mirrors control-plane's own
+# ingestion-time future-skew bound
+# (ingestion/kubernetes_service.py's MAX_FUTURE_SKEW_SECONDS) with a
+# symmetric PAST bound here, enforced again at proposal time (defense
+# in depth: evidence that was fresh when ingested can still go stale
+# by the time an agent run actually reaches propose_remediation).
+K8S_EVIDENCE_MAX_STALENESS = timedelta(minutes=15)
 
 # Must match observability/prometheus/rules/alerts.yml's
 # CheckoutServerErrors alert `annotations.summary` EXACTLY --
@@ -271,14 +308,35 @@ def build_nodes(
         }
 
         incident_snapshot = state.get("incident_snapshot") or {}
-        policy_matches = (
-            incident_snapshot.get("source") == "alertmanager"
-            and incident_snapshot.get("severity") == "critical"
-            and incident_snapshot.get("title") == _REMEDIATION_POLICY_ALERT_TITLE
-            and bool(state.get("investigation_report"))
-        )
+        source = incident_snapshot.get("source")
+
+        if source == "alertmanager":
+            policy_matches = (
+                incident_snapshot.get("severity") == "critical"
+                and incident_snapshot.get("title") == _REMEDIATION_POLICY_ALERT_TITLE
+                and bool(state.get("investigation_report"))
+            )
+        elif source == "kubernetes":
+            # Phase 12B-D: the Kubernetes policy branch deliberately
+            # does NOT inspect incident_snapshot for cluster/namespace/
+            # resource identity (this service's own documented boundary
+            # -- domain/incident_snapshot.py -- is a bounded incident
+            # snapshot, never its audit-event history). It defers
+            # ENTIRELY to tool-gateway's own fresh, independent
+            # precondition read below, exactly like the payment branch
+            # defers to get_capability() rather than trusting any
+            # hypothesis text.
+            policy_matches = bool(state.get("investigation_report"))
+        else:
+            policy_matches = False
+
         if not policy_matches or tool_gateway_client is None:
             return not_applicable
+
+        if source == "kubernetes":
+            return await _propose_kubernetes_remediation(
+                state, tool_gateway_client, control_plane_client, bounds, now, not_applicable
+            )
 
         # Independent, deterministic precondition check -- never
         # trusts a hypothesis merely because it mentions "payment":
@@ -638,8 +696,50 @@ def build_nodes(
 
         if proposal_succeeded:
             assert tool_gateway_client is not None  # unreachable otherwise -- execute_remediation always requires one
+            # Phase 12B-D: a SECOND, independent fresh verification
+            # (beyond tool-gateway's own executor-side recovery check
+            # at execution time, Gate 7) -- the same defense-in-depth
+            # "verify again, independently, from a different vantage
+            # point" discipline Phase 8 already established for the
+            # payment action.
             try:
-                capability = await tool_gateway_client.get_capability()
+                if proposal.action_type == K8S_REMEDIATION_ACTION_TYPE:
+                    k8s_capability = await tool_gateway_client.get_kubernetes_capability()
+                    # Correction round (Issue 5): the absence of a
+                    # confirmed targeted failure reason does NOT, by
+                    # itself, establish a healthy Deployment -- it could
+                    # be Pending/scaling/zero-ready-replicas for an
+                    # entirely unrelated reason. `fault_inactive` here
+                    # additionally requires the SAME target identity
+                    # (target/cluster/deployment_uid) this proposal was
+                    # actually created and executed against -- a
+                    # recreated Deployment during/after execution must
+                    # never be silently attributed a recovery it never
+                    # demonstrated. `target_healthy` requires genuine,
+                    # freshly-observed readiness/availability evidence
+                    # (observedGeneration caught up, every replica ready
+                    # AND available, the Available condition true) --
+                    # never label a resource fully recovered just
+                    # because its targeted failure reason disappeared.
+                    identity_matches = (
+                        k8s_capability.target == proposal.target
+                        and k8s_capability.target_cluster == proposal.target_cluster
+                        and bool(k8s_capability.deployment_uid)
+                        and k8s_capability.deployment_uid == proposal.expected_resource_uid
+                    )
+                    fault_inactive = identity_matches and not k8s_capability.precondition_met
+                    fully_ready = (
+                        k8s_capability.generation_caught_up
+                        and k8s_capability.available
+                        and k8s_capability.replicas > 0
+                        and k8s_capability.ready_replicas == k8s_capability.replicas
+                        and k8s_capability.available_replicas == k8s_capability.replicas
+                    )
+                    target_healthy = fault_inactive and fully_ready
+                else:
+                    capability = await tool_gateway_client.get_capability()
+                    fault_inactive = not capability.precondition_met
+                    target_healthy = capability.target_healthy
             except ToolGatewayOutputError as exc:
                 return {
                     "status": "failed",
@@ -653,9 +753,6 @@ def build_nodes(
             # TRANSIENT/RETRYABLE: a temporary outage while verifying
             # recovery does not prove recovery failed; a retried resume
             # safely re-attempts this SAME read-only check.
-
-            fault_inactive = not capability.precondition_met
-            target_healthy = capability.target_healthy
 
         recovery_confirmed = proposal_succeeded and fault_inactive and target_healthy
 
@@ -681,6 +778,173 @@ def build_nodes(
         verify_recovery,
         finalize,
     )
+
+
+async def _propose_kubernetes_remediation(
+    state: AgentGraphState, tool_gateway_client, control_plane_client, bounds: RuntimeBounds, now: str, not_applicable: dict
+) -> dict:
+    """Phase 12B-D §GATE 4: the Kubernetes analogue of
+    propose_remediation's payment branch -- same structure, same
+    "never trust a hypothesis, only a fresh independent read" rule.
+
+    Correction round (Issue 1): a fresh tool-gateway capability alone
+    is NOT sufficient authorization -- that only proves "the
+    allowlisted Deployment is CURRENTLY failing somewhere", never that
+    THIS incident concerns that specific Deployment/cluster/namespace.
+    This function additionally resolves the incident's OWN trusted,
+    persisted Kubernetes evidence (control-plane's GET /api/v1/incidents/
+    {id}/kubernetes-evidence -- never LLM text, never a title
+    substring, never mere temporal proximity) and requires a
+    demonstrable identity/ownership relationship between that evidence
+    and the allowlisted target before ever creating a proposal."""
+    incident_id = str(state["incident_id"])
+    try:
+        evidence = await control_plane_client.get_kubernetes_incident_evidence(incident_id)
+    except ControlPlaneOutputError as exc:
+        return {
+            "status": "failed",
+            "error_code": "control_plane_output_invalid",
+            "error_detail": _safe_detail(str(exc), bounds.max_error_detail_chars),
+            "current_node": "propose_remediation",
+            "completed_nodes": ["propose_remediation"],
+            "updated_at": now,
+        }
+    # ControlPlaneUnavailableError deliberately NOT caught --
+    # TRANSIENT/RETRYABLE, same reasoning as every other dependency
+    # call here.
+
+    if evidence is None:
+        # This incident has no recorded Kubernetes evidence at all
+        # (e.g. it is not actually kubernetes-sourced, or has no
+        # history yet) -- never a reason to authorize anything.
+        return not_applicable
+
+    if (
+        evidence.cluster != K8S_REMEDIATION_TARGET_CLUSTER
+        or evidence.namespace != K8S_REMEDIATION_TARGET_NAMESPACE
+        or evidence.detector_id not in _K8S_CONFIRMED_FAILURE_DETECTOR_IDS
+        or evidence.result != "confirmed"
+        or evidence.collection_completeness != "complete"
+    ):
+        # Wrong cluster, wrong namespace, a detector class that is
+        # never sufficient to authorize a restart (e.g. oom_killed),
+        # an unconfirmed (insufficient_evidence) result, or a partial
+        # collection -- never authorized on incomplete/weaker evidence.
+        return not_applicable
+
+    evidence_age = datetime.now(UTC) - evidence.collected_at
+    if evidence_age > K8S_EVIDENCE_MAX_STALENESS:
+        # A previous, stale observation must never establish a CURRENT
+        # failure -- this incident's own evidence may be real, but it
+        # is too old to trust right now.
+        return not_applicable
+
+    # Demonstrable identity/ownership relationship to the ONE
+    # allowlisted Deployment -- never inferred from LLM text or a
+    # title substring.
+    if evidence.resource_kind == "Deployment":
+        if evidence.resource_name != K8S_REMEDIATION_TARGET_DEPLOYMENT_NAME:
+            return not_applicable
+    elif evidence.resource_kind == "Pod":
+        if not evidence.resource_uid:
+            # A Pod-level finding with no resource_uid at all can never
+            # demonstrate ownership -- missing UID is NOT treated as
+            # equivalent to a match.
+            return not_applicable
+    else:
+        return not_applicable
+
+    try:
+        capability = await tool_gateway_client.get_kubernetes_capability()
+    except ToolGatewayOutputError as exc:
+        return {
+            "status": "failed",
+            "error_code": "tool_gateway_output_invalid",
+            "error_detail": _safe_detail(str(exc), bounds.max_error_detail_chars),
+            "current_node": "propose_remediation",
+            "completed_nodes": ["propose_remediation"],
+            "updated_at": now,
+        }
+    # ToolGatewayUnavailableError deliberately NOT caught -- TRANSIENT/
+    # RETRYABLE, same reasoning as every other dependency call here.
+
+    if not (
+        capability.action_type == K8S_REMEDIATION_ACTION_TYPE
+        and capability.target == K8S_REMEDIATION_TARGET
+        and capability.target_cluster == K8S_REMEDIATION_TARGET_CLUSTER
+        and capability.precondition_met
+        and capability.deployment_uid
+    ):
+        return not_applicable
+
+    if evidence.resource_kind == "Pod" and evidence.resource_uid not in capability.failing_pod_uids:
+        # The SPECIFIC pod this incident's own evidence names is not
+        # among the pods tool-gateway CURRENTLY, independently observes
+        # as both owned by the allowlisted Deployment AND actually
+        # failing -- this incident is not demonstrably about the
+        # allowlisted target's current state (it may be stale, about a
+        # since-recreated pod, or genuinely unrelated). Never
+        # authorized on "some pod somewhere is failing".
+        return not_applicable
+
+    # Correction round (Issue 3): Deployment-kind evidence must be
+    # bound to tool-gateway's own freshly-read deployment_uid, exactly
+    # like Pod-kind evidence is bound to failing_pod_uids above -- a
+    # bare resource_name match is NOT sufficient (a Deployment can be
+    # deleted and recreated with the SAME name but a DIFFERENT UID).
+    # `evidence.resource_uid != capability.deployment_uid` is also
+    # exactly how a missing/None evidence UID fails closed here: None
+    # can never equal capability.deployment_uid (already proven
+    # non-empty by the check above).
+    if evidence.resource_kind == "Deployment" and evidence.resource_uid != capability.deployment_uid:
+        return not_applicable
+
+    evidence_ids = _collect_supporting_evidence_ids(state.get("investigation_report"))
+    context_ids = _collect_supporting_context_ids(state.get("investigation_report"))
+    reason = _safe_detail(
+        f"deterministic policy match: kubernetes-sourced incident with its own trusted evidence "
+        f"(detector={evidence.detector_id!r}, resource={evidence.resource_kind}/{evidence.namespace}/"
+        f"{evidence.resource_name}) demonstrably tied to the allowlisted Deployment, an existing "
+        f"investigation, and tool-gateway independently confirming the same targeted failure is "
+        f"CURRENTLY active with a freshly-read Deployment UID",
+        bounds.max_error_detail_chars,
+    )
+
+    try:
+        proposal = await control_plane_client.create_remediation_proposal(
+            incident_id=state["incident_id"],
+            agent_run_id=state["run_id"],
+            idempotency_key=f"phase12b-k8s-proposal:{state['run_id']}",
+            action_type=K8S_REMEDIATION_ACTION_TYPE,
+            target=K8S_REMEDIATION_TARGET,
+            target_cluster=K8S_REMEDIATION_TARGET_CLUSTER,
+            expected_resource_uid=capability.deployment_uid,
+            reason=reason,
+            supporting_evidence_ids=evidence_ids,
+            supporting_context_ids=context_ids,
+        )
+    except RemediationProposalConflictError as exc:
+        return {
+            "status": "failed",
+            "error_code": "remediation_proposal_conflict",
+            "error_detail": _safe_detail(str(exc), bounds.max_error_detail_chars),
+            "current_node": "propose_remediation",
+            "completed_nodes": ["propose_remediation"],
+            "updated_at": now,
+        }
+    # RemediationProposalCreateAmbiguousError / ControlPlaneUnavailableError
+    # deliberately NOT caught -- same TRANSIENT/RETRYABLE convention as
+    # the payment branch immediately above in propose_remediation.
+
+    return {
+        "remediation_proposal_id": str(proposal.id),
+        "remediation_action_type": proposal.action_type,
+        "remediation_target": proposal.target,
+        "remediation_status": "pending_approval",
+        "current_node": "propose_remediation",
+        "completed_nodes": ["propose_remediation"],
+        "updated_at": now,
+    }
 
 
 def classify_investigation(report: dict) -> str:

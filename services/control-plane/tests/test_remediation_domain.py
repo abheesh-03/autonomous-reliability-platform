@@ -28,6 +28,102 @@ def _base_kwargs(**overrides) -> dict:
     return kwargs
 
 
+# ---------------------------------------------------------------------
+# Phase 12B-D (Gate 5): action_type/target/target_cluster pair
+# validation -- never a cross-product, mirrors V7's own combined CHECK
+# constraint at the application layer.
+# ---------------------------------------------------------------------
+
+
+def test_valid_payment_pair_is_accepted():
+    request = RemediationProposalCreateRequest(**_base_kwargs())
+    assert request.target_cluster is None
+    assert request.expected_resource_uid is None
+
+
+def test_valid_kubernetes_pair_is_accepted():
+    request = RemediationProposalCreateRequest(
+        **_base_kwargs(
+            action_type="restart_allowlisted_deployment",
+            target="Deployment/reliability-sandbox/crashloop-demo",
+            target_cluster="kind-reliability-lab",
+            expected_resource_uid="uid-123",
+        )
+    )
+    assert request.target_cluster == "kind-reliability-lab"
+
+
+def test_kubernetes_action_against_payment_target_is_denied():
+    with pytest.raises(ValidationError):
+        RemediationProposalCreateRequest(
+            **_base_kwargs(
+                action_type="restart_allowlisted_deployment",
+                target="payment-service",
+                target_cluster="kind-reliability-lab",
+                expected_resource_uid="uid-123",
+            )
+        )
+
+
+def test_payment_action_against_kubernetes_target_is_denied():
+    with pytest.raises(ValidationError):
+        RemediationProposalCreateRequest(
+            **_base_kwargs(action_type="clear_payment_authorization_fault", target="Deployment/reliability-sandbox/crashloop-demo")
+        )
+
+
+def test_kubernetes_action_missing_expected_resource_uid_is_denied():
+    with pytest.raises(ValidationError):
+        RemediationProposalCreateRequest(
+            **_base_kwargs(
+                action_type="restart_allowlisted_deployment",
+                target="Deployment/reliability-sandbox/crashloop-demo",
+                target_cluster="kind-reliability-lab",
+            )
+        )
+
+
+def test_payment_action_with_a_target_cluster_set_is_denied():
+    with pytest.raises(ValidationError):
+        RemediationProposalCreateRequest(**_base_kwargs(target_cluster="kind-reliability-lab"))
+
+
+def test_unsupported_deployment_target_is_denied():
+    with pytest.raises(ValidationError):
+        RemediationProposalCreateRequest(
+            **_base_kwargs(
+                action_type="restart_allowlisted_deployment",
+                target="Deployment/reliability-sandbox/some-other-deployment",
+                target_cluster="kind-reliability-lab",
+                expected_resource_uid="uid-123",
+            )
+        )
+
+
+def test_unsupported_namespace_is_denied():
+    with pytest.raises(ValidationError):
+        RemediationProposalCreateRequest(
+            **_base_kwargs(
+                action_type="restart_allowlisted_deployment",
+                target="Deployment/other-namespace/crashloop-demo",
+                target_cluster="kind-reliability-lab",
+                expected_resource_uid="uid-123",
+            )
+        )
+
+
+def test_unsupported_cluster_is_denied():
+    with pytest.raises(ValidationError):
+        RemediationProposalCreateRequest(
+            **_base_kwargs(
+                action_type="restart_allowlisted_deployment",
+                target="Deployment/reliability-sandbox/crashloop-demo",
+                target_cluster="some-other-cluster",
+                expected_resource_uid="uid-123",
+            )
+        )
+
+
 def test_evidence_id_at_exactly_the_bound_is_accepted():
     request = RemediationProposalCreateRequest(**_base_kwargs(supporting_evidence_ids=["e" * MAX_ID_CHARS]))
     assert len(request.supporting_evidence_ids[0]) == MAX_ID_CHARS

@@ -36,6 +36,7 @@ TEST_BOUNDS = EvidenceBounds(
 def incident_json(
     *,
     incident_id: uuid.UUID = SAMPLE_INCIDENT_ID,
+    source: str = "alertmanager",
     status: str = "resolved",
     severity: str = "critical",
     title: str = "checkout-service is returning HTTP 5xx errors",
@@ -48,7 +49,7 @@ def incident_json(
     last_seen_at = last_seen_at or (first_seen_at + timedelta(minutes=5))
     return {
         "id": str(incident_id),
-        "source": "alertmanager",
+        "source": source,
         "source_fingerprint": "deadbeef12345678",
         "title": title,
         "description": description,

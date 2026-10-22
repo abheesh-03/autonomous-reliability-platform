@@ -9,6 +9,7 @@ import (
 
 	"github.com/abheesh-03/autonomous-reliability-platform/services/tool-gateway/internal/allowlist"
 	"github.com/abheesh-03/autonomous-reliability-platform/services/tool-gateway/internal/controlplane"
+	"github.com/abheesh-03/autonomous-reliability-platform/services/tool-gateway/internal/kubernetes"
 	"github.com/abheesh-03/autonomous-reliability-platform/services/tool-gateway/internal/payment"
 )
 
@@ -40,7 +41,7 @@ type ExecuteResponse struct {
 // own durable proposal record says RIGHT NOW. A compromised or
 // misbehaving agent-runtime-service holding a valid execution token
 // cannot turn `pending_approval` into an executed action by itself.
-func ExecuteHandler(cpClient *controlplane.Client, paymentClient *payment.Client) http.HandlerFunc {
+func ExecuteHandler(cpClient *controlplane.Client, paymentClient *payment.Client, k8sExecutor *kubernetes.Executor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
@@ -78,6 +79,16 @@ func ExecuteHandler(cpClient *controlplane.Client, paymentClient *payment.Client
 			writeError(w, http.StatusConflict, "proposal action_type/target is not allowlisted")
 			return
 		}
+		// Phase 12B-D: the Kubernetes action additionally carries a
+		// target_cluster, which is not part of the generic
+		// (actionType, target) pair check above -- verified separately
+		// so a proposal somehow bearing the right action/target but
+		// the WRONG cluster is still refused.
+		if proposal.ActionType == allowlist.ActionRestartAllowlistedDeployment &&
+			!allowlist.IsAllowedKubernetesTarget(proposal.ActionType, proposal.Target, proposal.TargetCluster) {
+			writeError(w, http.StatusConflict, "proposal target_cluster is not allowlisted")
+			return
+		}
 
 		switch proposal.Status {
 		case "pending_approval":
@@ -109,6 +120,21 @@ func ExecuteHandler(cpClient *controlplane.Client, paymentClient *payment.Client
 			return
 		}
 
+		// Phase 12B-D §GATE 6: Kubernetes execution is DISABLED/DRY-RUN
+		// by default. Checked HERE -- before StartExecution is ever
+		// called -- so a dry-run request never transitions the
+		// proposal to 'executing' at all; it is left exactly as
+		// 'approved', untouched, for a real attempt later once an
+		// operator has explicitly opted in.
+		if proposal.ActionType == allowlist.ActionRestartAllowlistedDeployment && (k8sExecutor == nil || !k8sExecutor.Enabled()) {
+			writeJSON(w, http.StatusOK, ExecuteResponse{
+				ProposalID: proposal.ID,
+				Status:     proposal.Status,
+				Detail:     "Kubernetes execution is disabled (dry-run mode); no action was taken -- a real execution requires an explicit operator opt-in",
+			})
+			return
+		}
+
 		started, err := cpClient.StartExecution(ctx, proposal.ID)
 		switch {
 		case errors.Is(err, controlplane.ErrUnavailable):
@@ -129,6 +155,11 @@ func ExecuteHandler(cpClient *controlplane.Client, paymentClient *payment.Client
 			// expected -- proceed to perform the action.
 		default:
 			writeError(w, http.StatusBadGateway, "control-plane reported an unexpected proposal status after execution/start")
+			return
+		}
+
+		if proposal.ActionType == allowlist.ActionRestartAllowlistedDeployment {
+			executeKubernetesAction(w, ctx, cpClient, k8sExecutor, proposal)
 			return
 		}
 
@@ -228,6 +259,111 @@ func ExecuteHandler(cpClient *controlplane.Client, paymentClient *payment.Client
 		}
 
 		writeJSON(w, http.StatusOK, ExecuteResponse{ProposalID: result.ID, Status: result.Status})
+	}
+}
+
+// executeKubernetesAction is the Phase 12B-D analogue of the payment
+// clear+verify flow above, for the ONE allowlisted Kubernetes action.
+// Reached only once the proposal is already 'executing' (StartExecution
+// already succeeded) and the dry-run gate (ExecuteHandler, above) has
+// already confirmed execution is enabled.
+func executeKubernetesAction(
+	w http.ResponseWriter, ctx context.Context, cpClient *controlplane.Client, k8sExecutor *kubernetes.Executor, proposal *controlplane.Proposal,
+) {
+	if k8sExecutor == nil {
+		// Defensive -- unreachable via ExecuteHandler's own dry-run
+		// gate above, but never a reason to panic or attempt a nil
+		// dereference. Nothing is recorded; safe to retry.
+		writeError(w, http.StatusServiceUnavailable, "the Kubernetes executor is not configured; this request can be retried")
+		return
+	}
+
+	result, err := k8sExecutor.RestartAndVerify(ctx, proposal.ID, proposal.ExpectedResourceUID)
+	switch {
+	case errors.Is(err, kubernetes.ErrUnavailable), errors.Is(err, kubernetes.ErrForbidden):
+		// Genuinely transient/RBAC -- nothing is recorded; the
+		// proposal stays 'executing' and a retried execute() call
+		// will safely retry.
+		writeError(w, http.StatusServiceUnavailable, "the Kubernetes API server is temporarily unavailable or forbidden; this request can be retried")
+		return
+	case errors.Is(err, kubernetes.ErrConflict):
+		// Correction round, Issue 3: the resourceVersion precondition
+		// failed ATOMICALLY at the API server -- the resource changed
+		// between the read and this write. Nothing is recorded; a
+		// retried execute() call re-reads current state from scratch
+		// and re-evaluates identity/health before writing again --
+		// never a blind retry of the same stale write.
+		writeError(w, http.StatusConflict, "the target Deployment was concurrently modified (resourceVersion conflict); this request can be retried, and will re-check identity/health against current state")
+		return
+	case errors.Is(err, kubernetes.ErrIncompleteCollection):
+		// Correction round, Issue 4: could not safely decide whether a
+		// restart is still warranted without a complete pod/replicaset
+		// read. Nothing is recorded; safe to retry.
+		writeError(w, http.StatusServiceUnavailable, "could not reliably collect pod/replicaset evidence to decide whether a restart is still warranted; this request can be retried")
+		return
+	case err != nil:
+		writeError(w, http.StatusBadGateway, "the Kubernetes API server returned an unexpected response")
+		return
+	}
+
+	switch result.Outcome {
+	case kubernetes.OutcomeIdentityMismatch:
+		// A definitive, terminal outcome: the target has drifted
+		// (recreated/retargeted) since approval -- never silently
+		// retargeted, never retried against a different resource.
+		recordFailureAndRespond(w, ctx, cpClient, proposal.ID, result.Detail)
+		return
+	case kubernetes.OutcomeNoLongerApplicable:
+		// Correction round, Issue 2: the target is ALREADY healthy --
+		// no patch was ever sent. This is never recorded as a
+		// recovered remediation (nothing was done); it is recorded as
+		// a definitive non-success so the owning incident is rolled
+		// back to 'investigating' rather than falsely left
+		// 'remediating' on the strength of evidence that may already
+		// be stale -- a fresh investigation can then establish the
+		// CURRENT true state honestly.
+		recordFailureAndRespond(w, ctx, cpClient, proposal.ID, result.Detail)
+		return
+	case kubernetes.OutcomeDryRun:
+		// Defensive -- unreachable via ExecuteHandler's own earlier
+		// gate under normal operation (a race between that check and
+		// this call is the only way to reach it). Nothing is
+		// recorded; safe to retry once configuration is consistent.
+		writeError(w, http.StatusServiceUnavailable, "Kubernetes execution became disabled mid-request; this request can be retried")
+		return
+	}
+
+	switch result.Recovery {
+	case kubernetes.VerifiedRecovered:
+		recordResult, recordErr := cpClient.RecordExecutionResult(ctx, proposal.ID, "succeeded", result.Detail)
+		if errors.Is(recordErr, controlplane.ErrUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "control-plane is temporarily unavailable; this request can be retried")
+			return
+		}
+		if recordErr != nil {
+			writeError(w, http.StatusBadGateway, "control-plane returned an unexpected response")
+			return
+		}
+		writeJSON(w, http.StatusOK, ExecuteResponse{ProposalID: recordResult.ID, Status: recordResult.Status})
+		return
+	case kubernetes.StillUnhealthy:
+		// A RELIABLE read confirms the restart did not resolve the
+		// targeted failure -- a definitive, terminal outcome, never a
+		// guess.
+		recordFailureAndRespond(w, ctx, cpClient, proposal.ID, result.Detail)
+		return
+	default:
+		// VERIFICATION_INCONCLUSIVE / SOURCE_UNAVAILABLE / TIMED_OUT:
+		// genuinely unknown right now -- NEVER recorded as success or
+		// failure. Nothing is written; the proposal stays 'executing'
+		// and a retried execute() call will re-attempt verification
+		// (the patch itself is idempotent -- see
+		// Executor.RestartAndVerify's own AlreadyApplied handling).
+		writeError(
+			w, http.StatusServiceUnavailable,
+			"recovery could not be reliably verified yet ("+string(result.Recovery)+"); this request can be retried",
+		)
+		return
 	}
 }
 

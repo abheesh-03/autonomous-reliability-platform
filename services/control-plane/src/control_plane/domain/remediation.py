@@ -1,26 +1,51 @@
-"""Phase 8 remediation proposal/event response + request models.
+"""Phase 8 (+ Phase 12B-D) remediation proposal/event response + request
+models.
 
 Field set matches database/migrations/V6__create_remediation_schema.sql
-exactly -- maintained by hand, like domain/incident.py and
-domain/incident_event.py, not by schema reflection or an ORM mapping.
++ V7__add_kubernetes_remediation_action.sql exactly -- maintained by
+hand, like domain/incident.py and domain/incident_event.py, not by
+schema reflection or an ORM mapping.
 
 Phase 8 scope note: `action_type`/`target` are closed, single-value
 Literals -- never a free-form string -- exactly mirroring the V6 CHECK
-constraints. A future phase that adds a second real action must widen
-both the Literal here and the CHECK constraint in a new additive
-migration together; this module never accepts an arbitrary action/
-target pair on trust.
+constraints. Phase 12B-D widens both to a SECOND explicit pair
+(restart_allowlisted_deployment / Deployment/reliability-sandbox/
+crashloop-demo) -- never a free-form string, and V7's own combined
+CHECK constraint enforces the two pairs can never cross-combine, the
+same invariant `_validate_pair` below re-asserts in application code
+(defense in depth, not a substitute). A future phase that adds a THIRD
+real action must widen the Literals here and the CHECK constraint in a
+new additive migration together; this module never accepts an
+arbitrary action/target pair on trust.
 """
 
 import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
-ActionType = Literal["clear_payment_authorization_fault"]
-Target = Literal["payment-service"]
+ActionType = Literal["clear_payment_authorization_fault", "restart_allowlisted_deployment"]
+Target = Literal["payment-service", "Deployment/reliability-sandbox/crashloop-demo"]
 ProposalStatus = Literal["pending_approval", "approved", "rejected", "executing", "succeeded", "failed"]
+
+# Phase 12B-D: the ONLY two legal (action_type, target, target_cluster)
+# tuples -- mirrors V7's own combined CHECK constraint exactly. Never
+# an independent per-column allowlist (that would silently also permit
+# the cross-product), and never widened without a matching migration.
+_LEGAL_ACTION_TARGET_PAIRS: dict[str, tuple[str, str | None]] = {
+    "clear_payment_authorization_fault": ("payment-service", None),
+    "restart_allowlisted_deployment": ("Deployment/reliability-sandbox/crashloop-demo", "kind-reliability-lab"),
+}
+
+
+def _validate_pair(action_type: str, target: str, target_cluster: str | None) -> None:
+    expected_target, expected_cluster = _LEGAL_ACTION_TARGET_PAIRS[action_type]
+    if target != expected_target or target_cluster != expected_cluster:
+        raise ValueError(
+            f"action_type {action_type!r} is only ever legal with target {expected_target!r} and "
+            f"target_cluster {expected_cluster!r} -- no cross-product combination is permitted"
+        )
 RemediationEventType = Literal[
     "proposed", "approved", "rejected", "execution_started", "execution_succeeded", "execution_failed"
 ]
@@ -88,6 +113,12 @@ class RemediationProposalCreateRequest(BaseModel):
     idempotency_key: str = Field(..., min_length=1, max_length=200)
     action_type: ActionType
     target: Target
+    # Phase 12B-D: required for restart_allowlisted_deployment, must be
+    # absent (None) for clear_payment_authorization_fault -- enforced
+    # by `_check_pair_and_identity_shape` below AND by V7's own CHECK
+    # constraint at the database layer.
+    target_cluster: str | None = Field(default=None, max_length=200)
+    expected_resource_uid: str | None = Field(default=None, max_length=200)
     reason: str = Field(..., max_length=MAX_REASON_CHARS)
     supporting_evidence_ids: list[BoundedId] = Field(default_factory=list, max_length=MAX_EVIDENCE_IDS)
     supporting_context_ids: list[BoundedId] = Field(default_factory=list, max_length=MAX_EVIDENCE_IDS)
@@ -96,6 +127,16 @@ class RemediationProposalCreateRequest(BaseModel):
     @classmethod
     def _bound_joined_length(cls, ids: list[str], info) -> list[str]:
         return _validate_joined_length(ids, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def _check_pair_and_identity_shape(self) -> "RemediationProposalCreateRequest":
+        _validate_pair(self.action_type, self.target, self.target_cluster)
+        is_kubernetes_action = self.action_type == "restart_allowlisted_deployment"
+        if is_kubernetes_action and not (self.expected_resource_uid and self.expected_resource_uid.strip()):
+            raise ValueError("expected_resource_uid is required for action_type='restart_allowlisted_deployment'")
+        if not is_kubernetes_action and self.expected_resource_uid is not None:
+            raise ValueError("expected_resource_uid must not be set for action_type='clear_payment_authorization_fault'")
+        return self
 
 
 class RemediationProposal(BaseModel):
@@ -107,6 +148,8 @@ class RemediationProposal(BaseModel):
     idempotency_key: str
     action_type: ActionType
     target: Target
+    target_cluster: str | None = None
+    expected_resource_uid: str | None = None
     reason: str
     supporting_evidence_ids: list[str]
     supporting_context_ids: list[str]
