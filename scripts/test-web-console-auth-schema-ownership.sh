@@ -66,14 +66,50 @@ fail() {
 
 export COMPOSE_PROJECT_NAME="wc-auth-ownership-test-$$"
 export POSTGRES_PORT="$((20000 + (($$ + 1) % 10000)))"
+# Captured once, immediately after the real isolation values above are
+# set, and never reassigned -- the one trusted reference this script
+# checks every later `source .env` against (see
+# reload_env_credentials below). `.env`/.env.example DO define their
+# own POSTGRES_PORT (5432); COMPOSE_PROJECT_NAME is not currently
+# defined there, but is guarded here too as defense-in-depth against a
+# future .env.example change silently reintroducing this exact class
+# of bug.
+readonly ISOLATED_COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME"
+readonly ISOLATED_POSTGRES_PORT="$POSTGRES_PORT"
 
 cleanup() {
   local exit_status=$?
   echo "-- cleanup: tearing down the isolated test project ($COMPOSE_PROJECT_NAME), including its temporary volume --" >&2
+  [ "$COMPOSE_PROJECT_NAME" = "$ISOLATED_COMPOSE_PROJECT_NAME" ] || {
+    echo "FAIL: COMPOSE_PROJECT_NAME drifted from the isolated value ($ISOLATED_COMPOSE_PROJECT_NAME) to '$COMPOSE_PROJECT_NAME' -- refusing to run 'docker compose down' against a project this script did not create" >&2
+    exit 1
+  }
   docker compose down -v >&2 2>&1 || true
   exit "$exit_status"
 }
 trap cleanup EXIT
+
+# Sources .env for its credentials (POSTGRES_USER/POSTGRES_DB/
+# WEB_CONSOLE_DB_PASSWORD/etc.) while explicitly preserving this
+# script's own isolated COMPOSE_PROJECT_NAME/POSTGRES_PORT across the
+# reload -- .env's own POSTGRES_PORT=5432 would otherwise silently
+# overwrite the isolated, PID-derived port this script already
+# exported above and already used to start its own disposable
+# postgres container, and a future .env addition of
+# COMPOSE_PROJECT_NAME could do the same to the project name cleanup()
+# depends on to target only this script's own disposable project.
+# Explicitly re-asserted (never just reassigned) after every reload,
+# so a regression here fails loudly instead of silently drifting.
+reload_env_credentials() {
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+  export COMPOSE_PROJECT_NAME="$ISOLATED_COMPOSE_PROJECT_NAME"
+  export POSTGRES_PORT="$ISOLATED_POSTGRES_PORT"
+  [ "$COMPOSE_PROJECT_NAME" = "$ISOLATED_COMPOSE_PROJECT_NAME" ] || fail "isolation invariant violated: COMPOSE_PROJECT_NAME is '$COMPOSE_PROJECT_NAME', expected the isolated '$ISOLATED_COMPOSE_PROJECT_NAME'"
+  [ "$POSTGRES_PORT" = "$ISOLATED_POSTGRES_PORT" ] || fail "isolation invariant violated: POSTGRES_PORT is '$POSTGRES_PORT', expected the isolated '$ISOLATED_POSTGRES_PORT'"
+}
 
 echo "=== 1. Start an isolated, temporary postgres (project=$COMPOSE_PROJECT_NAME, port=$POSTGRES_PORT) ==="
 docker compose up -d postgres >/dev/null
@@ -85,10 +121,7 @@ until docker compose exec -T postgres pg_isready >/dev/null 2>&1; do
 done
 echo "  isolated postgres is ready"
 
-set -a
-# shellcheck disable=SC1091
-source .env
-set +a
+reload_env_credentials
 # This isolated instance's own .env-persisted WEB_CONSOLE_DB_PASSWORD/
 # BETTER_AUTH_SECRET/SERVICE_ASSERTION_SIGNING_SECRET are intentionally
 # REUSED from the developer's real .env (scripts/init-web-console-db.sh's
@@ -100,6 +133,25 @@ set +a
 echo "=== 2. Run the REAL, unmodified scripts/init-web-console-db.sh + apply-web-console-auth-schema.sh against it ==="
 ./scripts/init-web-console-db.sh >/dev/null
 ./scripts/apply-web-console-auth-schema.sh
+
+# CI preflight fix: init-web-console-db.sh (the CHILD PROCESS just run
+# above) generates WEB_CONSOLE_DB_PASSWORD and writes it into .env ON
+# DISK -- but a child process can never modify its PARENT shell's
+# already-sourced environment. On a genuinely fresh runner (where
+# .env.example has this var only as a commented-out example, and this
+# is the FIRST time init-web-console-db.sh has ever run), this
+# script's own earlier `source .env` above (before
+# init-web-console-db.sh ran) captured no value for it at all --
+# referencing it below under `set -u` would fail with "unbound
+# variable", exactly the opposite of a developer machine's .env, which
+# already has a real value from a prior run, masking this entirely.
+# Re-source .env now, after the generator has actually run, so this
+# script's own environment reflects the real, current, on-disk value,
+# then fail loudly (never silently) if it is somehow still absent.
+# reload_env_credentials itself re-asserts the isolated
+# COMPOSE_PROJECT_NAME/POSTGRES_PORT survived this reload unchanged.
+reload_env_credentials
+[ -n "${WEB_CONSOLE_DB_PASSWORD:-}" ] || fail "WEB_CONSOLE_DB_PASSWORD is still not set in .env after running init-web-console-db.sh -- it should have generated and persisted one"
 
 echo "=== 3. Confirm every auth.* table is owned by web_console from creation ==="
 wrong_owner_count="$(docker compose exec -T postgres psql -t -A -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
