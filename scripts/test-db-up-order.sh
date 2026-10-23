@@ -64,6 +64,14 @@ webhook_line="$(line_of "init-webhook-secret.sh" "the webhook/lifecycle secret i
 remediation_secrets_line="$(line_of "init-remediation-secrets.sh" "the Phase 8 remediation secret init step")"
 postgres_only_line="$(line_of "docker compose up -d postgres" "'docker compose up -d postgres' (postgres-only, BEFORE the agent-runtime DB init)")"
 agent_db_init_line="$(line_of "init-agent-runtime-db.sh" "the agent-runtime checkpoint DB init step")"
+# CI preflight fix: Phase 14 gave web-console the EXACT same
+# fail-fast-on-bad-credential precedent agent-runtime-service already
+# has (docker-compose.yml's own web-console service comment says so
+# explicitly) -- an empty/stale WEB_CONSOLE_DB_PASSWORD baked into its
+# container at creation time would reproduce the identical
+# fresh-checkout race Phase 7 finding #1 already fixed for
+# AGENT_RUNTIME_DB_PASSWORD, just for a different credential.
+web_console_db_init_line="$(line_of "init-web-console-db.sh" "the web-console auth DB init step")"
 
 # The final, full "docker compose up -d" (no extra service argument) --
 # matched as an EXACT recipe line (ignoring leading tab/whitespace) so
@@ -77,5 +85,7 @@ full_up_line="$(echo "$recipe" | grep -nE '^\s*docker compose up -d\s*$' | head 
 [ "$postgres_only_line" -lt "$agent_db_init_line" ] || fail "'docker compose up -d postgres' must run BEFORE init-agent-runtime-db.sh (postgres must exist for that script's own pg_isready wait to make sense)"
 [ "$agent_db_init_line" -lt "$full_up_line" ] || fail "init-agent-runtime-db.sh (which writes AGENT_RUNTIME_DB_PASSWORD into .env) must run BEFORE the full 'docker compose up -d' that actually CREATES agent-runtime-service -- otherwise that container is created with an empty/stale password"
 [ "$remediation_secrets_line" -lt "$full_up_line" ] || fail "init-remediation-secrets.sh must run BEFORE the full 'docker compose up -d' that actually CREATES control-plane/agent-runtime-service/tool-gateway/payment-service -- otherwise those containers are created with empty/stale remediation tokens"
+[ "$postgres_only_line" -lt "$web_console_db_init_line" ] || fail "'docker compose up -d postgres' must run BEFORE init-web-console-db.sh (postgres must exist for that script's own role/schema creation to make sense)"
+[ "$web_console_db_init_line" -lt "$full_up_line" ] || fail "init-web-console-db.sh (which writes WEB_CONSOLE_DB_PASSWORD into .env) must run BEFORE the full 'docker compose up -d' that actually CREATES web-console -- otherwise that container is created with an empty/stale password"
 
-echo "PASS: db-up's recipe order is: webhook/lifecycle secrets -> Phase 8 remediation secrets -> 'docker compose up -d postgres' -> init-agent-runtime-db.sh -> full 'docker compose up -d'"
+echo "PASS: db-up's recipe order is: webhook/lifecycle secrets -> Phase 8 remediation secrets -> 'docker compose up -d postgres' -> init-agent-runtime-db.sh -> init-web-console-db.sh -> full 'docker compose up -d'"

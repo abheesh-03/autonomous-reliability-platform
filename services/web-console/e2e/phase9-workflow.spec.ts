@@ -17,6 +17,7 @@ import {
   requiredTestHarnessTokens,
   waitFor,
 } from "./support/backend";
+import { createRealLegacyOrgActor, signInBrowserContextAs } from "./support/auth";
 
 // Gate F: ONE real end-to-end acceptance test, driven through the
 // real browser UI, against the real live stack -- never a mocked
@@ -94,10 +95,43 @@ test.describe("Phase 9 operator workflow (real stack)", () => {
       incidentId = incident.id;
       console.log(`confirmed fresh incident: ${incidentId}`);
 
+      // -- 5b. Phase 14 compatibility: every protected web-console page
+      // now unconditionally requires a real, authenticated session
+      // (lib/server/actor.ts::requireActorOrRedirect) -- establish a
+      // REAL Better Auth session for a REAL, legitimate member of the
+      // SAME legacy organization that real demo ingestion already
+      // assigned this fresh incident to (see ./support/auth.ts's own
+      // docstring for exactly why this specific fixture, not a freshly
+      // registered random organization, is the correct one), then
+      // inject that real session cookie into this real browser
+      // context -- never a bypassed auth check, never a mocked
+      // backend, never a hardcoded browser-visible approval token. --
+      const actor = await createRealLegacyOrgActor();
+      await signInBrowserContextAs(page.context(), actor);
+      console.log(`confirmed: real Better Auth session established for ${actor.email}, active org ${actor.organizationId}`);
+
       // -- 6. BROWSER: open the incident, confirm it is real and
       // eligible, start a durable AI investigation. --
       await page.goto(`/incidents/${incidentId}`);
       await expect(page.getByText("checkout-service is returning HTTP 5xx errors")).toBeVisible();
+
+      // -- NOTE on tenant isolation: this spec intentionally runs with
+      // control-plane in its legacy/default mode
+      // (CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT unset), matching
+      // this workflow's own pre-Phase-14 design and the test-harness
+      // helpers in ./support/backend.ts, which call control-plane
+      // directly with no actor token throughout. In that mode,
+      // control-plane's own backend does NOT enforce per-incident
+      // organization ownership on reads -- that enforcement is Phase
+      // 14's separate, opt-in "secure mode", and is NOT something this
+      // legacy-mode spec can exercise without breaking those same
+      // helper calls. The authoritative, real negative proof that a
+      // different organization cannot read/decide another tenant's
+      // incident -- WITH secure mode genuinely enabled -- is
+      // scripts/verify-phase14-multitenant-security.sh (34 checks) and
+      // scripts/verify-retrieval-tenant-isolation.sh (17 checks), both
+      // run as part of this same CI job. This spec stays scoped to the
+      // real end-to-end remediation acceptance it was designed for.
 
       const startButton = page.getByRole("button", { name: /start ai investigation/i });
       await expect(startButton).toBeVisible();

@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag verify-retrieval-tenant-isolation rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage detectors-validate detectors-replay verify-detectors-real-stack verify-kubernetes-observer-real-stack test-verify-kubernetes-observer-quoting verify-kubernetes-remediation-live
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag verify-retrieval-tenant-isolation rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh test-web-console-auth-schema-ownership tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage detectors-validate detectors-replay verify-detectors-real-stack verify-kubernetes-observer-real-stack test-verify-kubernetes-observer-quoting verify-kubernetes-remediation-live
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -451,6 +451,18 @@ test-db-up-order: ## Phase 7 focused test: db-up's recipe provisions the checkpo
 # REVOKEs once Flyway creates the real reliability schema.
 test-init-agent-runtime-db-fresh: ## Phase 7 regression test: init-agent-runtime-db.sh succeeds on a genuinely fresh database (no reliability schema yet), against a real isolated/temporary PostgreSQL
 	./scripts/test-init-agent-runtime-db-fresh.sh
+
+# CI preflight fix (Gate 2): the pre-fix scripts/apply-web-console-auth-schema.sh
+# applied Better Auth's schema connected as $POSTGRES_USER, leaving every
+# auth.* table owned by that shared superuser role instead of web_console --
+# web_console then had NO privilege on its own tables. This target runs the
+# REAL, unmodified scripts/init-web-console-db.sh + apply-web-console-auth-schema.sh
+# against a real, isolated/temporary PostgreSQL instance (distinct
+# COMPOSE_PROJECT_NAME/POSTGRES_PORT), proving tables are owned by web_console
+# from creation, that web_console has real functional read/write privilege, and
+# that a wrongly-owned existing schema is repaired in place with zero data loss.
+test-web-console-auth-schema-ownership: ## CI preflight regression test: web-console's auth.* tables are owned by (and read/write-able by) web_console from creation, and a wrongly-owned existing schema is safely repaired in place
+	./scripts/test-web-console-auth-schema-ownership.sh
 
 tool-gateway-build: ## Build the tool-gateway Docker image
 	docker compose build tool-gateway

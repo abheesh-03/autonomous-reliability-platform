@@ -51,7 +51,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Check shell script syntax
-        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/test-failure-simulation-settling.sh && bash -n scripts/test-canonical-incident-selection.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh && bash -n scripts/verify-web-console.sh && bash -n scripts/verify-evals-offline.sh
+        run: bash -n scripts/check-env.sh && bash -n scripts/verify-persistence.sh && bash -n scripts/verify-control-plane.sh && bash -n scripts/init-webhook-secret.sh && bash -n scripts/verify-webhook-ingestion.sh && bash -n scripts/verify-alert-lifecycle.sh && bash -n scripts/verify-incident-lifecycle.sh && bash -n scripts/verify-incident-audit.sh && bash -n scripts/simulate-failure.sh && bash -n scripts/test-simulate-failure.sh && bash -n scripts/verify-failure-simulation.sh && bash -n scripts/test-failure-simulation-settling.sh && bash -n scripts/test-canonical-incident-selection.sh && bash -n scripts/verify-investigator.sh && bash -n scripts/test-verify-investigator-restore.sh && bash -n scripts/verify-rag.sh && bash -n scripts/init-agent-runtime-db.sh && bash -n scripts/verify-agent-runtime.sh && bash -n scripts/test-db-up-order.sh && bash -n scripts/test-init-agent-runtime-db-fresh.sh && bash -n scripts/apply-web-console-auth-schema.sh && bash -n scripts/init-web-console-db.sh && bash -n scripts/test-web-console-auth-schema-ownership.sh && bash -n scripts/init-remediation-secrets.sh && bash -n scripts/verify-remediation.sh && bash -n scripts/test-remediation-cleanup-resilience.sh && bash -n scripts/verify-web-console.sh && bash -n scripts/verify-evals-offline.sh
 
       - name: Verify Makefile is usable
         run: make help
@@ -475,6 +475,49 @@ jobs:
       # mode before it can reproduce in that step again.
       - name: Verify init-agent-runtime-db.sh on a genuinely fresh database (Phase 7)
         run: make test-init-agent-runtime-db-fresh
+
+      # CI preflight fix (Gate 2, independently reproduced): the
+      # pre-fix scripts/apply-web-console-auth-schema.sh applied
+      # Better Auth's schema connected as $POSTGRES_USER (the shared,
+      # broad role), leaving every auth.* table owned by it instead of
+      # web_console -- web_console (the role Better Auth's own Pool
+      # connection, and control-plane's cross-schema membership
+      # re-check, both actually use) then had NO select/insert/update/
+      # delete privilege on any of them. Owning the `auth` SCHEMA does
+      # not grant privilege on a TABLE a different role creates inside
+      # it. Runs the REAL, unmodified scripts/init-web-console-db.sh +
+      # apply-web-console-auth-schema.sh against a real, but
+      # completely isolated and temporary PostgreSQL instance (its own
+      # COMPOSE_PROJECT_NAME/POSTGRES_PORT, cleaned up via its own EXIT
+      # trap) -- never this job's own `postgres` service, which `make
+      # db-up` has not even started yet. Placed here, immediately
+      # after its Phase 7 sibling and BEFORE `make db-up` below,
+      # specifically to catch this exact failure mode before it can
+      # reproduce in a later, far more expensive step (e.g. the
+      # Playwright browser E2E, which actually exercises Better Auth's
+      # real database reads/writes).
+      - name: Verify web-console auth schema table ownership on a genuinely fresh database (CI preflight)
+        run: make test-web-console-auth-schema-ownership
+
+      # CI preflight fix (Gate 1, independently reproduced): the
+      # separate `docker compose build`/`up` path below builds
+      # services/web-console/Dockerfile with its own `RUN npm run
+      # build`, completely independent of this job's EARLIER "Build
+      # web-console" step above (a plain host `npm run build`, which
+      # passes its own ephemeral BETTER_AUTH_SECRET already). The
+      # Dockerfile's build previously had no such value at all, and
+      # `next build`'s route-collection phase throws without one --
+      # this was never caught by the earlier host build succeeding,
+      # since Docker's own builder stage re-runs `npm run build` from
+      # scratch in a separate environment. This static, offline check
+      # catches a future accidental removal of that value from the
+      # Dockerfile immediately, rather than only much later when the
+      # expensive Compose build step actually fails.
+      - name: Verify web-console Dockerfile provides a build-time BETTER_AUTH_SECRET (CI preflight)
+        run: |
+          grep -qE 'RUN\s+BETTER_AUTH_SECRET=.*npm run build' services/web-console/Dockerfile \
+            || { echo "FAIL: services/web-console/Dockerfile's build stage no longer provides an ephemeral BETTER_AUTH_SECRET to 'npm run build' -- its route-collection phase will throw at Docker build time (see this Dockerfile's own header comment)."; exit 1; }
+          echo "confirmed: services/web-console/Dockerfile's builder stage provides a build-time BETTER_AUTH_SECRET"
 
       # Captured before anything starts, so it pre-dates every
       # container's own first log line. Passed to the Loki log-evidence

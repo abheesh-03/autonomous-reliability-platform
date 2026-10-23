@@ -91,8 +91,17 @@ fi
 chmod 600 "$ENV_FILE"
 
 if [ -z "${POSTGRES_USER:-}" ] || [ -z "${POSTGRES_DB:-}" ]; then
+  # Plain dot-sourcing of the real file -- matches
+  # scripts/init-agent-runtime-db.sh's own proven precedent. A prior
+  # `source <(grep ... "$ENV_FILE")` (process substitution) relied on
+  # /dev/fd, which is not reliably available in every shell/`make`
+  # recipe invocation context (confirmed failing when this script runs
+  # as a `make db-up` recipe line) -- sourcing the file directly has no
+  # such dependency.
+  set -a
   # shellcheck disable=SC1090
-  source <(grep -E '^(POSTGRES_USER|POSTGRES_DB)=' "$ENV_FILE")
+  source "$ENV_FILE"
+  set +a
 fi
 [ -n "${POSTGRES_USER:-}" ] || fail "POSTGRES_USER is not set in $ENV_FILE"
 [ -n "${POSTGRES_DB:-}" ] || fail "POSTGRES_DB is not set in $ENV_FILE"
