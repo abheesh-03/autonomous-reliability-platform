@@ -3,6 +3,7 @@ import { createAgentRun } from "../../../../../lib/server/agent-runtime-client";
 import { backendErrorResponse } from "../../../../../lib/server/bff-error-response";
 import { getIncident, transitionIncidentStatus } from "../../../../../lib/server/control-plane-client";
 import { rejectCrossOriginMutation } from "../../../../../lib/server/origin-guard";
+import { requireActorOrUnauthorized, signAssertion } from "../../../../../lib/server/actor";
 
 // Stage 4's one mutation boundary: the browser never calls control-plane
 // or agent-runtime-service directly, and never holds
@@ -31,20 +32,25 @@ export async function POST(request: Request, { params }: { params: Promise<{ inc
   const originRejection = rejectCrossOriginMutation(request);
   if (originRejection) return originRejection;
 
+  const actorCheck = await requireActorOrUnauthorized();
+  if (!actorCheck.ok) return actorCheck.response;
+  const controlPlaneToken = await signAssertion(actorCheck.actor, "control-plane");
+  const agentRuntimeToken = await signAssertion(actorCheck.actor, "agent-runtime-service");
+
   const { incidentId } = await params;
 
   if (!UUID_PATTERN.test(incidentId)) {
     return backendErrorResponse("validation");
   }
 
-  const incidentResult = await getIncident(incidentId);
+  const incidentResult = await getIncident(incidentId, controlPlaneToken);
   if (!incidentResult.ok) {
     return backendErrorResponse(incidentResult.error.kind);
   }
   const incident = incidentResult.data;
 
   if (incident.status === "open" || incident.status === "acknowledged") {
-    const transition = await transitionIncidentStatus(incidentId, incident.status, "investigating");
+    const transition = await transitionIncidentStatus(incidentId, incident.status, "investigating", controlPlaneToken);
     if (!transition.ok) {
       return backendErrorResponse(transition.error.kind);
     }
@@ -60,7 +66,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ inc
   // per the frozen start workflow (never a redundant transition merely
   // to satisfy a frontend assumption).
 
-  const runResult = await createAgentRun(incidentId);
+  const runResult = await createAgentRun(incidentId, agentRuntimeToken);
   if (!runResult.ok) {
     return backendErrorResponse(runResult.error.kind);
   }

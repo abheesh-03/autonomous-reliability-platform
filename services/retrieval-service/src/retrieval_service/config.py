@@ -190,3 +190,74 @@ class SearchBounds:
             default_result_limit=_clamped_int_env("RETRIEVAL_DEFAULT_RESULT_LIMIT", 3, 1, 50),
             max_excerpt_chars=_clamped_int_env("RETRIEVAL_MAX_EXCERPT_CHARS", 500, 50, 5000),
         )
+
+
+@dataclass(frozen=True)
+class OrganizationContextSettings:
+    """Phase 14 correction round, Issue 2/3: the SAME shared
+    environment variable (CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT)
+    control-plane/agent-runtime-service/investigator-service all read
+    -- one global secure-mode switch, never independently enabled
+    per service."""
+
+    enabled: bool
+
+    @classmethod
+    def from_env(cls) -> "OrganizationContextSettings":
+        raw = os.environ.get("CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT", "false")
+        return cls(enabled=raw.strip().lower() in ("1", "true", "yes", "on"))
+
+
+@dataclass(frozen=True)
+class ServiceAssertionSettings:
+    """Phase 14 FINAL MACHINE-IDENTITY TENANT-BOUNDARY FIX, Issue A:
+    resolving `exclude_incident_id`'s REAL owning organization (see
+    search.py::_resolve_historical_organization_scope) proves which
+    tenant owns the incident -- it does NOT prove the CALLER is
+    actually authorized for that tenant. A valid
+    RETRIEVAL_INTERNAL_READ_TOKEN_INVESTIGATOR alone only proves "this
+    is really investigator-service's own process"; it never identifies
+    which real human actor investigator-service is acting on behalf of
+    for THIS specific request. This module verifies a signed
+    `X-Service-Assertion` investigator-service relays (mirrors its own
+    identical relay to control-plane, `investigator_service.authz`) --
+    carrying the REAL, already-verified actor whose organization must
+    then be compared, in search.py, against the incident's real
+    organization before ANY tenant-private historical result is
+    returned. Same shared HS256 secret as every other service;
+    `trusted_issuers` is deliberately narrow (investigator-service
+    only -- no other service calls this one), and `audience` is this
+    service's OWN identity, distinct from every other service's."""
+
+    secret: str | None
+    trusted_issuers: frozenset[str]
+    audience: str
+    max_clock_skew_seconds: float
+
+    @classmethod
+    def from_env(cls) -> "ServiceAssertionSettings":
+        raw = os.environ.get("SERVICE_ASSERTION_SIGNING_SECRET", "")
+        raw_issuers = os.environ.get("SERVICE_ASSERTION_TRUSTED_ISSUERS_RETRIEVAL", "investigator-service")
+        return cls(
+            secret=raw if raw.strip() else None,
+            trusted_issuers=frozenset(i.strip() for i in raw_issuers.split(",") if i.strip()),
+            audience=os.environ.get("SERVICE_ASSERTION_AUDIENCE_RETRIEVAL", "retrieval-service"),
+            max_clock_skew_seconds=_float_env("SERVICE_ASSERTION_MAX_CLOCK_SKEW_SECONDS", 30.0),
+        )
+
+
+@dataclass(frozen=True)
+class InternalCallerTokenSettings:
+    """Phase 14 correction round, Issue 2/3: closes "a direct HTTP
+    call to this service's own exposed port (127.0.0.1:8002) bypasses
+    investigator-service" -- this service's only legitimate caller.
+    Checked against `X-Internal-Service-Token`
+    (RETRIEVAL_INTERNAL_READ_TOKEN_INVESTIGATOR); never a human-actor
+    credential -- this service has no browser-facing API."""
+
+    investigator_caller_token: str | None
+
+    @classmethod
+    def from_env(cls) -> "InternalCallerTokenSettings":
+        raw = os.environ.get("RETRIEVAL_INTERNAL_READ_TOKEN_INVESTIGATOR", "")
+        return cls(investigator_caller_token=raw if raw.strip() else None)

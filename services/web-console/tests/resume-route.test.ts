@@ -1,3 +1,4 @@
+import { APIError } from "better-auth";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fail, ok } from "../lib/server/http";
 
@@ -8,14 +9,56 @@ vi.mock("../lib/server/agent-runtime-client", () => ({
 vi.mock("../lib/server/control-plane-client", () => ({
   getRemediationProposal: vi.fn(),
 }));
+// Phase 14 correction round: only the Next.js/Better-Auth PLUMBING is
+// mocked here -- lib/server/actor.ts's own resolveActor/
+// requireActorOrUnauthorized run for REAL against these.
+vi.mock("next/headers", () => ({
+  headers: vi.fn(async () => new Headers()),
+}));
+vi.mock("@/lib/auth/auth", () => ({
+  auth: { api: { getSession: vi.fn(), getActiveMember: vi.fn() } },
+}));
 
 import { POST } from "../app/api/agent-runs/[runId]/resume/route";
+import { auth } from "@/lib/auth/auth";
 import { getAgentRun, resumeAgentRun } from "../lib/server/agent-runtime-client";
 import { getRemediationProposal } from "../lib/server/control-plane-client";
 
 const getAgentRunMock = getAgentRun as unknown as ReturnType<typeof vi.fn>;
 const resumeAgentRunMock = resumeAgentRun as unknown as ReturnType<typeof vi.fn>;
 const getRemediationProposalMock = getRemediationProposal as unknown as ReturnType<typeof vi.fn>;
+const getSessionMock = auth.api.getSession as unknown as ReturnType<typeof vi.fn>;
+const getActiveMemberMock = auth.api.getActiveMember as unknown as ReturnType<typeof vi.fn>;
+
+const ACTOR_USER_ID = "88888888-8888-8888-8888-888888888888";
+const ACTOR_ORG_ID = "99999999-9999-9999-9999-999999999999";
+
+function mockAuthenticatedActor(role = "OWNER") {
+  getSessionMock.mockResolvedValue({
+    user: { id: ACTOR_USER_ID },
+    session: { activeOrganizationId: ACTOR_ORG_ID },
+  });
+  getActiveMemberMock.mockResolvedValue({
+    id: "member-1",
+    userId: ACTOR_USER_ID,
+    organizationId: ACTOR_ORG_ID,
+    role,
+  });
+}
+
+function mockNoSession() {
+  getSessionMock.mockResolvedValue(null);
+}
+
+function mockRevokedMember() {
+  getSessionMock.mockResolvedValue({
+    user: { id: ACTOR_USER_ID },
+    session: { activeOrganizationId: ACTOR_ORG_ID },
+  });
+  getActiveMemberMock.mockRejectedValue(
+    APIError.from("BAD_REQUEST", { code: "MEMBER_NOT_FOUND", message: "Member not found" }),
+  );
+}
 
 const RUN_ID = "33333333-3333-3333-3333-333333333333";
 const PROPOSAL_ID = "44444444-4444-4444-4444-444444444444";
@@ -81,6 +124,7 @@ function callRoute(origin: string | null = TRUSTED_ORIGIN) {
 
 beforeEach(() => {
   vi.stubEnv("WEB_CONSOLE_TRUSTED_ORIGIN", TRUSTED_ORIGIN);
+  mockAuthenticatedActor();
 });
 
 afterEach(() => {
@@ -99,7 +143,7 @@ describe("POST /api/agent-runs/[runId]/resume", () => {
 
     expect(response.status).toBe(200);
     expect(resumeAgentRunMock).toHaveBeenCalledTimes(1);
-    expect(resumeAgentRunMock).toHaveBeenCalledWith(RUN_ID);
+    expect(resumeAgentRunMock).toHaveBeenCalledWith(RUN_ID, expect.any(String));
     expect(Object.keys(body).sort()).toEqual(
       ["current_node", "remediation_proposal_id", "remediation_status", "resumable", "run_id", "status"].sort(),
     );
@@ -256,6 +300,32 @@ describe("POST /api/agent-runs/[runId]/resume", () => {
 
       expect(response.status).toBe(200);
       expect(resumeAgentRunMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("real actor resolution (Phase 14 Gate 9/Blocker 1)", () => {
+    it("no session at all -> 401, before any backend call", async () => {
+      mockNoSession();
+
+      const response = await callRoute();
+      const body = await response.json();
+
+      expect(response.status).toBe(401);
+      expect(body.error).toBe("unauthorized");
+      expect(getAgentRunMock).not.toHaveBeenCalled();
+      expect(resumeAgentRunMock).not.toHaveBeenCalled();
+    });
+
+    it("a revoked/removed member's still-valid session cannot resume anything -- 401, no mutation", async () => {
+      mockRevokedMember();
+
+      const response = await callRoute();
+      const body = await response.json();
+
+      expect(response.status).toBe(401);
+      expect(body.error).toBe("unauthorized");
+      expect(getAgentRunMock).not.toHaveBeenCalled();
+      expect(resumeAgentRunMock).not.toHaveBeenCalled();
     });
   });
 });

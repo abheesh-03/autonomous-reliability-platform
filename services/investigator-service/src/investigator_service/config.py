@@ -24,6 +24,124 @@ from typing import Literal
 logger = logging.getLogger("investigator_service.config")
 
 
+@dataclass(frozen=True)
+class OrganizationContextSettings:
+    """Phase 14 correction round, Issue 3: mirrors
+    control_plane.core.config.OrganizationContextSettings exactly --
+    the SAME shared environment variable
+    (CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT) as control-plane and
+    agent-runtime-service, so this platform's secure mode is ONE
+    global toggle, never independently enabled per service (Issue 3's
+    own warning: "Ensure internal authorization does not silently
+    disable the human tenant checks")."""
+
+    enabled: bool
+
+    @classmethod
+    def from_env(cls) -> "OrganizationContextSettings":
+        raw = os.environ.get("CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT", "false")
+        return cls(enabled=raw.strip().lower() in ("1", "true", "yes", "on"))
+
+
+@dataclass(frozen=True)
+class InternalServiceTokenSettings:
+    """Phase 14 correction round, Issue 3: closes the "direct HTTP
+    call bypasses the frontend" gap this service's own exposed port
+    (127.0.0.1:8001) otherwise leaves open once secure mode is on --
+    see docs/architecture/phase-14-security-multitenancy.md.
+
+    `agent_runtime_caller_token` is what THIS service CHECKS incoming
+    POST /api/v1/investigations requests against (only
+    agent-runtime-service is configured with the matching value) --
+    never a human-actor credential; this service has no browser-facing
+    API and never will. `control_plane_token`/`retrieval_token` are
+    this service's OWN distinct internal-read identities, presented to
+    control-plane and retrieval-service respectively (never reused
+    for one another, and never the same value as
+    `agent_runtime_caller_token` -- see main.py's own startup
+    validation).
+
+    Why no per-request human-organization re-verification is layered
+    on top of this (Issue 3: "organization/resource binding where
+    necessary", judged not necessary here): the tenant-authorization
+    decision for "may this actor investigate this incident" is already
+    made, independently, at agent-runtime-service's own
+    create_agent_run/resume_agent_run API boundary (see
+    agent_runtime_service/api/agent_runs.py and its own real
+    cross-tenant tests) BEFORE it ever calls this endpoint -- this
+    service is reachable ONLY via that already-authorized internal
+    call once this token is required, never directly by a browser.
+    """
+
+    agent_runtime_caller_token: str | None
+    control_plane_token: str
+    retrieval_token: str
+
+    @classmethod
+    def from_env(cls) -> "InternalServiceTokenSettings":
+        raw_caller = os.environ.get("INVESTIGATOR_INTERNAL_READ_TOKEN_AGENT_RUNTIME", "")
+        return cls(
+            agent_runtime_caller_token=raw_caller if raw_caller.strip() else None,
+            control_plane_token=os.environ.get("CONTROL_PLANE_INTERNAL_READ_TOKEN_INVESTIGATOR", ""),
+            retrieval_token=os.environ.get("RETRIEVAL_INTERNAL_READ_TOKEN_INVESTIGATOR", ""),
+        )
+
+
+@dataclass(frozen=True)
+class ServiceAssertionSettings:
+    """Phase 14 correction round, Blocker 1: verifies a signed service
+    assertion agent-runtime-service RELAYS alongside its own existing
+    `agent_runtime_caller_token` (that token is UNCHANGED and still
+    independently required by `require_internal_caller` -- this is
+    additive, never a replacement). Carries the real human actor
+    agent-runtime-service's own API boundary already verified, so THIS
+    service can, in turn, mint a FURTHER-derived assertion
+    (`iss="investigator-service"`) when it reads incident evidence
+    from control-plane -- control-plane's own incident/evidence routes
+    no longer accept a bare internal token at all (see
+    control_plane.core.authz's own Blocker-1 fix).
+
+    Same shared HS256 secret as every other service
+    (SERVICE_ASSERTION_SIGNING_SECRET); `trusted_issuers` here is
+    narrower than control-plane's own -- only agent-runtime-service
+    ever calls this service, never web-console directly -- and
+    `audience` is this service's OWN identity
+    (SERVICE_ASSERTION_AUDIENCE, default "investigator-service"),
+    distinct from control-plane's or agent-runtime-service's audience
+    values (an assertion minted for one backend must not be replayable
+    against another)."""
+
+    secret: str | None
+    trusted_issuers: frozenset[str]
+    audience: str
+    max_clock_skew_seconds: float
+    # The audience THIS service uses when IT relays a further-derived
+    # assertion onward to control-plane -- mirrors
+    # agent_runtime_service.config.ServiceAssertionSettings's own
+    # `control_plane_audience` field/env-var name exactly.
+    control_plane_audience: str
+    # Phase 14 FINAL MACHINE-IDENTITY TENANT-BOUNDARY FIX, Issue A: the
+    # audience THIS service uses when it relays a derived assertion to
+    # retrieval-service, carrying the real actor on whose behalf it is
+    # searching -- retrieval-service's own `_resolve_historical_organization_scope`
+    # requires this to authorize a tenant-scoped historical search at
+    # all (a bare internal token is no longer sufficient by itself).
+    retrieval_audience: str
+
+    @classmethod
+    def from_env(cls) -> "ServiceAssertionSettings":
+        raw = os.environ.get("SERVICE_ASSERTION_SIGNING_SECRET", "")
+        raw_issuers = os.environ.get("SERVICE_ASSERTION_TRUSTED_ISSUERS", "agent-runtime-service")
+        return cls(
+            secret=raw if raw.strip() else None,
+            trusted_issuers=frozenset(i.strip() for i in raw_issuers.split(",") if i.strip()),
+            audience=os.environ.get("SERVICE_ASSERTION_AUDIENCE", "investigator-service"),
+            max_clock_skew_seconds=_float_env("SERVICE_ASSERTION_MAX_CLOCK_SKEW_SECONDS", 30.0),
+            control_plane_audience=os.environ.get("SERVICE_ASSERTION_AUDIENCE_CONTROL_PLANE", "control-plane"),
+            retrieval_audience=os.environ.get("SERVICE_ASSERTION_AUDIENCE_RETRIEVAL", "retrieval-service"),
+        )
+
+
 def _float_env(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():

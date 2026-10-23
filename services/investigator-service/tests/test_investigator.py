@@ -42,13 +42,16 @@ class FakeRetrievalClient:
         self._raise = raise_
         self.calls: list[dict] = []
 
-    async def search(self, query, *, exclude_incident_id=None, knowledge_limit, historical_incident_limit):
+    async def search(
+        self, query, *, exclude_incident_id=None, knowledge_limit, historical_incident_limit, organization_id=None
+    ):
         self.calls.append(
             {
                 "query": query,
                 "exclude_incident_id": exclude_incident_id,
                 "knowledge_limit": knowledge_limit,
                 "historical_incident_limit": historical_incident_limit,
+                "organization_id": organization_id,
             }
         )
         if self._raise:
@@ -60,6 +63,7 @@ def _incident(status: str = "resolved") -> IncidentSnapshot:
     return IncidentSnapshot.model_validate(
         {
             "id": str(SAMPLE_INCIDENT_ID),
+            "organization_id": "00000000-0000-0000-0000-000000000001",
             "source": "alertmanager",
             "source_fingerprint": "fp",
             "title": "t",

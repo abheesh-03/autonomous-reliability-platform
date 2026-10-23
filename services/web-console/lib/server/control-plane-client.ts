@@ -53,6 +53,29 @@ function getRemediationApproverToken(): string | null {
   return token && token.trim().length > 0 ? token : null;
 }
 
+/**
+ * Phase 14 Gate 5: every function below accepts an optional
+ * `actorToken` -- the short-lived signed service assertion
+ * lib/server/actor.ts mints for THIS SPECIFIC real, authenticated
+ * browser request (never a static secret). Forwarded in its OWN
+ * dedicated `X-Service-Assertion` header -- deliberately NOT
+ * `Authorization`, which several of these same calls already use for
+ * one of control-plane's existing static Bearer tokens (the
+ * lifecycle/approver tokens above); control-plane's
+ * core/authz.py::get_actor_context reads this header independently,
+ * so a route that needs both (e.g. the remediation decision endpoint)
+ * enforces them as two separate, additive checks on one request,
+ * never a collision over a single header.
+ *
+ * When `actorToken` is omitted/undefined (every pre-Phase-14 caller,
+ * and every call made while CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT
+ * is disabled), behavior is COMPLETELY unchanged from before this
+ * phase.
+ */
+function actorAuthHeader(actorToken?: string): Record<string, string> {
+  return actorToken ? { "X-Service-Assertion": actorToken } : {};
+}
+
 export interface ListIncidentsParams {
   status?: IncidentStatus;
   severity?: IncidentSeverity;
@@ -78,6 +101,7 @@ function clampOffset(offset: number | undefined): number {
 
 export async function listIncidents(
   params: ListIncidentsParams,
+  actorToken?: string,
 ): Promise<BackendResult<IncidentListResponse>> {
   const query = buildQuery({
     status: params.status,
@@ -86,7 +110,11 @@ export async function listIncidents(
     limit: clampLimit(params.limit),
     offset: clampOffset(params.offset),
   });
-  const result = await getJson(`${CONTROL_PLANE_URL}/api/v1/incidents${query}`);
+  const result = await getJson(
+    `${CONTROL_PLANE_URL}/api/v1/incidents${query}`,
+    undefined,
+    actorAuthHeader(actorToken),
+  );
   if ("networkError" in result) {
     return fail("unavailable", "control-plane unreachable");
   }
@@ -112,8 +140,12 @@ export async function listIncidents(
   return ok(body as IncidentListResponse);
 }
 
-export async function getIncident(incidentId: string): Promise<BackendResult<Incident>> {
-  const result = await getJson(`${CONTROL_PLANE_URL}/api/v1/incidents/${encodeURIComponent(incidentId)}`);
+export async function getIncident(incidentId: string, actorToken?: string): Promise<BackendResult<Incident>> {
+  const result = await getJson(
+    `${CONTROL_PLANE_URL}/api/v1/incidents/${encodeURIComponent(incidentId)}`,
+    undefined,
+    actorAuthHeader(actorToken),
+  );
   if ("networkError" in result) {
     return fail("unavailable", "control-plane unreachable");
   }
@@ -150,6 +182,7 @@ export async function transitionIncidentStatus(
   incidentId: string,
   expectedStatus: IncidentStatus,
   targetStatus: IncidentStatus,
+  actorToken?: string,
 ): Promise<BackendResult<Incident>> {
   const token = getLifecycleToken();
   if (!token) {
@@ -159,7 +192,7 @@ export async function transitionIncidentStatus(
   const result = await patchJson(
     `${CONTROL_PLANE_URL}/api/v1/incidents/${encodeURIComponent(incidentId)}/status`,
     { expected_status: expectedStatus, target_status: targetStatus },
-    { Authorization: `Bearer ${token}` },
+    { Authorization: `Bearer ${token}`, ...actorAuthHeader(actorToken) },
   );
   if ("networkError" in result) {
     return fail("unavailable", "control-plane unreachable");
@@ -196,10 +229,13 @@ async function getIncidentEventsPage(
   incidentId: string,
   limit: number,
   offset: number,
+  actorToken?: string,
 ): Promise<BackendResult<IncidentEventListResponse>> {
   const query = buildQuery({ limit, offset });
   const result = await getJson(
     `${CONTROL_PLANE_URL}/api/v1/incidents/${encodeURIComponent(incidentId)}/events${query}`,
+    undefined,
+    actorAuthHeader(actorToken),
   );
   if ("networkError" in result) {
     return fail("unavailable", "control-plane unreachable");
@@ -225,18 +261,24 @@ async function getIncidentEventsPage(
  * never just the first default-sized page -- see fetchAllPages's own
  * bounded-pagination contract (lib/server/http.ts).
  */
-export async function getAllIncidentEvents(incidentId: string): Promise<BackendResult<IncidentEvent[]>> {
-  return fetchAllPages((limit, offset) => getIncidentEventsPage(incidentId, limit, offset));
+export async function getAllIncidentEvents(
+  incidentId: string,
+  actorToken?: string,
+): Promise<BackendResult<IncidentEvent[]>> {
+  return fetchAllPages((limit, offset) => getIncidentEventsPage(incidentId, limit, offset, actorToken));
 }
 
 async function getIncidentRemediationProposalsPage(
   incidentId: string,
   limit: number,
   offset: number,
+  actorToken?: string,
 ): Promise<BackendResult<RemediationProposalListResponse>> {
   const query = buildQuery({ limit, offset });
   const result = await getJson(
     `${CONTROL_PLANE_URL}/api/v1/incidents/${encodeURIComponent(incidentId)}/remediation-proposals${query}`,
+    undefined,
+    actorAuthHeader(actorToken),
   );
   if ("networkError" in result) {
     return fail("unavailable", "control-plane unreachable");
@@ -262,17 +304,25 @@ async function getIncidentRemediationProposalsPage(
 
 export async function getAllIncidentRemediationProposals(
   incidentId: string,
+  actorToken?: string,
 ): Promise<BackendResult<RemediationProposal[]>> {
-  return fetchAllPages((limit, offset) => getIncidentRemediationProposalsPage(incidentId, limit, offset));
+  return fetchAllPages((limit, offset) =>
+    getIncidentRemediationProposalsPage(incidentId, limit, offset, actorToken),
+  );
 }
 
 // Stage 3: used only to enrich an AgentRun's own remediation_proposal_id
 // with the durable proposal's real fields (reason, decision, execution
 // timestamps) on /agent-runs/[runId] -- a real, existing, unauthenticated
 // GET endpoint, never a new discovery API.
-export async function getRemediationProposal(proposalId: string): Promise<BackendResult<RemediationProposal>> {
+export async function getRemediationProposal(
+  proposalId: string,
+  actorToken?: string,
+): Promise<BackendResult<RemediationProposal>> {
   const result = await getJson(
     `${CONTROL_PLANE_URL}/api/v1/remediation-proposals/${encodeURIComponent(proposalId)}`,
+    undefined,
+    actorAuthHeader(actorToken),
   );
   if ("networkError" in result) {
     return fail("unavailable", "control-plane unreachable");
@@ -319,6 +369,7 @@ export async function decideRemediationProposal(
   expectedStatus: RemediationProposalStatus,
   decision: "approve" | "reject",
   comment?: string,
+  actorToken?: string,
 ): Promise<BackendResult<RemediationProposal>> {
   const token = getRemediationApproverToken();
   if (!token) {
@@ -328,7 +379,7 @@ export async function decideRemediationProposal(
   const result = await postJson(
     `${CONTROL_PLANE_URL}/api/v1/remediation-proposals/${encodeURIComponent(proposalId)}/decision`,
     { expected_status: expectedStatus, decision, comment: comment ?? null },
-    { Authorization: `Bearer ${token}` },
+    { Authorization: `Bearer ${token}`, ...actorAuthHeader(actorToken) },
   );
   if ("networkError" in result) {
     return fail("unavailable", "control-plane unreachable");
@@ -338,6 +389,9 @@ export async function decideRemediationProposal(
   }
   if (result.status === 401) {
     return fail("unauthorized", "control-plane rejected this server's remediation approver token");
+  }
+  if (result.status === 403) {
+    return fail("forbidden", "the current user's role does not permit deciding this remediation proposal");
   }
   if (result.status === 404) {
     return fail("not_found", "remediation proposal not found");
@@ -365,10 +419,13 @@ async function getRemediationProposalEventsPage(
   proposalId: string,
   limit: number,
   offset: number,
+  actorToken?: string,
 ): Promise<BackendResult<RemediationEventListResponse>> {
   const query = buildQuery({ limit, offset });
   const result = await getJson(
     `${CONTROL_PLANE_URL}/api/v1/remediation-proposals/${encodeURIComponent(proposalId)}/events${query}`,
+    undefined,
+    actorAuthHeader(actorToken),
   );
   if ("networkError" in result) {
     return fail("unavailable", "control-plane unreachable");
@@ -394,6 +451,9 @@ async function getRemediationProposalEventsPage(
 
 export async function getAllRemediationProposalEvents(
   proposalId: string,
+  actorToken?: string,
 ): Promise<BackendResult<RemediationEvent[]>> {
-  return fetchAllPages((limit, offset) => getRemediationProposalEventsPage(proposalId, limit, offset));
+  return fetchAllPages((limit, offset) =>
+    getRemediationProposalEventsPage(proposalId, limit, offset, actorToken),
+  );
 }

@@ -13,6 +13,7 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.db.session import get_session
+from control_plane.repositories.auth_membership_repository import AuthMembershipRepository
 from control_plane.repositories.incident_repository import IncidentRepository
 from control_plane.repositories.remediation_repository import RemediationRepository
 
@@ -21,6 +22,15 @@ async def get_incident_repository(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> IncidentRepository:
     return IncidentRepository(session)
+
+
+async def get_auth_membership_repository(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AuthMembershipRepository:
+    # Phase 14 correction round, Blocker 4: same request-scoped session
+    # as every other repository -- a read-only cross-schema SELECT, no
+    # transactional interaction with the remediation decision itself.
+    return AuthMembershipRepository(session)
 
 
 async def get_remediation_repository(

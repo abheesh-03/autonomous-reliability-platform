@@ -11,6 +11,7 @@ const MESSAGES: Record<BackendErrorKind, string> = {
   conflict: "The requested change is no longer valid for the current state.",
   unauthorized: "This server could not authenticate to the backend.",
   configuration: "This server is not configured correctly for this action.",
+  forbidden: "You do not have permission to perform this action.",
 };
 
 export function BackendFailure({ kind }: { kind: BackendErrorKind }) {

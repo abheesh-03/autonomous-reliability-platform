@@ -14,6 +14,9 @@ from datetime import UTC, datetime
 SAMPLE_INCIDENT_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 
 
+LEGACY_ORGANIZATION_ID = "00000000-0000-0000-0000-000000000001"
+
+
 def incident_json(
     *,
     incident_id: uuid.UUID = SAMPLE_INCIDENT_ID,
@@ -23,11 +26,13 @@ def incident_json(
     description: str | None = "checkout-service has served HTTP 5xx responses",
     source: str = "alertmanager",
     source_fingerprint: str = "deadbeef12345678",
+    organization_id: str = LEGACY_ORGANIZATION_ID,
 ) -> dict:
     first_seen_at = datetime(2026, 4, 1, 9, 0, 0, tzinfo=UTC)
     last_seen_at = datetime(2026, 4, 1, 9, 5, 0, tzinfo=UTC)
     return {
         "id": str(incident_id),
+        "organization_id": organization_id,
         "source": source,
         "source_fingerprint": source_fingerprint,
         "title": title,

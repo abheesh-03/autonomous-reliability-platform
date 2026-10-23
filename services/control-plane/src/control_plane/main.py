@@ -39,9 +39,13 @@ from control_plane.api.webhook_limits import WebhookBodySizeLimitMiddleware
 from control_plane.core.config import (
     AwsIngestionTokenSettings,
     DatabaseSettings,
+    InternalServiceReadTokenSettings,
     KubernetesIngestionTokenSettings,
+    LegacyIngestionSettings,
     LifecycleSettings,
+    OrganizationContextSettings,
     RemediationTokenSettings,
+    ServiceAssertionSettings,
     WebhookSettings,
     resolve_write_tokens,
 )
@@ -62,6 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # core/config.py. Phase 8 extends this same guard to the three new
     # remediation tokens.
     remediation_tokens = RemediationTokenSettings.from_env()
+    internal_read_tokens = InternalServiceReadTokenSettings.from_env()
     (
         webhook_token,
         lifecycle_token,
@@ -70,6 +75,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         remediation_executor_token,
         kubernetes_ingestion_token,
         aws_ingestion_token,
+        agent_runtime_internal_read_token,
+        investigator_internal_read_token,
+        tool_gateway_internal_read_token,
     ) = resolve_write_tokens(
         WebhookSettings.from_env().token,
         LifecycleSettings.from_env().token,
@@ -78,6 +86,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         remediation_tokens.executor_token,
         KubernetesIngestionTokenSettings.from_env().token,
         AwsIngestionTokenSettings.from_env().token,
+        internal_read_tokens.agent_runtime_token,
+        internal_read_tokens.investigator_token,
+        internal_read_tokens.tool_gateway_token,
     )
     app.state.webhook_token = webhook_token
     app.state.lifecycle_token = lifecycle_token
@@ -86,6 +97,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.remediation_executor_token = remediation_executor_token
     app.state.kubernetes_ingestion_token = kubernetes_ingestion_token
     app.state.aws_ingestion_token = aws_ingestion_token
+    # Phase 14 correction round, Issue 3: re-built from the
+    # collision-resolved values above (never the raw, pre-guard
+    # internal_read_tokens object) so a misconfigured collision with
+    # any OTHER write-capable token also fails this internal-service
+    # identity closed, not just the other token.
+    app.state.internal_service_read_tokens = InternalServiceReadTokenSettings(
+        agent_runtime_token=agent_runtime_internal_read_token,
+        investigator_token=investigator_internal_read_token,
+        tool_gateway_token=tool_gateway_internal_read_token,
+    )
+    # Phase 14 correction round, Issue 4: see LegacyIngestionSettings's
+    # own docstring.
+    app.state.legacy_ingestion_settings = LegacyIngestionSettings.from_env()
+    # Phase 14: see core/config.py's own docstrings. Both non-blocking
+    # at startup, same philosophy as every token above -- an
+    # unconfigured signing secret or a disabled flag never crashes this
+    # service; they only change whether/how core/authz.py enforces
+    # anything.
+    app.state.organization_context_settings = OrganizationContextSettings.from_env()
+    app.state.service_assertion_settings = ServiceAssertionSettings.from_env()
     try:
         yield
     finally:

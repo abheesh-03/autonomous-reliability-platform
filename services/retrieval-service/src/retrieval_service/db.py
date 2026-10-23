@@ -1,9 +1,12 @@
 """This service's ONLY database access: a narrow asyncpg pool scoped
-to exactly one table, reliability.retrieval_chunks (Phase 6 §2/§10).
-Every query below is schema-qualified and parameterized -- never
-string-built from caller input (Phase 6 §9: "no arbitrary SQL/filter
-expression from the caller"). No other table in the "reliability"
-schema is ever read or written here.
+primarily to reliability.retrieval_chunks (Phase 6 §2/§10), plus
+READ-ONLY references to reliability.incidents for tenant scoping
+(search_chunks's own tenant JOIN, and get_incident_organization_id
+below -- Phase 14 correction round, Blocker 2). Every query below is
+schema-qualified and parameterized -- never string-built from caller
+input (Phase 6 §9: "no arbitrary SQL/filter expression from the
+caller"). No table in the "reliability" schema is ever WRITTEN here
+other than retrieval_chunks.
 
 The `vector` type was installed into the "reliability" schema by
 V5__create_retrieval_index.sql (not "public" -- confirmed empirically
@@ -193,6 +196,7 @@ async def search_chunks(
     query_embedding: list[float],
     limit: int,
     exclude_source_key: str | None = None,
+    organization_id: str | None = None,
 ) -> list[RetrievalChunkRow]:
     """Read-only cosine-distance search, scoped to exactly one
     source_type and one embedding_space (Phase 6 §4/§9) -- an
@@ -200,38 +204,68 @@ async def search_chunks(
     construction (the WHERE clause, not vector dimension alone).
     Deterministic tie-breaking: ties in distance are broken by `id
     ASC` (Phase 6 §17's "deterministic tie-breaking" requirement).
+
+    `organization_id` (Phase 14 correction round, Issue 2: "tenant-
+    specific retrieval results"): when given AND `source_type ==
+    "historical_incident"`, an additional real SQL JOIN against
+    `reliability.incidents` excludes any chunk whose own incident
+    belongs to a DIFFERENT organization -- `source_key` is that
+    incident's own UUID as text (the ONLY source_key shape
+    `source_type='historical_incident'` ever uses -- see
+    V5__create_retrieval_index.sql's own column docstring), cast to
+    compare against `incidents.id`'s native UUID column. Deliberately
+    IGNORED for `source_type == "knowledge"` -- runbook chunks remain
+    global/public regardless of caller, per this platform's explicitly
+    modeled global-public policy. This is a REAL filter applied INSIDE
+    the SQL query (never a post-fetch filter over already-fetched
+    rows), consistent with every other tenant-scoping query in this
+    platform.
     """
+    # Every column below is fully schema-AND-table-qualified
+    # (`reliability.retrieval_chunks.<col>`), never bare -- the
+    # optional JOIN against `reliability.incidents` introduces real
+    # column-name collisions (both tables have `id`, `title`,
+    # `created_at`/`updated_at`); a bare reference is ambiguous (a
+    # real `psycopg`/`asyncpg` error) whenever the join is present, and
+    # silently correct-by-luck whenever it isn't -- fully qualifying
+    # unconditionally avoids depending on which branch is active ever
+    # being correct by accident. Caught by a real-PostgreSQL check
+    # during this phase's correction round, never by a mocked test (no
+    # SQL parser involved at all in those).
+    conditions = ["reliability.retrieval_chunks.source_type = $2", "reliability.retrieval_chunks.embedding_space = $3"]
+    params: list[object] = [_vector_literal(query_embedding), source_type, embedding_space]
+
     if exclude_source_key is not None:
-        rows = await pool.fetch(
-            f"""
-            SELECT id, source_type, source_key, chunk_index, title, content, content_hash, metadata,
-                   embedding_space, embedding <=> $1::{_VECTOR_CAST} AS distance
-            FROM reliability.retrieval_chunks
-            WHERE source_type = $2 AND embedding_space = $3 AND source_key <> $4
-            ORDER BY embedding <=> $1::{_VECTOR_CAST} ASC, id ASC
-            LIMIT $5
-            """,
-            _vector_literal(query_embedding),
-            source_type,
-            embedding_space,
-            exclude_source_key,
-            limit,
+        params.append(exclude_source_key)
+        conditions.append(f"reliability.retrieval_chunks.source_key <> ${len(params)}")
+
+    tenant_join = ""
+    if organization_id is not None and source_type == "historical_incident":
+        params.append(organization_id)
+        tenant_join = (
+            "JOIN reliability.incidents ON reliability.incidents.id = reliability.retrieval_chunks.source_key::uuid"
         )
-    else:
-        rows = await pool.fetch(
-            f"""
-            SELECT id, source_type, source_key, chunk_index, title, content, content_hash, metadata,
-                   embedding_space, embedding <=> $1::{_VECTOR_CAST} AS distance
-            FROM reliability.retrieval_chunks
-            WHERE source_type = $2 AND embedding_space = $3
-            ORDER BY embedding <=> $1::{_VECTOR_CAST} ASC, id ASC
-            LIMIT $4
-            """,
-            _vector_literal(query_embedding),
-            source_type,
-            embedding_space,
-            limit,
-        )
+        conditions.append(f"reliability.incidents.organization_id = ${len(params)}::uuid")
+
+    params.append(limit)
+    limit_placeholder = f"${len(params)}"
+
+    rows = await pool.fetch(
+        f"""
+        SELECT reliability.retrieval_chunks.id, reliability.retrieval_chunks.source_type,
+               reliability.retrieval_chunks.source_key, reliability.retrieval_chunks.chunk_index,
+               reliability.retrieval_chunks.title, reliability.retrieval_chunks.content,
+               reliability.retrieval_chunks.content_hash, reliability.retrieval_chunks.metadata,
+               reliability.retrieval_chunks.embedding_space,
+               reliability.retrieval_chunks.embedding <=> $1::{_VECTOR_CAST} AS distance
+        FROM reliability.retrieval_chunks
+        {tenant_join}
+        WHERE {" AND ".join(conditions)}
+        ORDER BY reliability.retrieval_chunks.embedding <=> $1::{_VECTOR_CAST} ASC, reliability.retrieval_chunks.id ASC
+        LIMIT {limit_placeholder}
+        """,
+        *params,
+    )
 
     return [
         RetrievalChunkRow(
@@ -248,6 +282,33 @@ async def search_chunks(
         )
         for r in rows
     ]
+
+
+async def get_incident_organization_id(pool: asyncpg.Pool, incident_id: str) -> str | None:
+    """Phase 14 correction round, Blocker 2: the ONE trusted source of
+    an incident's real organization -- a direct, read-only lookup
+    against `reliability.incidents` (the same table `search_chunks`
+    already JOINs for its own tenant filter, same schema, same pool,
+    same least-privileged POSTGRES_USER role -- no new grant, no new
+    cross-service call). Returns `None` for an unknown incident_id
+    (including a syntactically invalid UUID, caught as a real
+    asyncpg.DataError rather than ever reaching the caller as one) --
+    an honest "cannot establish tenant scope", never an error.
+
+    This is what lets `search()` (search.py) derive historical-incident
+    tenant scope from the incident ACTUALLY being investigated
+    (`exclude_incident_id`) instead of trusting a client-supplied
+    `organization_id` value -- a resource-bound authorization, same
+    shape as tool-gateway's own bounded internal read in control-plane
+    (core/authz.py::require_tool_gateway_proposal_access)."""
+    try:
+        row = await pool.fetchrow(
+            "SELECT organization_id FROM reliability.incidents WHERE id = $1::uuid",
+            incident_id,
+        )
+    except (asyncpg.DataError, ValueError):
+        return None
+    return str(row["organization_id"]) if row is not None else None
 
 
 def _rowcount(result: str) -> int:

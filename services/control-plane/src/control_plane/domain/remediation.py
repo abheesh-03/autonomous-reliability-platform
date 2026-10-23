@@ -158,6 +158,14 @@ class RemediationProposal(BaseModel):
     updated_at: datetime
     decided_at: datetime | None
     decision_comment: str | None
+    # Phase 14 correction round, Blocker 4 (database/migrations/V11):
+    # the verified human approver's real identity, recorded at the
+    # moment decide() actually applied this decision -- None for
+    # every pre-correction-round decision (honestly absent, never
+    # fabricated) and for any decision made while organization-context
+    # enforcement is disabled.
+    decided_by_user_id: str | None = None
+    decided_by_organization_id: uuid.UUID | None = None
     execution_started_at: datetime | None
     execution_completed_at: datetime | None
 

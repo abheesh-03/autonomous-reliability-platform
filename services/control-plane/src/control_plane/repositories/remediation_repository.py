@@ -24,6 +24,7 @@ from typing import Literal
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,6 +50,12 @@ remediation_proposals_table = sa.table(
     sa.column("updated_at"),
     sa.column("decided_at"),
     sa.column("decision_comment"),
+    # Phase 14 correction round, Blocker 4 (database/migrations/V11):
+    # the verified human approver's real identity at decision time --
+    # never set by any statement in this module except decide() below,
+    # and never backfilled for a historical row.
+    sa.column("decided_by_user_id"),
+    sa.column("decided_by_organization_id", PG_UUID(as_uuid=True)),
     sa.column("execution_started_at"),
     sa.column("execution_completed_at"),
     schema="reliability",
@@ -64,6 +71,26 @@ remediation_events_table = sa.table(
     sa.column("metadata", JSONB),
     schema="reliability",
 )
+
+
+def _decision_event_metadata(
+    normalized_comment: str | None, decided_by_user_id: str | None, decided_by_organization_id: str | None
+) -> dict:
+    """Phase 14 correction round, Blocker 4: the SAME verified
+    approver identity decide() writes onto the proposal's own
+    decided_by_* columns is ALSO recorded here, in the append-only
+    remediation_events log -- redundant by design (a queryable column
+    for "who decided this, right now" plus an immutable event for "who
+    decided this, historically", the same convention V4/V6 already use
+    for occurred_at/decided_at)."""
+    metadata: dict[str, object] = {}
+    if normalized_comment:
+        metadata["comment"] = normalized_comment
+    if decided_by_user_id is not None:
+        metadata["decided_by_user_id"] = decided_by_user_id
+    if decided_by_organization_id is not None:
+        metadata["decided_by_organization_id"] = str(decided_by_organization_id)
+    return metadata
 
 
 class IdempotencyConflictError(Exception):
@@ -282,6 +309,8 @@ class RemediationRepository:
         expected_status: str,
         decision: DecisionLiteral,
         comment: str | None,
+        decided_by_user_id: str | None = None,
+        decided_by_organization_id: str | None = None,
     ) -> dict | None:
         """Approve or reject a proposal.
 
@@ -388,7 +417,13 @@ class RemediationRepository:
                     remediation_proposals_table.c.id == proposal_id,
                     remediation_proposals_table.c.status == "pending_approval",
                 )
-                .values(status="rejected", decided_at=now, decision_comment=normalized_comment)
+                .values(
+                    status="rejected",
+                    decided_at=now,
+                    decision_comment=normalized_comment,
+                    decided_by_user_id=decided_by_user_id,
+                    decided_by_organization_id=decided_by_organization_id,
+                )
                 .returning(remediation_proposals_table)
             )
             result = await self._session.execute(stmt)
@@ -399,7 +434,7 @@ class RemediationRepository:
                 proposal_id,
                 event_type="rejected",
                 actor_type="operator",
-                metadata={"comment": normalized_comment} if normalized_comment else {},
+                metadata=_decision_event_metadata(normalized_comment, decided_by_user_id, decided_by_organization_id),
             )
             return _proposal_from_row(row)
 
@@ -424,7 +459,13 @@ class RemediationRepository:
                 remediation_proposals_table.c.id == proposal_id,
                 remediation_proposals_table.c.status == "pending_approval",
             )
-            .values(status="approved", decided_at=now, decision_comment=normalized_comment)
+            .values(
+                status="approved",
+                decided_at=now,
+                decision_comment=normalized_comment,
+                decided_by_user_id=decided_by_user_id,
+                decided_by_organization_id=decided_by_organization_id,
+            )
             .returning(remediation_proposals_table)
         )
         proposal_result = await self._session.execute(proposal_stmt)
@@ -446,7 +487,7 @@ class RemediationRepository:
             proposal_id,
             event_type="approved",
             actor_type="operator",
-            metadata={"comment": normalized_comment} if normalized_comment else {},
+            metadata=_decision_event_metadata(normalized_comment, decided_by_user_id, decided_by_organization_id),
         )
         await self._record_incident_event(
             incident_id,

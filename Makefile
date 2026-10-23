@@ -1,4 +1,4 @@
-.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage detectors-validate detectors-replay verify-detectors-real-stack verify-kubernetes-observer-real-stack test-verify-kubernetes-observer-quoting verify-kubernetes-remediation-live
+.PHONY: help check compose-config db-up db-down db-status db-logs db-restart db-migrate checkout-build checkout-test checkout-logs payment-build payment-test payment-logs inventory-build inventory-test inventory-logs notification-build notification-test notification-logs otel-logs prometheus-logs grafana-logs control-plane-build control-plane-test control-plane-logs investigator-build investigator-test investigator-logs retrieval-build retrieval-test retrieval-logs rag-index verify-rag verify-retrieval-tenant-isolation rag-search verify-observability verify-persistence verify-control-plane webhook-secret-init verify-webhook-ingestion verify-alert-ingestion verify-incident-lifecycle verify-incident-audit simulate-payment-outage simulate-inventory-outage test-failure-simulation test-failure-simulation-settling test-canonical-incident-selection verify-failure-simulation verify-investigator test-verify-investigator-restore investigate agent-runtime-build agent-runtime-test agent-runtime-logs verify-agent-runtime test-db-up-order test-init-agent-runtime-db-fresh tool-gateway-build tool-gateway-test tool-gateway-logs remediation-secret-init verify-remediation test-remediation-cleanup-resilience remediation-approve remediation-reject web-console-install web-console-typecheck web-console-lint web-console-test web-console-build web-console-logs verify-web-console eval-offline catalog-validate catalog-audit catalog-coverage detectors-validate detectors-replay verify-detectors-real-stack verify-kubernetes-observer-real-stack test-verify-kubernetes-observer-quoting verify-kubernetes-remediation-live
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -124,6 +124,8 @@ db-up: ## Start the Compose environment (docker compose up -d)
 	./scripts/init-remediation-secrets.sh
 	docker compose up -d postgres
 	./scripts/init-agent-runtime-db.sh
+	./scripts/init-web-console-db.sh
+	./scripts/apply-web-console-auth-schema.sh
 	docker compose up -d
 	@echo "Compose environment started. Run 'make db-status' to check health before using it."
 
@@ -272,6 +274,9 @@ rag-index: ## Phase 6: index source-controlled knowledge + current historical in
 
 verify-rag: ## Phase 6 real-evidence acceptance: pgvector schema, indexing, search, RAG-integrated investigation, no mutation
 	./scripts/verify-rag.sh
+
+verify-retrieval-tenant-isolation: ## Phase 14 correction round, Blocker 2: real-PostgreSQL historical-retrieval tenant-isolation proof
+	./scripts/verify-retrieval-tenant-isolation.sh
 
 # Bound/safely JSON-encoded via python3 -c, never naive shell string
 # concatenation -- a QUERY containing a double quote or backslash

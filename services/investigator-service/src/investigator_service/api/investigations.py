@@ -8,9 +8,11 @@ that is structurally impossible, not just avoided by convention.
 """
 
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from investigator_service.authz import ActorContext, bind_actor, get_relayed_actor, require_internal_caller
 from investigator_service.clients.control_plane import ControlPlaneUnavailableError, IncidentNotFoundError
 from investigator_service.domain.investigation import InvestigationReport, InvestigationRequest
 from investigator_service.investigator import Investigator, ProviderNotConfiguredError
@@ -23,15 +25,30 @@ logger = logging.getLogger("investigator_service.api.investigations")
 router = APIRouter(prefix="/api/v1")
 
 
-@router.post("/investigations", response_model=InvestigationReport)
-async def create_investigation(body: InvestigationRequest, request: Request) -> InvestigationReport:
+@router.post(
+    "/investigations",
+    response_model=InvestigationReport,
+    dependencies=[Depends(require_internal_caller)],
+)
+async def create_investigation(
+    body: InvestigationRequest,
+    request: Request,
+    actor: Annotated[ActorContext | None, Depends(get_relayed_actor)],
+) -> InvestigationReport:
     # body.incident_id: uuid.UUID already makes FastAPI/Pydantic
     # return 422 for a malformed UUID or a malformed request body
     # before this function body ever runs.
     investigator: Investigator = request.app.state.investigator
 
+    # Phase 14 correction round, Blocker 1: binds the relayed actor (if
+    # any) for the duration of investigate() so this service's own
+    # control-plane client (clients/control_plane.py) relays a
+    # further-derived assertion naming it, instead of the
+    # now-insufficient bare internal token, when it reads this
+    # incident's evidence from control-plane.
     try:
-        return await investigator.investigate(str(body.incident_id))
+        with bind_actor(actor):
+            return await investigator.investigate(str(body.incident_id))
     except IncidentNotFoundError:
         raise HTTPException(status_code=404, detail="incident not found")
     except ControlPlaneUnavailableError:

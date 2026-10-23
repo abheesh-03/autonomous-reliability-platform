@@ -55,14 +55,23 @@ instead of an ambiguous 200.
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from langgraph.graph import START
 from langgraph.types import Command
 
+from agent_runtime_service.authz import (
+    ROLES_THAT_MAY_RUN_INVESTIGATIONS,
+    ActorContext,
+    bind_actor,
+    get_actor_context,
+    require_same_organization,
+)
 from agent_runtime_service.clients.control_plane import (
     ControlPlaneOutputError,
     ControlPlaneUnavailableError,
+    IncidentNotFoundError,
     RemediationProposalCreateAmbiguousError,
     RemediationProposalNotFoundError,
 )
@@ -140,9 +149,48 @@ async def _load_agent_run(graph, run_id: uuid.UUID, thread_id: str) -> AgentRun:
     )
 
 
+async def _require_tenant_access(
+    control_plane_client, actor: ActorContext | None, incident_id: str
+) -> None:
+    """Phase 14 Gate 8: the ONE place every agent-run route re-derives
+    "does this run's incident belong to the actor's organization" --
+    always from control-plane's own, independently-fetched, real
+    incident record, never from anything cached in checkpoint state
+    (which this service itself wrote and therefore must not treat as
+    self-authorizing)."""
+    if actor is None:
+        return
+    # Phase 14 correction round, Blocker 1: binds the verified actor so
+    # control_plane_client relays a derived X-Service-Assertion (not
+    # the now-insufficient bare internal token) for this GET.
+    with bind_actor(actor):
+        try:
+            incident = await control_plane_client.get_incident(incident_id)
+        except IncidentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="agent run not found") from exc
+        except (ControlPlaneUnavailableError, ControlPlaneOutputError) as exc:
+            raise HTTPException(status_code=503, detail="control-plane is temporarily unavailable") from exc
+    require_same_organization(actor, str(incident.organization_id))
+
+
 @router.post("/agent-runs", response_model=AgentRun, status_code=201)
-async def create_agent_run(body: AgentRunRequest, request: Request) -> AgentRun:
+async def create_agent_run(
+    body: AgentRunRequest,
+    request: Request,
+    actor: Annotated[ActorContext | None, Depends(get_actor_context)],
+) -> AgentRun:
     graph = request.app.state.graph
+    control_plane_client = request.app.state.control_plane_client
+
+    # Phase 14 Gate 8: establishes BOTH that the incident is real AND
+    # that it belongs to the actor's own organization BEFORE any
+    # checkpoint is ever seeded -- Gate 3's ENGINEER-or-above
+    # requirement for starting an investigation is enforced here too
+    # (VIEWER may read but not trigger execution).
+    if actor is not None:
+        if actor.role not in ROLES_THAT_MAY_RUN_INVESTIGATIONS:
+            raise HTTPException(status_code=403, detail="forbidden")
+        await _require_tenant_access(control_plane_client, actor, str(body.incident_id))
 
     # The server generates BOTH the run_id and the LangGraph thread_id
     # from it (Phase 7 §AGENT RUN IDENTITY) -- the caller never
@@ -174,13 +222,27 @@ async def create_agent_run(body: AgentRunRequest, request: Request) -> AgentRun:
 
 
 @router.get("/agent-runs/{run_id}", response_model=AgentRun)
-async def get_agent_run(run_id: uuid.UUID, request: Request) -> AgentRun:
+async def get_agent_run(
+    run_id: uuid.UUID,
+    request: Request,
+    actor: Annotated[ActorContext | None, Depends(get_actor_context)],
+) -> AgentRun:
     graph = request.app.state.graph
-    return await _load_agent_run(graph, run_id, str(run_id))
+    run = await _load_agent_run(graph, run_id, str(run_id))
+    # Gate 8: "Ensure no user can request another tenant's known run
+    # ID and obtain... that workflow" -- the run's own incident_id
+    # (from its real checkpoint state, never caller-supplied) is
+    # re-checked against control-plane on every read.
+    await _require_tenant_access(request.app.state.control_plane_client, actor, str(run.incident_id))
+    return run
 
 
 @router.get("/agent-runs/{run_id}/history", response_model=AgentRunHistory)
-async def get_agent_run_history(run_id: uuid.UUID, request: Request) -> AgentRunHistory:
+async def get_agent_run_history(
+    run_id: uuid.UUID,
+    request: Request,
+    actor: Annotated[ActorContext | None, Depends(get_actor_context)],
+) -> AgentRunHistory:
     graph = request.app.state.graph
     bounds = request.app.state.runtime_bounds
     thread_id = str(run_id)
@@ -189,6 +251,9 @@ async def get_agent_run_history(run_id: uuid.UUID, request: Request) -> AgentRun
     current = await graph.aget_state(config)
     if not current.values:
         raise HTTPException(status_code=404, detail="agent run not found")
+    await _require_tenant_access(
+        request.app.state.control_plane_client, actor, str(current.values["incident_id"])
+    )
 
     snapshots = []
     async for snap in graph.aget_state_history(config, limit=bounds.max_history_items):
@@ -210,7 +275,11 @@ async def get_agent_run_history(run_id: uuid.UUID, request: Request) -> AgentRun
 
 
 @router.post("/agent-runs/{run_id}/resume", response_model=AgentRun)
-async def resume_agent_run(run_id: uuid.UUID, request: Request) -> AgentRun:
+async def resume_agent_run(
+    run_id: uuid.UUID,
+    request: Request,
+    actor: Annotated[ActorContext | None, Depends(get_actor_context)],
+) -> AgentRun:
     graph = request.app.state.graph
     control_plane_client = request.app.state.control_plane_client
     thread_id = str(run_id)
@@ -219,6 +288,10 @@ async def resume_agent_run(run_id: uuid.UUID, request: Request) -> AgentRun:
     snapshot = await graph.aget_state(config)
     if not snapshot.values:
         raise HTTPException(status_code=404, detail="agent run not found")
+    if actor is not None:
+        if actor.role not in ROLES_THAT_MAY_RUN_INVESTIGATIONS:
+            raise HTTPException(status_code=403, detail="forbidden")
+        await _require_tenant_access(control_plane_client, actor, str(snapshot.values["incident_id"]))
     if not snapshot.next:
         # Empty `next` means this thread already reached `finalize` --
         # completed OR failed, both terminal. Never re-executes
@@ -231,6 +304,20 @@ async def resume_agent_run(run_id: uuid.UUID, request: Request) -> AgentRun:
             ),
         )
 
+    with bind_actor(actor):
+        return await _resume_agent_run_bound(run_id, graph, control_plane_client, config, thread_id, snapshot)
+
+
+async def _resume_agent_run_bound(run_id, graph, control_plane_client, config, thread_id, snapshot) -> AgentRun:
+    """Phase 14 correction round, Blocker 1: everything below runs with
+    the real actor bound via `authz.bind_actor` (set by
+    `resume_agent_run`, above) -- `graph.ainvoke` executes
+    load_incident/run_investigation/propose_remediation/
+    execute_remediation/verify_recovery as awaits on this SAME asyncio
+    task, so every ControlPlaneClient/InvestigatorClient call they make
+    (deep inside graph/nodes.py) sees the SAME bound actor via
+    `authz.current_actor()` and relays a derived assertion naming it,
+    instead of the now-insufficient bare internal token."""
     # Phase 8 §HUMAN DECISION SOURCE OF TRUTH. This endpoint takes NO
     # request body at all for a decision -- a caller can never bypass
     # approval by POSTing {"approved": true} here; there is no field

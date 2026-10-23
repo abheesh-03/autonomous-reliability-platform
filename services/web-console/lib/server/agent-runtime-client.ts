@@ -17,8 +17,19 @@ const AGENT_RUNTIME_URL = process.env.WEB_CONSOLE_AGENT_RUNTIME_URL ?? "http://a
 // simple read or a single PATCH/POST.
 const RESUME_TIMEOUT_MS = 60_000;
 
-export async function getAgentRun(runId: string): Promise<BackendResult<AgentRun>> {
-  const result = await getJson(`${AGENT_RUNTIME_URL}/api/v1/agent-runs/${encodeURIComponent(runId)}`);
+// Phase 14 Gate 8: same dedicated-header convention as
+// control-plane-client.ts's actorAuthHeader -- see that module's
+// docstring for why this is never `Authorization`.
+function actorAuthHeader(actorToken?: string): Record<string, string> {
+  return actorToken ? { "X-Service-Assertion": actorToken } : {};
+}
+
+export async function getAgentRun(runId: string, actorToken?: string): Promise<BackendResult<AgentRun>> {
+  const result = await getJson(
+    `${AGENT_RUNTIME_URL}/api/v1/agent-runs/${encodeURIComponent(runId)}`,
+    undefined,
+    actorAuthHeader(actorToken),
+  );
   if ("networkError" in result) {
     return fail("unavailable", "agent-runtime-service unreachable");
   }
@@ -52,13 +63,20 @@ export async function getAgentRun(runId: string): Promise<BackendResult<AgentRun
  * (the start-investigation Route Handler) is responsible for making
  * at most one call per browser request.
  */
-export async function createAgentRun(incidentId: string): Promise<BackendResult<AgentRun>> {
-  const result = await postJson(`${AGENT_RUNTIME_URL}/api/v1/agent-runs`, { incident_id: incidentId });
+export async function createAgentRun(incidentId: string, actorToken?: string): Promise<BackendResult<AgentRun>> {
+  const result = await postJson(
+    `${AGENT_RUNTIME_URL}/api/v1/agent-runs`,
+    { incident_id: incidentId },
+    actorAuthHeader(actorToken),
+  );
   if ("networkError" in result) {
     return fail("unavailable", "agent-runtime-service unreachable");
   }
   if (result.parseError) {
     return fail("malformed", "agent-runtime-service returned a non-JSON agent run response");
+  }
+  if (result.status === 403) {
+    return fail("forbidden", "the current user's role does not permit starting an investigation");
   }
   if (result.status === 422) {
     return fail("validation", "agent-runtime-service rejected the agent run request");
@@ -89,11 +107,11 @@ export async function createAgentRun(incidentId: string): Promise<BackendResult<
  * one call per browser request and for reconciling via a fresh GET
  * rather than retrying blindly.
  */
-export async function resumeAgentRun(runId: string): Promise<BackendResult<AgentRun>> {
+export async function resumeAgentRun(runId: string, actorToken?: string): Promise<BackendResult<AgentRun>> {
   const result = await postJson(
     `${AGENT_RUNTIME_URL}/api/v1/agent-runs/${encodeURIComponent(runId)}/resume`,
     {},
-    {},
+    actorAuthHeader(actorToken),
     RESUME_TIMEOUT_MS,
   );
   if ("networkError" in result) {
@@ -101,6 +119,9 @@ export async function resumeAgentRun(runId: string): Promise<BackendResult<Agent
   }
   if (result.parseError) {
     return fail("malformed", "agent-runtime-service returned a non-JSON resume response");
+  }
+  if (result.status === 403) {
+    return fail("forbidden", "the current user's role does not permit resuming this agent run");
   }
   if (result.status === 404) {
     return fail("not_found", "agent run not found");
@@ -124,8 +145,15 @@ export async function resumeAgentRun(runId: string): Promise<BackendResult<Agent
   return ok(agentRun);
 }
 
-export async function getAgentRunHistory(runId: string): Promise<BackendResult<AgentRunHistory>> {
-  const result = await getJson(`${AGENT_RUNTIME_URL}/api/v1/agent-runs/${encodeURIComponent(runId)}/history`);
+export async function getAgentRunHistory(
+  runId: string,
+  actorToken?: string,
+): Promise<BackendResult<AgentRunHistory>> {
+  const result = await getJson(
+    `${AGENT_RUNTIME_URL}/api/v1/agent-runs/${encodeURIComponent(runId)}/history`,
+    undefined,
+    actorAuthHeader(actorToken),
+  );
   if ("networkError" in result) {
     return fail("unavailable", "agent-runtime-service unreachable");
   }

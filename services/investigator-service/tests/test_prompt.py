@@ -36,6 +36,7 @@ def _incident() -> IncidentSnapshot:
     return IncidentSnapshot.model_validate(
         {
             "id": str(SAMPLE_INCIDENT_ID),
+            "organization_id": "00000000-0000-0000-0000-000000000001",
             "source": "alertmanager",
             "source_fingerprint": "deadbeef12345678",
             "title": "checkout-service is returning HTTP 5xx errors",

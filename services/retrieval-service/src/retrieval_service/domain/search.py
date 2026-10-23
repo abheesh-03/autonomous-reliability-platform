@@ -17,6 +17,22 @@ class SearchRequest(BaseModel):
     exclude_incident_id: uuid.UUID | None = None
     knowledge_limit: int = Field(default=3, ge=0, le=50)
     historical_incident_limit: int = Field(default=3, ge=0, le=50)
+    # Phase 14 correction round, Issue 2 / Blocker 2: scopes
+    # `historical_incident` results to this organization only (never
+    # `knowledge` results -- see search.py's own docstring).
+    #
+    # TRUSTED ONLY in the isolated local-development mode
+    # (CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT disabled) -- a plain
+    # client-supplied field is never proof of real tenant ownership.
+    # Once that enforcement is enabled, this value is IGNORED entirely:
+    # search.py independently derives the real tenant scope from
+    # `exclude_incident_id`'s own, actual organization_id (a direct,
+    # trusted database lookup -- see
+    # db.get_incident_organization_id / search._resolve_historical_
+    # organization_scope), never from this field. Left in the request
+    # schema only for the legacy/local-dev path and to avoid breaking
+    # existing callers that still send it.
+    organization_id: uuid.UUID | None = None
 
 
 class SearchResultItem(BaseModel):

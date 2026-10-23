@@ -36,9 +36,12 @@ from agent_runtime_service.clients.tool_gateway import ToolGatewayClient
 from agent_runtime_service.config import (
     CheckpointDbSettings,
     ControlPlaneSettings,
+    InternalReadTokenSettings,
     InvestigatorSettings,
+    OrganizationContextSettings,
     RemediationSettings,
     RuntimeBounds,
+    ServiceAssertionSettings,
     ToolGatewaySettings,
 )
 from agent_runtime_service.graph.build import compile_graph
@@ -55,22 +58,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     remediation_settings = RemediationSettings.from_env()
     tool_gateway_settings = ToolGatewaySettings.from_env()
 
+    internal_read_token_settings = InternalReadTokenSettings.from_env()
+    # Phase 14 correction round, Blocker 1: constructed BEFORE the two
+    # clients below so each can relay a derived assertion for the
+    # current request's verified actor (authz.current_actor()) rather
+    # than relying solely on the now-insufficient bare internal tokens.
+    service_assertion_settings = ServiceAssertionSettings.from_env()
     control_plane_client = ControlPlaneClient(
         control_plane_settings.base_url,
         control_plane_settings.connect_timeout_seconds,
         control_plane_settings.request_timeout_seconds,
         remediation_proposal_token=remediation_settings.proposal_token,
+        internal_read_token=internal_read_token_settings.control_plane_token,
+        service_assertion_settings=service_assertion_settings,
     )
     investigator_client = InvestigatorClient(
         investigator_settings.base_url,
         investigator_settings.connect_timeout_seconds,
         investigator_settings.request_timeout_seconds,
+        internal_caller_token=internal_read_token_settings.investigator_token,
+        service_assertion_settings=service_assertion_settings,
     )
     tool_gateway_client = ToolGatewayClient(
         tool_gateway_settings.base_url,
         tool_gateway_settings.execution_token,
         tool_gateway_settings.connect_timeout_seconds,
         tool_gateway_settings.request_timeout_seconds,
+        service_assertion_settings=service_assertion_settings,
     )
 
     checkpoint_store = CheckpointStore(db_settings)
@@ -86,6 +100,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # DECISION SOURCE OF TRUTH) -- never a second, separately
     # constructed client.
     app.state.control_plane_client = control_plane_client
+    # Phase 14: see config.py's own docstrings -- non-blocking at
+    # startup, same philosophy as every setting above.
+    app.state.organization_context_settings = OrganizationContextSettings.from_env()
+    app.state.service_assertion_settings = service_assertion_settings
 
     try:
         yield

@@ -30,7 +30,15 @@ export type BackendErrorKind =
   | "malformed"
   | "conflict"
   | "unauthorized"
-  | "configuration";
+  | "configuration"
+  // Phase 14: the REAL actor is authenticated and their assertion was
+  // verified, but control-plane's own role check (Gate 7:
+  // ROLES_THAT_MAY_DECIDE_REMEDIATION) rejected the action -- distinct
+  // from "unauthorized" (this server's own credential problem) and
+  // from "not_found" (Gate 5's tenant-isolation 404, used instead of
+  // 403 specifically to avoid confirming a cross-tenant resource's
+  // existence; this kind is for a same-tenant permission denial only).
+  | "forbidden";
 
 export class BackendError extends Error {
   readonly kind: BackendErrorKind;
@@ -77,11 +85,15 @@ async function parseResponse(response: Response): Promise<JsonResult> {
  * unreachable" from "the backend answered with an error" without a
  * try/catch of its own.
  */
-export async function getJson(url: string, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<JsonResult> {
+export async function getJson(
+  url: string,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  headers: Record<string, string> = {},
+): Promise<JsonResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
+    const response = await fetch(url, { headers, signal: controller.signal, cache: "no-store" });
     return await parseResponse(response);
   } catch {
     return { networkError: true };

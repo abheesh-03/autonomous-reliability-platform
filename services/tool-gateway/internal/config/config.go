@@ -43,6 +43,14 @@ type Settings struct {
 
 	ControlPlaneBaseURL      string
 	RemediationExecutorToken string
+	// Phase 14 correction round, Issue 3: this service's own distinct,
+	// bounded internal-service-read identity for control-plane's
+	// GET /api/v1/remediation-proposals/{id} (controlplane.Client.GetProposal)
+	// -- never usable for the executor-only write capability above,
+	// and never a human-approval credential. Only actually required
+	// by control-plane once CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT
+	// is enabled there.
+	ControlPlaneInternalReadToken string
 
 	PaymentBaseURL          string
 	PaymentRemediationToken string
@@ -105,13 +113,14 @@ func getEnvDuration(name string, fallbackSeconds int) time.Duration {
 // error, consistent with every other service in this platform.
 func FromEnv() Settings {
 	return Settings{
-		ListenAddr:               getEnv("TOOL_GATEWAY_LISTEN_ADDR", "0.0.0.0:8004"),
-		ExecutionToken:           os.Getenv("TOOL_GATEWAY_EXECUTION_TOKEN"),
-		ControlPlaneBaseURL:      getEnv("TOOL_GATEWAY_CONTROL_PLANE_URL", "http://control-plane:8000"),
-		RemediationExecutorToken: os.Getenv("CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN"),
-		PaymentBaseURL:           getEnv("TOOL_GATEWAY_PAYMENT_URL", "http://payment-service:8081"),
-		PaymentRemediationToken:  os.Getenv("PAYMENT_REMEDIATION_TOKEN"),
-		RequestTimeout:           getEnvDuration("TOOL_GATEWAY_REQUEST_TIMEOUT_SECONDS", 10),
+		ListenAddr:                    getEnv("TOOL_GATEWAY_LISTEN_ADDR", "0.0.0.0:8004"),
+		ExecutionToken:                os.Getenv("TOOL_GATEWAY_EXECUTION_TOKEN"),
+		ControlPlaneBaseURL:           getEnv("TOOL_GATEWAY_CONTROL_PLANE_URL", "http://control-plane:8000"),
+		RemediationExecutorToken:      os.Getenv("CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN"),
+		ControlPlaneInternalReadToken: os.Getenv("CONTROL_PLANE_INTERNAL_READ_TOKEN_TOOL_GATEWAY"),
+		PaymentBaseURL:                getEnv("TOOL_GATEWAY_PAYMENT_URL", "http://payment-service:8081"),
+		PaymentRemediationToken:       os.Getenv("PAYMENT_REMEDIATION_TOKEN"),
+		RequestTimeout:                getEnvDuration("TOOL_GATEWAY_REQUEST_TIMEOUT_SECONDS", 10),
 
 		// Phase 12B-D: defaults to DISABLED (dry-run) -- see this
 		// file's own package docstring.
@@ -157,6 +166,12 @@ func (s Settings) ValidateNoTokenCollisions() error {
 		{"TOOL_GATEWAY_EXECUTION_TOKEN", "CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN", s.ExecutionToken, s.RemediationExecutorToken},
 		{"TOOL_GATEWAY_EXECUTION_TOKEN", "PAYMENT_REMEDIATION_TOKEN", s.ExecutionToken, s.PaymentRemediationToken},
 		{"CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN", "PAYMENT_REMEDIATION_TOKEN", s.RemediationExecutorToken, s.PaymentRemediationToken},
+		// Phase 14 correction round, Issue 3: the new internal
+		// read-only credential must never collide with any
+		// write-capable token either.
+		{"CONTROL_PLANE_INTERNAL_READ_TOKEN_TOOL_GATEWAY", "CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN", s.ControlPlaneInternalReadToken, s.RemediationExecutorToken},
+		{"CONTROL_PLANE_INTERNAL_READ_TOKEN_TOOL_GATEWAY", "TOOL_GATEWAY_EXECUTION_TOKEN", s.ControlPlaneInternalReadToken, s.ExecutionToken},
+		{"CONTROL_PLANE_INTERNAL_READ_TOKEN_TOOL_GATEWAY", "PAYMENT_REMEDIATION_TOKEN", s.ControlPlaneInternalReadToken, s.PaymentRemediationToken},
 	}
 	for _, p := range pairs {
 		if p.aValue != "" && p.bValue != "" && p.aValue == p.bValue {

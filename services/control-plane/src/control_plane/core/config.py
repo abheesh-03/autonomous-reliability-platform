@@ -186,6 +186,227 @@ class AwsIngestionTokenSettings:
         return cls(token=raw if raw.strip() else None)
 
 
+@dataclass(frozen=True)
+class OrganizationContextSettings:
+    """Phase 14: the fail-closed activation switch for tenant-aware,
+    actor-verified authorization on the incident GET endpoints and the
+    remediation-decision endpoint.
+
+    Defaults to `False` so every existing unauthenticated local-dev
+    behavior (every CI script, every pre-Phase-14 test, every existing
+    acceptance script) is completely unchanged by default -- this is
+    additive, not a silent behavior change. When explicitly set to
+    `true` (CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT=true), those
+    endpoints require a valid, signed service assertion (see
+    core/authz.py) identifying the real actor's organization/role, and
+    every incident read/mutation is scoped to that organization -- a
+    request with no assertion, an invalid assertion, or an assertion
+    for the wrong organization fails closed (401/403/404), it is never
+    silently downgraded to the old unauthenticated behavior.
+
+    This is deliberately a single global toggle, not per-route: Gate 5
+    requires that trust boundary to be uniform and not something a
+    caller can selectively avoid by hitting a GET route the toggle
+    "forgot" to cover.
+    """
+
+    enabled: bool
+
+    @classmethod
+    def from_env(cls) -> "OrganizationContextSettings":
+        raw = os.environ.get("CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT", "false")
+        return cls(enabled=raw.strip().lower() in ("1", "true", "yes", "on"))
+
+
+@dataclass(frozen=True)
+class LegacyIngestionSettings:
+    """Phase 14 correction round, Issue 4: the explicit boundary
+    between (a) legacy local/demo observations (Alertmanager/
+    Kubernetes/AWS finding ingestion via a single shared static
+    per-source token, unconditionally assigned to the fixed
+    `LEGACY_LOCAL_DEVELOPMENT_ORGANIZATION_ID` -- Gate 6's real
+    per-tenant ingestion association is explicitly NOT implemented)
+    and (b) a genuinely secure, multi-tenant deployment.
+
+    `allow_legacy_ingestion` defaults to `True` -- when
+    `OrganizationContextSettings.enabled` is `False` (the pre-Phase-14
+    local-dev/CI default), this setting is never even consulted;
+    every ingestion endpoint behaves exactly as it always has. Once
+    organization-context enforcement IS enabled, this flag becomes the
+    explicit, operator-visible choice of whether to ALSO keep the
+    legacy, non-tenant-aware ingestion pipeline running (the default,
+    so existing CI/local-dev ingestion scripts keep working even in a
+    secure-mode test run) or to disable it (`false`) -- a real secure
+    deployment that does NOT want every Alertmanager/Kubernetes/AWS
+    finding silently landing in one shared legacy organization should
+    set this to `false` rather than assume multi-tenant ingestion
+    exists merely because `CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT=true`.
+    Disabled ingestion fails closed (503), never silently accepted and
+    discarded.
+    """
+
+    allow_legacy_ingestion: bool
+
+    @classmethod
+    def from_env(cls) -> "LegacyIngestionSettings":
+        raw = os.environ.get("CONTROL_PLANE_ALLOW_LEGACY_INGESTION", "true")
+        return cls(allow_legacy_ingestion=raw.strip().lower() in ("1", "true", "yes", "on"))
+
+
+@dataclass(frozen=True)
+class ServiceAssertionSettings:
+    """Phase 14: verification settings for the short-lived, signed
+    service assertion the web-console BFF mints (per authenticated
+    browser request, from a freshly re-checked Better Auth session +
+    live organization-membership lookup -- never cached, never
+    client-supplied) and this service verifies independently before
+    trusting ANY of it (Gate 5: "Never treat an unsigned X-User-ID,
+    X-Role, or X-Organization-ID header as trusted authorization").
+
+    `secret` is a symmetric HS256 signing key, shared between
+    web-console (the ORIGINAL signer, from a real browser session) and
+    every service that verifies or RELAYS an assertion -- this
+    service, agent-runtime-service, and investigator-service -- never
+    exposed to a browser, never the same value as any of the Bearer
+    tokens in this module.
+
+    Phase 14 correction round, Blocker 1: `trusted_issuers` (plural)
+    replaces a single fixed issuer string. web-console mints the
+    FIRST assertion for a request (iss="web-console"); when
+    agent-runtime-service or investigator-service needs to forward
+    that same, already-verified human actor's identity to ANOTHER
+    internal service (e.g. agent-runtime-service calling this
+    service's own incident-evidence GETs, or investigator-service
+    calling them on agent-runtime-service's behalf), it mints a
+    DERIVED assertion carrying the IDENTICAL verified
+    sub/org/role -- never re-deriving or trusting a client-supplied
+    value -- signed with iss=<that relaying service's own name> so
+    this service can tell, for audit purposes, whether an assertion
+    came directly from a browser or was relayed by an internal
+    service. Every value here is still cryptographically verified
+    with the SAME shared secret regardless of which trusted issuer
+    signed it -- a relaying service can mint a derived assertion only
+    for the EXACT actor it itself already independently verified; it
+    can never fabricate a different org/role (see
+    core/authz.py::sign_derivative_assertion's own docstring and its
+    mirrors in agent-runtime-service/investigator-service).
+
+    `audience` remains a single, pinned value (this service always
+    expects "control-plane", regardless of who signed the token) so a
+    token minted for a different downstream service can never be
+    replayed here. Same non-blocking-startup philosophy as every other
+    secret in this module: an unconfigured secret does not crash this
+    service -- every assertion simply fails to verify (treated as
+    absent/invalid), which only matters once
+    OrganizationContextSettings.enabled is True, at which point it
+    makes the gated endpoints fail closed.
+    """
+
+    secret: str | None
+    trusted_issuers: frozenset[str]
+    audience: str
+    max_clock_skew_seconds: float
+
+    @classmethod
+    def from_env(cls) -> "ServiceAssertionSettings":
+        raw = os.environ.get("SERVICE_ASSERTION_SIGNING_SECRET", "")
+        raw_issuers = os.environ.get(
+            "SERVICE_ASSERTION_TRUSTED_ISSUERS", "web-console,agent-runtime-service,investigator-service"
+        )
+        return cls(
+            secret=raw if raw.strip() else None,
+            trusted_issuers=frozenset(i.strip() for i in raw_issuers.split(",") if i.strip()),
+            audience=os.environ.get("SERVICE_ASSERTION_AUDIENCE", "control-plane"),
+            max_clock_skew_seconds=float(os.environ.get("SERVICE_ASSERTION_MAX_CLOCK_SKEW_SECONDS", "30")),
+        )
+
+
+# Phase 14: the fixed, documented UUID of the "legacy local-development
+# organization" every pre-Phase-14 reliability.incidents row is
+# backfilled to by V10__add_organization_scoping.sql. A real,
+# well-known constant -- never "whichever user signs up first" and
+# never a production fallback for an unrecognized tenant (Gate 4
+# explicitly prohibits both). Deliberately defined here (not only in
+# the SQL migration) so application code (this module, authz.py, and
+# this service's tests) can refer to the SAME value the migration
+# used, rather than re-deriving or guessing it.
+LEGACY_LOCAL_DEVELOPMENT_ORGANIZATION_ID = "00000000-0000-0000-0000-000000000001"
+
+
+@dataclass(frozen=True)
+class InternalServiceReadTokenSettings:
+    """Phase 14 correction round, Issue 3: THREE SEPARATE, distinct
+    trusted-service-identity credentials -- one per internal caller
+    (agent-runtime-service, investigator-service, tool-gateway) --
+    checked against a DEDICATED header (`X-Internal-Service-Token`,
+    core/authz.py::INTERNAL_SERVICE_TOKEN_HEADER), never `Authorization`
+    or `X-Service-Assertion`.
+
+    Why this exists: once CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT is
+    enabled, every GET route this service exposes requires a verified
+    actor (core/authz.py::get_actor_context) -- which correctly closes
+    the "an unauthenticated direct HTTP call can read tenant-sensitive
+    data" gap (Issue 2), but ALSO breaks every existing internal
+    service's own read calls (agent-runtime-service's
+    ControlPlaneClient.get_incident, investigator-service's own
+    control-plane client, tool-gateway's GetProposal), none of which
+    ever sent (or could meaningfully construct) a per-human-actor
+    assertion. Each of these three tokens grants ONLY the bounded
+    "read incidents/evidence/remediation-proposal state for already-
+    authorized internal orchestration" capability
+    (core/authz.py::get_actor_or_internal_reader) -- never the
+    human-approval decision endpoint (api/remediation.py::decide_remediation_proposal
+    continues to require get_actor_context, a REAL human actor,
+    unconditionally -- Issue 3: "A machine credential must not
+    impersonate an arbitrary human approver").
+
+    Why no per-resource organization binding is enforced for these
+    specific tokens (Issue 3: "organization/resource binding where
+    necessary"): the authorization decision ("may this actor touch
+    THIS incident") is already made, independently, at the single
+    human-facing entry point BEFORE any of these three services ever
+    makes an internal read call on that human's behalf (agent-runtime-
+    service's own create_agent_run/resume_agent_run; investigator-
+    service's own create_investigation, which independently re-derives
+    and checks this exact binding using ITS OWN internal read token
+    before trusting an evidence fetch -- see
+    investigator_service/authz.py). Re-deriving it a second time at
+    this layer would be redundant, not a closed gap.
+
+    Same non-blocking-startup philosophy as every other token in this
+    module: unconfigured just means every one of these three identities
+    fails closed for this specific credential, nothing else.
+    """
+
+    agent_runtime_token: str | None
+    investigator_token: str | None
+    tool_gateway_token: str | None
+
+    @classmethod
+    def from_env(cls) -> "InternalServiceReadTokenSettings":
+        def _opt(name: str) -> str | None:
+            raw = os.environ.get(name, "")
+            return raw if raw.strip() else None
+
+        return cls(
+            agent_runtime_token=_opt("CONTROL_PLANE_INTERNAL_READ_TOKEN_AGENT_RUNTIME"),
+            investigator_token=_opt("CONTROL_PLANE_INTERNAL_READ_TOKEN_INVESTIGATOR"),
+            tool_gateway_token=_opt("CONTROL_PLANE_INTERNAL_READ_TOKEN_TOOL_GATEWAY"),
+        )
+
+    def configured_tokens(self) -> tuple[tuple[str, str], ...]:
+        """(service_name, token) pairs for every CONFIGURED (non-None)
+        token -- used by core/authz.py to check an incoming header
+        against all three without caring which one matched, and by
+        resolve_write_tokens's own anti-collision guard below."""
+        pairs = (
+            ("agent-runtime-service", self.agent_runtime_token),
+            ("investigator-service", self.investigator_token),
+            ("tool-gateway", self.tool_gateway_token),
+        )
+        return tuple((name, token) for name, token in pairs if token is not None)
+
+
 def resolve_write_tokens(
     webhook_token: str | None,
     lifecycle_token: str | None,
@@ -194,7 +415,12 @@ def resolve_write_tokens(
     remediation_executor_token: str | None = None,
     kubernetes_ingestion_token: str | None = None,
     aws_ingestion_token: str | None = None,
-) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None, str | None]:
+    agent_runtime_internal_read_token: str | None = None,
+    investigator_internal_read_token: str | None = None,
+    tool_gateway_internal_read_token: str | None = None,
+) -> tuple[
+    str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None
+]:
     """Post-review correction: an application-level guard against any
     TWO of this service's write-endpoint tokens being configured
     identically.
@@ -239,6 +465,17 @@ def resolve_write_tokens(
         "CONTROL_PLANE_REMEDIATION_EXECUTOR_TOKEN",
         "CONTROL_PLANE_KUBERNETES_INGESTION_TOKEN",
         "CONTROL_PLANE_AWS_INGESTION_TOKEN",
+        # Phase 14 correction round, Issue 3: the three new internal
+        # read-only service identities join the SAME anti-collision
+        # guard -- none of them may ever equal each other OR any
+        # existing write-capable token (e.g. an internal read token
+        # accidentally set to the same value as
+        # CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN would let a
+        # read-only internal service's leaked credential be replayed
+        # as a human approval decision).
+        "CONTROL_PLANE_INTERNAL_READ_TOKEN_AGENT_RUNTIME",
+        "CONTROL_PLANE_INTERNAL_READ_TOKEN_INVESTIGATOR",
+        "CONTROL_PLANE_INTERNAL_READ_TOKEN_TOOL_GATEWAY",
     )
     values = [
         webhook_token,
@@ -248,6 +485,9 @@ def resolve_write_tokens(
         remediation_executor_token,
         kubernetes_ingestion_token,
         aws_ingestion_token,
+        agent_runtime_internal_read_token,
+        investigator_internal_read_token,
+        tool_gateway_internal_read_token,
     ]
     cleared = [False] * len(values)
     for i in range(len(values)):

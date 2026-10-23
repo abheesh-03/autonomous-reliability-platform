@@ -20,6 +20,12 @@ from pydantic import ValidationError
 
 from control_plane.api.auth import require_aws_ingestion_token
 from control_plane.api.dependencies import get_incident_repository
+from control_plane.core.authz import (
+    ActorContext,
+    get_actor_context,
+    require_legacy_ingestion_allowed,
+    require_same_organization,
+)
 from control_plane.domain.aws_finding import AwsFindingIngestRequest, AwsFindingIngestResponse, AwsIncidentEvidence
 from control_plane.ingestion.aws_service import AwsIngestionRejected, ingest_aws_finding
 from control_plane.repositories.incident_repository import IncidentRepository
@@ -31,7 +37,7 @@ router = APIRouter()
     "/internal/v1/aws/findings",
     response_model=AwsFindingIngestResponse,
     status_code=201,
-    dependencies=[Depends(require_aws_ingestion_token)],
+    dependencies=[Depends(require_aws_ingestion_token), Depends(require_legacy_ingestion_allowed)],
 )
 async def ingest_aws_finding_endpoint(
     body: AwsFindingIngestRequest,
@@ -56,18 +62,22 @@ async def ingest_aws_finding_endpoint(
 async def get_aws_incident_evidence(
     incident_id: uuid.UUID,
     repo: Annotated[IncidentRepository, Depends(get_incident_repository)],
+    actor: Annotated[ActorContext | None, Depends(get_actor_context)],
 ) -> AwsIncidentEvidence:
     """The ONE trusted, persisted source agent-runtime-service and
     investigator-service use to establish a demonstrable identity
     relationship between a SPECIFIC incident and a real AWS resource --
     never a caller-supplied claim, never inferred from title/
-    description text. Read-only/unauthenticated, same local-development
-    policy as every other incident GET route. 404 if the incident
-    itself does not exist, OR if it has no recorded AWS-actor evidence
-    at all."""
+    description text. Read-only, same local-development policy as
+    every other incident GET route when organization-context
+    enforcement is disabled; tenant-scoped (Phase 14 correction round,
+    Issue 2) when it is enabled. 404 if the incident itself does not
+    exist, belongs to a different organization, OR has no recorded
+    AWS-actor evidence at all."""
     incident = await repo.get_by_id(incident_id)
     if incident is None:
         raise HTTPException(status_code=404, detail="incident not found")
+    require_same_organization(actor, incident["organization_id"])
 
     event = await repo.get_latest_aws_evidence_event(incident_id)
     if event is None:

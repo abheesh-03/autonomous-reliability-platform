@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AccountMenu } from "../components/AccountMenu";
 
 export const metadata: Metadata = {
   title: "Reliability Console",
@@ -14,7 +15,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <AccountMenu />
+        {children}
+      </body>
     </html>
   );
 }

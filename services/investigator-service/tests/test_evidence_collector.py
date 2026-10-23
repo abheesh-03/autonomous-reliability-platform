@@ -23,6 +23,7 @@ BOUNDS = TEST_BOUNDS
 def _incident(**overrides) -> IncidentSnapshot:
     defaults = dict(
         id=SAMPLE_INCIDENT_ID,
+        organization_id="00000000-0000-0000-0000-000000000001",
         source="alertmanager",
         source_fingerprint="deadbeef12345678",
         title="checkout-service is returning HTTP 5xx errors",

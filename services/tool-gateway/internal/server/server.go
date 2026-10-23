@@ -18,7 +18,9 @@ import (
 // generic catch-all handler, and no way for a request path alone to
 // reach anything other than these.
 func New(settings config.Settings) *http.Server {
-	cpClient := controlplane.New(settings.ControlPlaneBaseURL, settings.RemediationExecutorToken, settings.RequestTimeout)
+	cpClient := controlplane.NewWithInternalReadToken(
+		settings.ControlPlaneBaseURL, settings.RemediationExecutorToken, settings.ControlPlaneInternalReadToken, settings.RequestTimeout,
+	)
 	paymentClient := payment.New(settings.PaymentBaseURL, settings.PaymentRemediationToken, settings.RequestTimeout)
 
 	// Phase 12B-D: the Kubernetes executor is OPTIONAL -- a deployment

@@ -150,6 +150,38 @@ ensure_token PAYMENT_REMEDIATION_TOKEN \
   "authorization fault only -- never enabling it."
 payment_remediation_token="$_ensured_value"
 
+ensure_token CONTROL_PLANE_INTERNAL_READ_TOKEN_AGENT_RUNTIME \
+  "Phase 14 correction round, Issue 3: agent-runtime-service's own" \
+  "distinct, bounded internal-service-read identity for control-plane's" \
+  "GET routes (incidents/evidence/remediation-proposal reads) -- never" \
+  "usable for the human-approval decision endpoint."
+control_plane_internal_read_token_agent_runtime="$_ensured_value"
+
+ensure_token CONTROL_PLANE_INTERNAL_READ_TOKEN_INVESTIGATOR \
+  "Phase 14 correction round, Issue 3: investigator-service's own" \
+  "distinct internal-service-read identity for control-plane's GET" \
+  "routes."
+control_plane_internal_read_token_investigator="$_ensured_value"
+
+ensure_token CONTROL_PLANE_INTERNAL_READ_TOKEN_TOOL_GATEWAY \
+  "Phase 14 correction round, Issue 3: tool-gateway's own distinct" \
+  "internal-service-read identity for control-plane's" \
+  "GET /api/v1/remediation-proposals/{id} (its own independent" \
+  "proposal-status re-verification before executing anything)."
+control_plane_internal_read_token_tool_gateway="$_ensured_value"
+
+ensure_token INVESTIGATOR_INTERNAL_READ_TOKEN_AGENT_RUNTIME \
+  "Phase 14 correction round, Issue 2/3: what agent-runtime-service" \
+  "presents TO investigator-service -- closes 'a direct HTTP call to" \
+  "investigator-service's own exposed port bypasses the frontend'."
+investigator_internal_read_token_agent_runtime="$_ensured_value"
+
+ensure_token RETRIEVAL_INTERNAL_READ_TOKEN_INVESTIGATOR \
+  "Phase 14 correction round, Issue 2/3: what investigator-service" \
+  "presents TO retrieval-service -- closes 'a direct HTTP call to" \
+  "retrieval-service's own exposed port bypasses investigator-service'."
+retrieval_internal_read_token_investigator="$_ensured_value"
+
 chmod 600 "$ENV_FILE"
 
 # --------------------------------------------------------------------
@@ -172,6 +204,11 @@ all_names=(
   TOOL_GATEWAY_EXECUTION_TOKEN
   PAYMENT_FAULT_INJECTION_TOKEN
   PAYMENT_REMEDIATION_TOKEN
+  CONTROL_PLANE_INTERNAL_READ_TOKEN_AGENT_RUNTIME
+  CONTROL_PLANE_INTERNAL_READ_TOKEN_INVESTIGATOR
+  CONTROL_PLANE_INTERNAL_READ_TOKEN_TOOL_GATEWAY
+  INVESTIGATOR_INTERNAL_READ_TOKEN_AGENT_RUNTIME
+  RETRIEVAL_INTERNAL_READ_TOKEN_INVESTIGATOR
 )
 all_values=(
   "$existing_webhook_token"
@@ -182,6 +219,11 @@ all_values=(
   "$tool_gateway_token"
   "$fault_injection_token"
   "$payment_remediation_token"
+  "$control_plane_internal_read_token_agent_runtime"
+  "$control_plane_internal_read_token_investigator"
+  "$control_plane_internal_read_token_tool_gateway"
+  "$investigator_internal_read_token_agent_runtime"
+  "$retrieval_internal_read_token_investigator"
 )
 
 count=${#all_names[@]}
@@ -199,4 +241,4 @@ while [ "$i" -lt "$count" ]; do
   i=$((i + 1))
 done
 
-echo "remediation secrets ready: $ENV_FILE holds all six Phase 8 tokens, pairwise distinct from each other and from the existing webhook/lifecycle tokens (values not printed)."
+echo "remediation secrets ready: $ENV_FILE holds all six Phase 8 tokens plus the five Phase 14 internal-service-read tokens, pairwise distinct from each other and from the existing webhook/lifecycle tokens (values not printed)."

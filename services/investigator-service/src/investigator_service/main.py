@@ -29,7 +29,16 @@ from investigator_service.clients.loki import LokiClient
 from investigator_service.clients.prometheus import PrometheusClient
 from investigator_service.clients.retrieval import RetrievalClient
 from investigator_service.clients.tempo import TempoClient
-from investigator_service.config import EvidenceBounds, LLMSettings, RagBounds, RetrievalSettings, TelemetrySettings
+from investigator_service.config import (
+    EvidenceBounds,
+    InternalServiceTokenSettings,
+    LLMSettings,
+    OrganizationContextSettings,
+    RagBounds,
+    RetrievalSettings,
+    ServiceAssertionSettings,
+    TelemetrySettings,
+)
 from investigator_service.evidence_collector import EvidenceCollector
 from investigator_service.investigator import Investigator
 from investigator_service.llm.provider import LLMProvider, OpenAIProvider, StubProvider
@@ -74,8 +83,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     retrieval_settings = RetrievalSettings.from_env()
     rag_bounds = RagBounds.from_env()
 
+    internal_service_tokens = InternalServiceTokenSettings.from_env()
+    # Phase 14 correction round, Blocker 1: lets control_plane's own
+    # client relay a further-derived assertion for whatever actor
+    # api/investigations.py binds for the current request.
+    service_assertion_settings = ServiceAssertionSettings.from_env()
+
     control_plane = ControlPlaneClient(
-        telemetry.control_plane_url, telemetry.connect_timeout_seconds, telemetry.request_timeout_seconds
+        telemetry.control_plane_url,
+        telemetry.connect_timeout_seconds,
+        telemetry.request_timeout_seconds,
+        internal_read_token=internal_service_tokens.control_plane_token,
+        service_assertion_settings=service_assertion_settings,
     )
     prometheus = PrometheusClient(
         telemetry.prometheus_url, telemetry.connect_timeout_seconds, telemetry.request_timeout_seconds
@@ -95,6 +114,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             retrieval_settings.url,
             retrieval_settings.connect_timeout_seconds,
             retrieval_settings.request_timeout_seconds,
+            internal_read_token=internal_service_tokens.retrieval_token,
+            service_assertion_settings=service_assertion_settings,
         )
         if retrieval_settings.url
         else None
@@ -102,6 +123,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.llm_settings = llm_settings
     app.state.investigator = Investigator(collector, provider, bounds, retrieval_client, rag_bounds)
+    # Phase 14 correction round, Issue 2/3: non-blocking at startup,
+    # same philosophy as every setting above -- an unconfigured
+    # agent_runtime_caller_token just makes require_internal_caller
+    # fail every request closed once enforcement is on; it never
+    # crashes this service.
+    app.state.organization_context_settings = OrganizationContextSettings.from_env()
+    app.state.internal_service_tokens = internal_service_tokens
+    app.state.service_assertion_settings = service_assertion_settings
+    # Phase 14 correction round, Blocker 1: exposed directly (mirrors
+    # agent_runtime_service.main's own app.state.control_plane_client)
+    # so a test overriding app.state.service_assertion_settings after
+    # startup can also update THIS already-constructed client's own
+    # captured settings -- `ServiceAssertionSettings` is an immutable
+    # dataclass VALUE, so reassigning app.state alone does not retroactively
+    # change what an already-built client holds; this accessor is what
+    # lets a test (or any other future reconfiguration path) reach it.
+    app.state.control_plane_client = control_plane
     yield
 
 

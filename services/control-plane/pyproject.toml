@@ -13,6 +13,10 @@ dependencies = [
     "pydantic==2.13.5",
     "sqlalchemy[asyncio]==2.1.1",
     "asyncpg==0.31.0",
+    # Phase 14: verifies the signed service assertion web-console's BFF
+    # mints (core/authz.py) -- a mature, widely-used JWT library, never
+    # homegrown signature verification.
+    "pyjwt==2.10.1",
 ]
 
 [project.optional-dependencies]

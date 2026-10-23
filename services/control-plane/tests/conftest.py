@@ -134,13 +134,14 @@ class FakeIncidentRepository:
         )
         self._next_event_id += 1
 
-    async def list_incidents(self, *, status, severity, source, limit, offset):
+    async def list_incidents(self, *, status, severity, source, limit, offset, organization_id=None):
         matched = [
             r
             for r in self.rows
             if (status is None or r["status"] == status)
             and (severity is None or r["severity"] == severity)
             and (source is None or r["source"] == source)
+            and (organization_id is None or str(r.get("organization_id")) == str(organization_id))
         ]
         total = len(matched)
         page = matched[offset : offset + limit]
@@ -203,6 +204,7 @@ class FakeIncidentRepository:
         self.rows.append(
             {
                 "id": new_id,
+                "organization_id": "00000000-0000-0000-0000-000000000001",
                 "source": source,
                 "source_fingerprint": source_fingerprint,
                 "title": title,
@@ -333,6 +335,15 @@ def make_incident_row(**overrides) -> dict:
     now = datetime.now(UTC)
     row = {
         "id": uuid.uuid4(),
+        # Phase 14: defaults to the fixed legacy-org constant (see
+        # database/migrations/V10__add_organization_scoping.sql /
+        # core/config.py's LEGACY_LOCAL_DEVELOPMENT_ORGANIZATION_ID) --
+        # every pre-Phase-14 test that never passes organization_id
+        # explicitly keeps behaving exactly as before (Incident.model_validate
+        # requires the field to be present at all, but its value is
+        # irrelevant to any test that isn't specifically exercising
+        # tenant isolation).
+        "organization_id": "00000000-0000-0000-0000-000000000001",
         "source": "alertmanager",
         "source_fingerprint": f"fp-{uuid.uuid4()}",
         "title": "Sample incident",

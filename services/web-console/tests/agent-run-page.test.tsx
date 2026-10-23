@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import { APIError } from "better-auth";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fail, ok } from "../lib/server/http";
 
@@ -14,10 +15,23 @@ vi.mock("next/navigation", () => ({
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND");
   }),
+  redirect: vi.fn((url: string) => {
+    throw new Error(`NEXT_REDIRECT:${url}`);
+  }),
   useRouter: () => ({ refresh: vi.fn() }),
+}));
+// Phase 14 correction round: only the Next.js/Better-Auth PLUMBING is
+// mocked here -- lib/server/actor.ts's own resolveActor/
+// requireActorOrRedirect run for REAL against these.
+vi.mock("next/headers", () => ({
+  headers: vi.fn(async () => new Headers()),
+}));
+vi.mock("@/lib/auth/auth", () => ({
+  auth: { api: { getSession: vi.fn(), getActiveMember: vi.fn() } },
 }));
 
 import AgentRunPage from "../app/agent-runs/[runId]/page";
+import { auth } from "@/lib/auth/auth";
 import { getAgentRun, getAgentRunHistory } from "../lib/server/agent-runtime-client";
 import { getIncident, getRemediationProposal } from "../lib/server/control-plane-client";
 import { notFound } from "next/navigation";
@@ -27,6 +41,38 @@ const getAgentRunHistoryMock = getAgentRunHistory as unknown as ReturnType<typeo
 const getRemediationProposalMock = getRemediationProposal as unknown as ReturnType<typeof vi.fn>;
 const getIncidentMock = getIncident as unknown as ReturnType<typeof vi.fn>;
 const notFoundMock = notFound as unknown as ReturnType<typeof vi.fn>;
+const getSessionMock = auth.api.getSession as unknown as ReturnType<typeof vi.fn>;
+const getActiveMemberMock = auth.api.getActiveMember as unknown as ReturnType<typeof vi.fn>;
+
+const ACTOR_USER_ID = "88888888-8888-8888-8888-888888888888";
+const ACTOR_ORG_ID = "99999999-9999-9999-9999-999999999999";
+
+function mockAuthenticatedActor(role = "OWNER") {
+  getSessionMock.mockResolvedValue({
+    user: { id: ACTOR_USER_ID },
+    session: { activeOrganizationId: ACTOR_ORG_ID },
+  });
+  getActiveMemberMock.mockResolvedValue({
+    id: "member-1",
+    userId: ACTOR_USER_ID,
+    organizationId: ACTOR_ORG_ID,
+    role,
+  });
+}
+
+function mockNoSession() {
+  getSessionMock.mockResolvedValue({ user: null });
+}
+
+function mockRevokedMember() {
+  getSessionMock.mockResolvedValue({
+    user: { id: ACTOR_USER_ID },
+    session: { activeOrganizationId: ACTOR_ORG_ID },
+  });
+  getActiveMemberMock.mockRejectedValue(
+    APIError.from("BAD_REQUEST", { code: "MEMBER_NOT_FOUND", message: "Member not found" }),
+  );
+}
 
 const LIVE_INCIDENT = {
   id: "22222222-2222-2222-2222-222222222222",
@@ -48,6 +94,7 @@ beforeEach(() => {
   // overrides this explicitly -- avoids every pre-existing test having
   // to know about Gate D's new live-incident fetch.
   getIncidentMock.mockResolvedValue(ok(LIVE_INCIDENT));
+  mockAuthenticatedActor();
 });
 
 const BASE_AGENT_RUN = {
@@ -375,5 +422,27 @@ describe("AgentRunPage", () => {
     expect(screen.getByText("running")).toBeDefined();
     const liveSection = screen.getByText("Live incident state").closest("section");
     expect(liveSection?.textContent).toMatch(/unavailable/i);
+  });
+
+  describe("real actor resolution (Phase 14 Gate 9)", () => {
+    it("no session at all -> redirected to sign-in, never rendered unscoped", async () => {
+      mockNoSession();
+      getAgentRunMock.mockResolvedValue(ok(BASE_AGENT_RUN));
+
+      await expect(
+        AgentRunPage({ params: Promise.resolve({ runId: BASE_AGENT_RUN.run_id }) }),
+      ).rejects.toThrow("NEXT_REDIRECT:/sign-in");
+      expect(getAgentRunMock).not.toHaveBeenCalled();
+    });
+
+    it("a revoked/removed member's still-valid session -> redirected to /organizations, never rendered", async () => {
+      mockRevokedMember();
+      getAgentRunMock.mockResolvedValue(ok(BASE_AGENT_RUN));
+
+      await expect(
+        AgentRunPage({ params: Promise.resolve({ runId: BASE_AGENT_RUN.run_id }) }),
+      ).rejects.toThrow("NEXT_REDIRECT:/organizations");
+      expect(getAgentRunMock).not.toHaveBeenCalled();
+    });
   });
 });

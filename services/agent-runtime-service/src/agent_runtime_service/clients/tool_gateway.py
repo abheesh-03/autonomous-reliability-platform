@@ -21,6 +21,8 @@ import logging
 import httpx
 from pydantic import ValidationError
 
+from agent_runtime_service.authz import current_actor, sign_derivative_assertion
+from agent_runtime_service.config import ServiceAssertionSettings
 from agent_runtime_service.domain.remediation import (
     KubernetesRemediationCapability,
     RemediationCapability,
@@ -81,14 +83,36 @@ class ToolGatewayClient:
         connect_timeout: float,
         request_timeout: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        service_assertion_settings: ServiceAssertionSettings | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._execution_token = execution_token
         self._timeout = httpx.Timeout(request_timeout, connect=connect_timeout)
         self._transport = transport
+        # Phase 14 FINAL MACHINE-IDENTITY TENANT-BOUNDARY FIX, Issue B:
+        # when a verified actor is bound for the current request (the
+        # resume_agent_run flow that drives execute_remediation always
+        # has one bound once organization-context enforcement is on --
+        # see api/agent_runs.py), execute() below ALSO relays a
+        # derived assertion naming that exact actor, in its own
+        # dedicated header -- never the body (Phase 8 §NO
+        # CALLER-SUPPLIED EXECUTION TARGET's own "a bare proposal id,
+        # nothing else" contract is unchanged). tool-gateway forwards
+        # this header, UNVERIFIED BY ITSELF (it holds no copy of the
+        # shared signing secret), straight through to its own
+        # GetProposal/StartExecution/RecordExecutionResult calls --
+        # control-plane is the only party that ever cryptographically
+        # verifies it.
+        self._service_assertion_settings = service_assertion_settings
 
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._execution_token}"}
+        headers = {"Authorization": f"Bearer {self._execution_token}"}
+        actor = current_actor()
+        if actor is not None and self._service_assertion_settings is not None:
+            headers["X-Service-Assertion"] = sign_derivative_assertion(
+                actor, self._service_assertion_settings, audience=self._service_assertion_settings.control_plane_audience
+            )
+        return headers
 
     async def get_capability(self) -> RemediationCapability:
         url = f"{self._base_url}/api/v1/remediation-capabilities"

@@ -12,14 +12,18 @@ import {
   getIncident,
 } from "../../../lib/server/control-plane-client";
 import type { RemediationEvent, RemediationProposal } from "../../../lib/types/remediation";
+import { requireActorOrRedirect, signAssertion } from "../../../lib/server/actor";
 
 export default async function IncidentDetailPage({
   params,
 }: {
   params: Promise<{ incidentId: string }>;
 }) {
+  const actor = await requireActorOrRedirect();
+  const actorToken = await signAssertion(actor, "control-plane");
+
   const { incidentId } = await params;
-  const incidentResult = await getIncident(incidentId);
+  const incidentResult = await getIncident(incidentId, actorToken);
 
   if (!incidentResult.ok) {
     if (incidentResult.error.kind === "not_found" || incidentResult.error.kind === "validation") {
@@ -38,8 +42,8 @@ export default async function IncidentDetailPage({
   const incident = incidentResult.data;
 
   const [eventsResult, proposalsResult] = await Promise.all([
-    getAllIncidentEvents(incidentId),
-    getAllIncidentRemediationProposals(incidentId),
+    getAllIncidentEvents(incidentId, actorToken),
+    getAllIncidentRemediationProposals(incidentId, actorToken),
   ]);
 
   // Each proposal's own event history is fetched independently -- a
@@ -53,7 +57,7 @@ export default async function IncidentDetailPage({
   if (proposalsResult.ok) {
     await Promise.all(
       proposalsResult.data.map(async (proposal) => {
-        const eventsForProposal = await getAllRemediationProposalEvents(proposal.id);
+        const eventsForProposal = await getAllRemediationProposalEvents(proposal.id, actorToken);
         proposalEventsByProposalId.set(proposal.id, eventsForProposal);
       }),
     );

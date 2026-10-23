@@ -24,7 +24,14 @@ from fastapi import FastAPI
 from retrieval_service import db
 from retrieval_service.api.health import router as health_router
 from retrieval_service.api.search import router as search_router
-from retrieval_service.config import DatabaseSettings, EmbeddingSettings, SearchBounds
+from retrieval_service.config import (
+    DatabaseSettings,
+    EmbeddingSettings,
+    InternalCallerTokenSettings,
+    OrganizationContextSettings,
+    SearchBounds,
+    ServiceAssertionSettings,
+)
 from retrieval_service.embeddings.provider import EmbeddingProviderNotConfiguredError, LocalLexicalEmbeddingProvider
 from retrieval_service.indexer import build_embedding_provider
 
@@ -59,6 +66,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pool = pool
     app.state.embedding_provider = embedding_provider
     app.state.search_bounds = search_bounds
+    # Phase 14 correction round, Issue 2/3: non-blocking at startup,
+    # same philosophy as the embedding provider above.
+    app.state.organization_context_settings = OrganizationContextSettings.from_env()
+    app.state.internal_caller_token_settings = InternalCallerTokenSettings.from_env()
+    # Phase 14 FINAL MACHINE-IDENTITY TENANT-BOUNDARY FIX, Issue A.
+    app.state.service_assertion_settings = ServiceAssertionSettings.from_env()
     try:
         yield
     finally:

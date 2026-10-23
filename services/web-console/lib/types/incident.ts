@@ -17,6 +17,8 @@ export type IncidentStatus = (typeof INCIDENT_STATUSES)[number];
 
 export interface Incident {
   id: string;
+  // Phase 14: see control_plane/domain/incident.py.
+  organization_id: string;
   source: string;
   source_fingerprint: string;
   title: string;

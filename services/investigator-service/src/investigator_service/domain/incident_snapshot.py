@@ -30,6 +30,10 @@ class IncidentSnapshot(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: uuid.UUID
+    # Phase 14 correction round, Issue 2: used to scope retrieval
+    # results (clients/retrieval.py's `organization_id` parameter) to
+    # this incident's own tenant -- see investigator.py.
+    organization_id: uuid.UUID
     source: str
     source_fingerprint: str
     title: str

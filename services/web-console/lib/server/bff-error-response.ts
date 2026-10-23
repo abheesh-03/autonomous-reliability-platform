@@ -17,6 +17,7 @@ const STATUS_FOR_KIND: Record<BackendErrorKind, number> = {
   configuration: 500,
   unavailable: 503,
   malformed: 502,
+  forbidden: 403,
 };
 
 const MESSAGE_FOR_KIND: Record<BackendErrorKind, string> = {
@@ -27,6 +28,7 @@ const MESSAGE_FOR_KIND: Record<BackendErrorKind, string> = {
   configuration: "This server is not configured correctly for this action.",
   unavailable: "A backend service is temporarily unavailable.",
   malformed: "Received an unexpected response from a backend service.",
+  forbidden: "You do not have permission to perform this action.",
 };
 
 export function backendErrorResponse(kind: BackendErrorKind, overrideMessage?: string) {

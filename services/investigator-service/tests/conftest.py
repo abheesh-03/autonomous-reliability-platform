@@ -33,6 +33,9 @@ TEST_BOUNDS = EvidenceBounds(
 )
 
 
+LEGACY_ORGANIZATION_ID = "00000000-0000-0000-0000-000000000001"
+
+
 def incident_json(
     *,
     incident_id: uuid.UUID = SAMPLE_INCIDENT_ID,
@@ -44,11 +47,13 @@ def incident_json(
     first_seen_at: datetime | None = None,
     last_seen_at: datetime | None = None,
     resolved_at: datetime | None = None,
+    organization_id: str = LEGACY_ORGANIZATION_ID,
 ) -> dict:
     first_seen_at = first_seen_at or datetime(2026, 4, 1, 9, 0, 0, tzinfo=UTC)
     last_seen_at = last_seen_at or (first_seen_at + timedelta(minutes=5))
     return {
         "id": str(incident_id),
+        "organization_id": organization_id,
         "source": source,
         "source_fingerprint": "deadbeef12345678",
         "title": title,

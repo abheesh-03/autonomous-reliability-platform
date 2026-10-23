@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from langgraph.checkpoint.memory import InMemorySaver
 
 from agent_runtime_service.api.agent_runs import router as agent_runs_router
-from agent_runtime_service.config import RuntimeBounds
+from agent_runtime_service.config import OrganizationContextSettings, RuntimeBounds, ServiceAssertionSettings
 from agent_runtime_service.domain.incident_snapshot import IncidentSnapshot
 from agent_runtime_service.domain.investigation import InvestigationReport
 from agent_runtime_service.domain.remediation import RemediationCapability, RemediationExecutionResult, RemediationProposal
@@ -110,6 +110,9 @@ def _build_app(control_plane=None, tool_gateway=None, saver=None):
     app.state.graph = graph
     app.state.runtime_bounds = BOUNDS
     app.state.control_plane_client = control_plane
+    app.state.organization_context_settings = OrganizationContextSettings(enabled=False)
+    app.state.service_assertion_settings = ServiceAssertionSettings(
+        secret=None, issuer="web-console", audience="agent-runtime-service", max_clock_skew_seconds=30, control_plane_audience="control-plane", investigator_audience="investigator-service")
     return app, control_plane
 
 

@@ -5,15 +5,24 @@ import { formatTimestamp } from "../../lib/format";
 import { parseIncidentListSearchParams, type RawSearchParams } from "../../lib/incident-query";
 import { listIncidents } from "../../lib/server/control-plane-client";
 import { INCIDENT_SEVERITIES, INCIDENT_STATUSES } from "../../lib/types/incident";
+import { requireActorOrRedirect, signAssertion } from "../../lib/server/actor";
 
 export default async function IncidentsPage({
   searchParams,
 }: {
   searchParams: Promise<RawSearchParams>;
 }) {
+  // Phase 14 Gate 9: every protected page re-establishes the real
+  // actor on every render -- never assumes a prior page's check still
+  // holds (Gate 2: "Do not rely solely on Next.js middleware/proxy
+  // redirects... every protected server route must validate the real
+  // session and authorization").
+  const actor = await requireActorOrRedirect();
+  const actorToken = await signAssertion(actor, "control-plane");
+
   const rawParams = await searchParams;
   const parsed = parseIncidentListSearchParams(rawParams);
-  const result = await listIncidents(parsed);
+  const result = await listIncidents(parsed, actorToken);
 
   return (
     <main style={{ maxWidth: 1100, margin: "0 auto", padding: "2rem 1.5rem" }}>

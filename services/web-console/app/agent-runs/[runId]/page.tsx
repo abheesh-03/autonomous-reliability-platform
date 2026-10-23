@@ -16,14 +16,19 @@ import { getAgentRun, getAgentRunHistory } from "../../../lib/server/agent-runti
 import { getIncident, getRemediationProposal } from "../../../lib/server/control-plane-client";
 import type { BackendResult } from "../../../lib/server/http";
 import type { RemediationProposal } from "../../../lib/types/remediation";
+import { requireActorOrRedirect, signAssertion } from "../../../lib/server/actor";
 
 export default async function AgentRunPage({
   params,
 }: {
   params: Promise<{ runId: string }>;
 }) {
+  const actor = await requireActorOrRedirect();
+  const controlPlaneToken = await signAssertion(actor, "control-plane");
+  const agentRuntimeToken = await signAssertion(actor, "agent-runtime-service");
+
   const { runId } = await params;
-  const agentRunResult = await getAgentRun(runId);
+  const agentRunResult = await getAgentRun(runId, agentRuntimeToken);
 
   if (!agentRunResult.ok) {
     if (agentRunResult.error.kind === "not_found" || agentRunResult.error.kind === "validation") {
@@ -44,9 +49,9 @@ export default async function AgentRunPage({
   // Each optional/scoped read is independent: a failure in history or
   // in the remediation-proposal enrichment never hides the durable
   // AgentRun itself, which already loaded successfully above.
-  const historyResult = await getAgentRunHistory(runId);
+  const historyResult = await getAgentRunHistory(runId, agentRuntimeToken);
   const proposalResult: BackendResult<RemediationProposal> | null = agentRun.remediation_proposal_id
-    ? await getRemediationProposal(agentRun.remediation_proposal_id)
+    ? await getRemediationProposal(agentRun.remediation_proposal_id, controlPlaneToken)
     : null;
   // A SEPARATE, independent, read-only fetch from the durable
   // incident_snapshot embedded in the AgentRun checkpoint -- that
@@ -54,7 +59,7 @@ export default async function AgentRunPage({
   // while this is the real, current incident row. Only control-plane's
   // own authoritative state may ever report "resolved"; this console
   // never infers it.
-  const liveIncidentResult = await getIncident(agentRun.incident_id);
+  const liveIncidentResult = await getIncident(agentRun.incident_id, controlPlaneToken);
 
   return (
     <main style={{ maxWidth: 900, margin: "0 auto", padding: "2rem 1.5rem" }}>

@@ -92,6 +92,7 @@ class Investigator:
                 exclude_incident_id=incident.id,
                 knowledge_limit=self._rag_bounds.max_knowledge_contexts,
                 historical_incident_limit=self._rag_bounds.max_historical_contexts,
+                organization_id=str(incident.organization_id),
             )
         except RetrievalUnavailableError as exc:
             logger.warning("retrieval-service unavailable: %s", exc)

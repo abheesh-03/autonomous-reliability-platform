@@ -62,9 +62,35 @@ type Proposal struct {
 }
 
 type Client struct {
-	baseURL       string
-	executorToken string
-	httpClient    *http.Client
+	baseURL           string
+	executorToken     string
+	internalReadToken string
+	// serviceAssertion (Phase 14 FINAL MACHINE-IDENTITY TENANT-BOUNDARY
+	// FIX, Issue B/C): the SAME X-Service-Assertion agent-runtime-
+	// service relayed to THIS request's own /execute call, forwarded
+	// here unverified -- this client holds no copy of the shared
+	// HS256 signing secret and never attempts to decode or trust it
+	// itself; control-plane is the only party that cryptographically
+	// verifies it. Set per-request via WithServiceAssertion, below --
+	// never mutates the shared, long-lived *Client this package's
+	// caller constructs once at startup.
+	serviceAssertion string
+	httpClient       *http.Client
+}
+
+// WithServiceAssertion returns a shallow copy of c that forwards
+// `assertion` (if non-empty) as X-Service-Assertion on every one of
+// its own calls to control-plane -- GetProposal, StartExecution, and
+// RecordExecutionResult alike. ExecuteHandler calls this ONCE, at the
+// top of handling a single incoming /execute request, with whatever
+// X-Service-Assertion header THAT request itself carried (or an empty
+// string if none did, in legacy/local-dev mode) -- the returned copy
+// is then used for the remainder of that one request only; the
+// original *Client (shared across all requests) is never mutated.
+func (c *Client) WithServiceAssertion(assertion string) *Client {
+	clone := *c
+	clone.serviceAssertion = assertion
+	return &clone
 }
 
 func New(baseURL, executorToken string, timeout time.Duration) *Client {
@@ -75,19 +101,50 @@ func New(baseURL, executorToken string, timeout time.Duration) *Client {
 	}
 }
 
-// GetProposal is an UNAUTHENTICATED read (control-plane's own
-// GET /api/v1/remediation-proposals/{id} requires no token -- the
-// same local-development "every GET is read-only and safe" policy
-// every other control-plane GET route already follows). Sending the
-// executor token here would be harmless but pointless; it is
-// deliberately omitted so a bug can never make this read path
-// silently depend on the one token this client is never meant to
-// rely on for reads.
+// NewWithInternalReadToken is the Phase 14 correction round (Issue 3)
+// constructor: `internalReadToken` is tool-gateway's own distinct,
+// bounded internal-service-read identity
+// (CONTROL_PLANE_INTERNAL_READ_TOKEN_TOOL_GATEWAY), sent ONLY on
+// GetProposal below, in its own dedicated header
+// (X-Internal-Service-Token, never Authorization, which the executor
+// token above already uses for a DIFFERENT capability). Only actually
+// required by control-plane once
+// CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT is enabled there; kept as
+// a separate constructor (rather than changing New's signature) so
+// every existing call site/test of New continues to compile and
+// behave identically.
+func NewWithInternalReadToken(baseURL, executorToken, internalReadToken string, timeout time.Duration) *Client {
+	c := New(baseURL, executorToken, timeout)
+	c.internalReadToken = internalReadToken
+	return c
+}
+
+// GetProposal was an UNAUTHENTICATED read in local-development mode
+// (control-plane's own GET /api/v1/remediation-proposals/{id}
+// requires no token by default) -- the same local-development "every
+// GET is read-only and safe" policy every other control-plane GET
+// route already follows. As of the Phase 14 correction round, it ALSO
+// sends this client's own distinct internal-service-read identity
+// (never the executor token, never a human-approval credential) --
+// harmless when organization-context enforcement is disabled, and
+// REQUIRED once it is enabled (Issue 3: tool-gateway's own independent
+// proposal-status re-verification must keep working in secure mode).
 func (c *Client) GetProposal(ctx context.Context, proposalID string) (*Proposal, error) {
 	url := fmt.Sprintf("%s/api/v1/remediation-proposals/%s", c.baseURL, proposalID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnexpectedResponse, err)
+	}
+	if c.internalReadToken != "" {
+		req.Header.Set("X-Internal-Service-Token", c.internalReadToken)
+	}
+	// Phase 14 FINAL MACHINE-IDENTITY TENANT-BOUNDARY FIX, Issue B:
+	// ADDITIVE to the internal read token above -- control-plane's
+	// own get_actor_or_tool_gateway_reader now REQUIRES this (the
+	// bare internal token alone is no longer sufficient; see that
+	// function's own docstring).
+	if c.serviceAssertion != "" {
+		req.Header.Set("X-Service-Assertion", c.serviceAssertion)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -144,6 +201,16 @@ func (c *Client) postExecutor(ctx context.Context, url string, body map[string]a
 	// (an unauthenticated read) and this client has no method that
 	// could create or approve/reject a proposal at all.
 	req.Header.Set("Authorization", "Bearer "+c.executorToken)
+	// Phase 14 FINAL MACHINE-IDENTITY TENANT-BOUNDARY FIX, Issue C:
+	// ADDITIVE to the executor token above -- control-plane now
+	// independently verifies this relayed actor's organization
+	// against the proposal's real owning incident before either
+	// state transition below runs (see api/remediation.py's own
+	// start_remediation_execution/record_remediation_execution_result
+	// docstrings).
+	if c.serviceAssertion != "" {
+		req.Header.Set("X-Service-Assertion", c.serviceAssertion)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

@@ -1,5 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { APIError } from "better-auth";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fail, ok } from "../lib/server/http";
 
 vi.mock("../lib/server/control-plane-client", () => ({
@@ -11,11 +12,32 @@ vi.mock("../lib/server/control-plane-client", () => ({
 // StartInvestigationControl (rendered for open/acknowledged/investigating
 // incidents) calls useRouter() -- needs a router context stub to render
 // under Vitest/jsdom, same as agent-run-page.test.tsx/start-investigation-control.test.tsx.
+// `notFound` is the real page's own (for an unknown/cross-tenant
+// incident id); `redirect` is lib/server/actor.ts's own (for an
+// unauthenticated/no-org/revoked actor) -- both control-flow-
+// interrupting functions are mocked to throw, same convention
+// agent-run-page.test.tsx already established for `notFound`.
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
+  notFound: vi.fn(() => {
+    throw new Error("NEXT_NOT_FOUND");
+  }),
+  redirect: vi.fn((url: string) => {
+    throw new Error(`NEXT_REDIRECT:${url}`);
+  }),
+}));
+// Phase 14 correction round: only the Next.js/Better-Auth PLUMBING is
+// mocked here -- lib/server/actor.ts's own resolveActor/
+// requireActorOrRedirect run for REAL against these.
+vi.mock("next/headers", () => ({
+  headers: vi.fn(async () => new Headers()),
+}));
+vi.mock("@/lib/auth/auth", () => ({
+  auth: { api: { getSession: vi.fn(), getActiveMember: vi.fn() } },
 }));
 
 import IncidentDetailPage from "../app/incidents/[incidentId]/page";
+import { auth } from "@/lib/auth/auth";
 import {
   getAllIncidentEvents,
   getAllIncidentRemediationProposals,
@@ -29,6 +51,42 @@ const getAllIncidentRemediationProposalsMock = getAllIncidentRemediationProposal
   typeof vi.fn
 >;
 const getAllRemediationProposalEventsMock = getAllRemediationProposalEvents as unknown as ReturnType<typeof vi.fn>;
+const getSessionMock = auth.api.getSession as unknown as ReturnType<typeof vi.fn>;
+const getActiveMemberMock = auth.api.getActiveMember as unknown as ReturnType<typeof vi.fn>;
+
+const ACTOR_USER_ID = "88888888-8888-8888-8888-888888888888";
+const ACTOR_ORG_ID = "99999999-9999-9999-9999-999999999999";
+
+function mockAuthenticatedActor(role = "OWNER") {
+  getSessionMock.mockResolvedValue({
+    user: { id: ACTOR_USER_ID },
+    session: { activeOrganizationId: ACTOR_ORG_ID },
+  });
+  getActiveMemberMock.mockResolvedValue({
+    id: "member-1",
+    userId: ACTOR_USER_ID,
+    organizationId: ACTOR_ORG_ID,
+    role,
+  });
+}
+
+function mockNoSession() {
+  getSessionMock.mockResolvedValue({ user: null });
+}
+
+function mockRevokedMember() {
+  getSessionMock.mockResolvedValue({
+    user: { id: ACTOR_USER_ID },
+    session: { activeOrganizationId: ACTOR_ORG_ID },
+  });
+  getActiveMemberMock.mockRejectedValue(
+    APIError.from("BAD_REQUEST", { code: "MEMBER_NOT_FOUND", message: "Member not found" }),
+  );
+}
+
+beforeEach(() => {
+  mockAuthenticatedActor();
+});
 
 const SAMPLE_INCIDENT = {
   id: "11111111-1111-1111-1111-111111111111",
@@ -224,5 +282,25 @@ describe("IncidentDetailPage", () => {
     render(resolvedJsx);
     expect(screen.queryByRole("button", { name: /investigation/i })).toBeNull();
     expect(screen.getByText(/cannot be started while the incident is resolved/i)).toBeDefined();
+  });
+
+  describe("real actor resolution (Phase 14 Gate 9)", () => {
+    it("no session at all -> redirected to sign-in, never rendered unscoped", async () => {
+      mockNoSession();
+
+      await expect(
+        IncidentDetailPage({ params: Promise.resolve({ incidentId: SAMPLE_INCIDENT.id }) }),
+      ).rejects.toThrow("NEXT_REDIRECT:/sign-in");
+      expect(getIncidentMock).not.toHaveBeenCalled();
+    });
+
+    it("a revoked/removed member's still-valid session -> redirected to /organizations, never rendered", async () => {
+      mockRevokedMember();
+
+      await expect(
+        IncidentDetailPage({ params: Promise.resolve({ incidentId: SAMPLE_INCIDENT.id }) }),
+      ).rejects.toThrow("NEXT_REDIRECT:/organizations");
+      expect(getIncidentMock).not.toHaveBeenCalled();
+    });
   });
 });

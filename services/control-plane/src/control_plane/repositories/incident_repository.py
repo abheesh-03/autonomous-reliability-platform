@@ -21,14 +21,40 @@ from datetime import datetime
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from control_plane.core.config import LEGACY_LOCAL_DEVELOPMENT_ORGANIZATION_ID
 
 # Column list matches database/migrations/V1__create_incident_schema.sql
 # exactly.
 incidents_table = sa.table(
     "incidents",
     sa.column("id"),
+    # Phase 14: see database/migrations/V10__add_organization_scoping.sql.
+    # NOT set by any INSERT/UPSERT statement in this module -- the
+    # column's own DB-level DEFAULT (the fixed legacy-org constant,
+    # core/config.py's LEGACY_LOCAL_DEVELOPMENT_ORGANIZATION_ID) is what
+    # every existing ingestion path (upsert_firing_incident) continues
+    # to rely on, unchanged. Real per-tenant ingestion association
+    # (Gate 6) is a documented, deferred follow-up -- see
+    # docs/architecture/phase-14-security-multitenancy.md's "known
+    # limitations" section.
+    #
+    # Phase 14 correction round (Issue 1): explicitly typed as
+    # PG_UUID, unlike every bare `sa.column(...)` above/below it.
+    # Found by a REAL-PostgreSQL integration test, never by the
+    # mocked-repository unit tests (which compare in plain Python and
+    # have no SQL type system to get wrong): an untyped column binds a
+    # Python `str` as `::VARCHAR`, and Postgres raises a real
+    # `operator does not exist: uuid = character varying` on
+    # `WHERE organization_id = $1` -- `list_incidents`'s own org
+    # filter silently 503'd in secure mode until this was caught
+    # against a real database. Explicit typing here fixes it AT THE
+    # COLUMN, not just at this one call site, so no future query
+    # against this column can reintroduce the same class of bug.
+    sa.column("organization_id", PG_UUID(as_uuid=True)),
     sa.column("source"),
     sa.column("source_fingerprint"),
     sa.column("title"),
@@ -82,6 +108,7 @@ class IncidentRepository:
         source: str | None,
         limit: int,
         offset: int,
+        organization_id: uuid.UUID | str | None = None,
     ) -> tuple[Sequence[Mapping], int]:
         filters = []
         if status is not None:
@@ -90,6 +117,13 @@ class IncidentRepository:
             filters.append(incidents_table.c.severity == severity)
         if source is not None:
             filters.append(incidents_table.c.source == source)
+        if organization_id is not None:
+            # Phase 14 Gate 5: applied as a WHERE clause on the base
+            # query the COUNT and the page both derive from -- never a
+            # post-fetch filter over already-fetched rows (Gate 4:
+            # "Never apply user authorization by filtering results
+            # AFTER fetching unscoped sensitive data").
+            filters.append(incidents_table.c.organization_id == str(organization_id))
 
         base = sa.select(incidents_table)
         if filters:
@@ -204,7 +238,19 @@ class IncidentRepository:
         is what makes 'kubernetes' a legal actor_type for 'created'/
         'observed' events at all).
         """
+        # Phase 14: every existing ingestion path is not yet
+        # tenant-aware (Gate 6 is deferred -- see
+        # docs/architecture/phase-14-security-multitenancy.md's "known
+        # limitations"), so this explicitly inserts the fixed legacy
+        # organization id rather than relying solely on the column's
+        # own DB-level DEFAULT -- the ON CONFLICT inference target
+        # below must match incidents_active_fingerprint_uniq's real
+        # columns (organization_id, source, source_fingerprint) exactly
+        # (database/migrations/V10__add_organization_scoping.sql), so
+        # organization_id must be a real, explicit value in this
+        # INSERT, not merely implied by a column default.
         insert_stmt = pg_insert(incidents_table).values(
+            organization_id=LEGACY_LOCAL_DEVELOPMENT_ORGANIZATION_ID,
             source=source,
             source_fingerprint=source_fingerprint,
             title=title,
@@ -216,7 +262,11 @@ class IncidentRepository:
             occurrence_starts_at=occurrence_starts_at,
         )
         upsert_stmt = insert_stmt.on_conflict_do_update(
-            index_elements=[incidents_table.c.source, incidents_table.c.source_fingerprint],
+            index_elements=[
+                incidents_table.c.organization_id,
+                incidents_table.c.source,
+                incidents_table.c.source_fingerprint,
+            ],
             index_where=sa.text("status NOT IN ('resolved', 'closed')"),
             set_={
                 "title": insert_stmt.excluded.title,

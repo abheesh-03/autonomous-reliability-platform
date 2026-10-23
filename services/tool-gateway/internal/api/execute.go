@@ -46,6 +46,20 @@ func ExecuteHandler(cpClient *controlplane.Client, paymentClient *payment.Client
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
 
+		// Phase 14 FINAL MACHINE-IDENTITY TENANT-BOUNDARY FIX, Issue
+		// B/C: relays THIS request's own X-Service-Assertion (minted
+		// by agent-runtime-service for the real actor driving this
+		// execution, if organization-context enforcement is on) to
+		// every one of this handler's own control-plane calls below --
+		// never trusted or decoded by tool-gateway itself (it holds no
+		// copy of the shared signing secret); control-plane is the
+		// only party that cryptographically verifies it. A shallow,
+		// per-request copy (WithServiceAssertion) -- the shared
+		// *controlplane.Client this handler closed over at startup is
+		// never mutated, so concurrent requests from different actors
+		// can never cross-contaminate each other's assertion.
+		cpClient := cpClient.WithServiceAssertion(r.Header.Get("X-Service-Assertion"))
+
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
 		var req ExecuteRequest

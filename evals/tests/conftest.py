@@ -9,6 +9,12 @@ from evals.scoring.models import Case
 
 SAMPLE_INCIDENT = {
     "id": "11111111-1111-1111-1111-111111111111",
+    # Phase 14 correction round FINAL VALIDATION: organization_id
+    # became a required IncidentSnapshot field (database/migrations/V10)
+    # -- the same fixed "legacy local-development organization"
+    # constant V10's own backfill used, never a fresh/random UUID this
+    # harness's own tests were never designed around.
+    "organization_id": "00000000-0000-0000-0000-000000000001",
     "source": "alertmanager",
     "source_fingerprint": "fp-1",
     "title": "checkout-service is returning HTTP 5xx errors",

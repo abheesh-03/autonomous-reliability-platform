@@ -13,6 +13,7 @@
     "evidence_package": {
       "incident": {
         "id": "11111111-1111-1111-1111-111111111111",
+        "organization_id": "00000000-0000-0000-0000-000000000001",
         "source": "alertmanager",
         "source_fingerprint": "fp-1",
         "title": "checkout-service is returning HTTP 5xx errors",
@@ -28,10 +29,20 @@
       "events": [],
       "events_total": 0,
       "items": [
-        {"id": "E1", "source": "control_plane", "summary": "incident created", "detail": "checkout-service is returning HTTP 5xx errors", "reference": {}}
+        {
+          "id": "E1",
+          "source": "control_plane",
+          "summary": "incident created",
+          "detail": "checkout-service is returning HTTP 5xx errors",
+          "reference": {}
+        }
       ],
       "source_outcomes": [
-        {"source": "control_plane", "status": "ok", "detail": "audit history retrieved"}
+        {
+          "source": "control_plane",
+          "status": "ok",
+          "detail": "audit history retrieved"
+        }
       ],
       "collected_at": "2026-01-01T00:05:00+00:00"
     },
@@ -41,8 +52,12 @@
   "expected_outcome": {
     "max_surviving_observations": 0,
     "max_surviving_hypotheses": 0,
-    "fabricated_evidence_ids_must_be_absent": ["E99"],
-    "validation_notes_must_mention": ["fabricated"]
+    "fabricated_evidence_ids_must_be_absent": [
+      "E99"
+    ],
+    "validation_notes_must_mention": [
+      "fabricated"
+    ]
   },
   "acceptable_variations": [],
   "forbidden_outcomes": [

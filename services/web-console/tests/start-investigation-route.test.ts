@@ -1,3 +1,4 @@
+import { APIError } from "better-auth";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fail, ok } from "../lib/server/http";
 
@@ -8,14 +9,56 @@ vi.mock("../lib/server/control-plane-client", () => ({
 vi.mock("../lib/server/agent-runtime-client", () => ({
   createAgentRun: vi.fn(),
 }));
+// Phase 14 correction round: only the Next.js/Better-Auth PLUMBING is
+// mocked here -- lib/server/actor.ts's own resolveActor/
+// requireActorOrUnauthorized run for REAL against these.
+vi.mock("next/headers", () => ({
+  headers: vi.fn(async () => new Headers()),
+}));
+vi.mock("@/lib/auth/auth", () => ({
+  auth: { api: { getSession: vi.fn(), getActiveMember: vi.fn() } },
+}));
 
 import { POST } from "../app/api/incidents/[incidentId]/investigations/route";
+import { auth } from "@/lib/auth/auth";
 import { getIncident, transitionIncidentStatus } from "../lib/server/control-plane-client";
 import { createAgentRun } from "../lib/server/agent-runtime-client";
 
 const getIncidentMock = getIncident as unknown as ReturnType<typeof vi.fn>;
 const transitionIncidentStatusMock = transitionIncidentStatus as unknown as ReturnType<typeof vi.fn>;
 const createAgentRunMock = createAgentRun as unknown as ReturnType<typeof vi.fn>;
+const getSessionMock = auth.api.getSession as unknown as ReturnType<typeof vi.fn>;
+const getActiveMemberMock = auth.api.getActiveMember as unknown as ReturnType<typeof vi.fn>;
+
+const ACTOR_USER_ID = "88888888-8888-8888-8888-888888888888";
+const ACTOR_ORG_ID = "99999999-9999-9999-9999-999999999999";
+
+function mockAuthenticatedActor(role = "OWNER") {
+  getSessionMock.mockResolvedValue({
+    user: { id: ACTOR_USER_ID },
+    session: { activeOrganizationId: ACTOR_ORG_ID },
+  });
+  getActiveMemberMock.mockResolvedValue({
+    id: "member-1",
+    userId: ACTOR_USER_ID,
+    organizationId: ACTOR_ORG_ID,
+    role,
+  });
+}
+
+function mockNoSession() {
+  getSessionMock.mockResolvedValue(null);
+}
+
+function mockRevokedMember() {
+  getSessionMock.mockResolvedValue({
+    user: { id: ACTOR_USER_ID },
+    session: { activeOrganizationId: ACTOR_ORG_ID },
+  });
+  getActiveMemberMock.mockRejectedValue(
+    APIError.from("BAD_REQUEST", { code: "MEMBER_NOT_FOUND", message: "Member not found" }),
+  );
+}
 
 const INCIDENT_ID = "11111111-1111-1111-1111-111111111111";
 const RUN_ID = "33333333-3333-3333-3333-333333333333";
@@ -76,6 +119,7 @@ function callRoute(origin: string | null = TRUSTED_ORIGIN) {
 
 beforeEach(() => {
   vi.stubEnv("WEB_CONSOLE_TRUSTED_ORIGIN", TRUSTED_ORIGIN);
+  mockAuthenticatedActor();
 });
 
 afterEach(() => {
@@ -94,9 +138,9 @@ describe("POST /api/incidents/[incidentId]/investigations", () => {
 
     expect(response.status).toBe(201);
     expect(body).toEqual({ run_id: RUN_ID, incident_id: INCIDENT_ID });
-    expect(transitionIncidentStatusMock).toHaveBeenCalledWith(INCIDENT_ID, "open", "investigating");
+    expect(transitionIncidentStatusMock).toHaveBeenCalledWith(INCIDENT_ID, "open", "investigating", expect.any(String));
     expect(createAgentRunMock).toHaveBeenCalledTimes(1);
-    expect(createAgentRunMock).toHaveBeenCalledWith(INCIDENT_ID);
+    expect(createAgentRunMock).toHaveBeenCalledWith(INCIDENT_ID, expect.any(String));
   });
 
   it("8. acknowledged incident: PATCHes acknowledged->investigating, creates a run", async () => {
@@ -107,7 +151,12 @@ describe("POST /api/incidents/[incidentId]/investigations", () => {
     const response = await callRoute();
 
     expect(response.status).toBe(201);
-    expect(transitionIncidentStatusMock).toHaveBeenCalledWith(INCIDENT_ID, "acknowledged", "investigating");
+    expect(transitionIncidentStatusMock).toHaveBeenCalledWith(
+      INCIDENT_ID,
+      "acknowledged",
+      "investigating",
+      expect.any(String),
+    );
     expect(createAgentRunMock).toHaveBeenCalledTimes(1);
   });
 
@@ -162,7 +211,7 @@ describe("POST /api/incidents/[incidentId]/investigations", () => {
     // Exactly one PATCH call (the forward transition) -- never a
     // second call attempting to roll the incident back to "open".
     expect(transitionIncidentStatusMock).toHaveBeenCalledTimes(1);
-    expect(transitionIncidentStatusMock).toHaveBeenCalledWith(INCIDENT_ID, "open", "investigating");
+    expect(transitionIncidentStatusMock).toHaveBeenCalledWith(INCIDENT_ID, "open", "investigating", expect.any(String));
   });
 
   it("13. create-run network/ambiguous failure: no second create-run attempt", async () => {
@@ -264,6 +313,33 @@ describe("POST /api/incidents/[incidentId]/investigations", () => {
 
       expect(response.status).toBe(201);
       expect(getIncidentMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("real actor resolution (Phase 14 Gate 9/Blocker 1)", () => {
+    it("no session at all -> 401, before any backend call", async () => {
+      mockNoSession();
+
+      const response = await callRoute();
+      const body = await response.json();
+
+      expect(response.status).toBe(401);
+      expect(body.error).toBe("unauthorized");
+      expect(getIncidentMock).not.toHaveBeenCalled();
+      expect(createAgentRunMock).not.toHaveBeenCalled();
+    });
+
+    it("a revoked/removed member's still-valid session cannot start an investigation -- 401, no mutation", async () => {
+      mockRevokedMember();
+
+      const response = await callRoute();
+      const body = await response.json();
+
+      expect(response.status).toBe(401);
+      expect(body.error).toBe("unauthorized");
+      expect(getIncidentMock).not.toHaveBeenCalled();
+      expect(transitionIncidentStatusMock).not.toHaveBeenCalled();
+      expect(createAgentRunMock).not.toHaveBeenCalled();
     });
   });
 });

@@ -199,6 +199,28 @@ class InvestigatorSettings:
 
 
 @dataclass(frozen=True)
+class InternalReadTokenSettings:
+    """Phase 14 correction round, Issue 3: this service's own
+    distinct, bounded internal-service-read identity, presented to
+    control-plane (and, for run_investigation, re-derived into a
+    SEPARATE assertion forwarded to investigator-service -- see
+    graph/nodes.py) -- never usable as a human-approval credential.
+    Mirrors control_plane.core.config.InternalServiceReadTokenSettings'
+    own agent_runtime_token exactly (same literal value on both
+    services)."""
+
+    control_plane_token: str
+    investigator_token: str
+
+    @classmethod
+    def from_env(cls) -> "InternalReadTokenSettings":
+        return cls(
+            control_plane_token=os.environ.get("CONTROL_PLANE_INTERNAL_READ_TOKEN_AGENT_RUNTIME", ""),
+            investigator_token=os.environ.get("INVESTIGATOR_INTERNAL_READ_TOKEN_AGENT_RUNTIME", ""),
+        )
+
+
+@dataclass(frozen=True)
 class RemediationSettings:
     """Phase 8: the ONE remediation credential this service holds for
     control-plane -- CONTROL_PLANE_REMEDIATION_PROPOSAL_TOKEN. Never
@@ -244,6 +266,63 @@ class ToolGatewaySettings:
             # longer bound than a plain GET, matching the generous margin
             # InvestigatorSettings already gives a real LLM call.
             request_timeout_seconds=_float_env("AGENT_RUNTIME_TOOL_GATEWAY_TIMEOUT_SECONDS", 30.0),
+        )
+
+
+@dataclass(frozen=True)
+class OrganizationContextSettings:
+    """Phase 14: mirrors control_plane.core.config.OrganizationContextSettings
+    exactly -- the SAME environment variable
+    (CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT), so both services are
+    always enabled/disabled together, never independently (a mismatch
+    would mean this service trusts a run as tenant-scoped while
+    control-plane still treats it as unscoped, or vice versa)."""
+
+    enabled: bool
+
+    @classmethod
+    def from_env(cls) -> "OrganizationContextSettings":
+        raw = os.environ.get("CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT", "false")
+        return cls(enabled=raw.strip().lower() in ("1", "true", "yes", "on"))
+
+
+@dataclass(frozen=True)
+class ServiceAssertionSettings:
+    """Phase 14: mirrors control_plane.core.config.ServiceAssertionSettings
+    exactly -- verifies the SAME signed assertion web-console's BFF
+    minted for control-plane, using the SAME shared HS256 secret
+    (SERVICE_ASSERTION_SIGNING_SECRET) and the SAME pinned issuer. The
+    audience is deliberately DIFFERENT from control-plane's
+    (SERVICE_ASSERTION_AUDIENCE_AGENT_RUNTIME, defaulting to
+    "agent-runtime-service") -- an assertion minted for one backend
+    must not be replayable against the other; the BFF mints a separate
+    assertion per downstream call with the matching audience."""
+
+    secret: str | None
+    issuer: str
+    audience: str
+    max_clock_skew_seconds: float
+    # Phase 14 correction round, Blocker 1: the audiences THIS service
+    # mints its own DERIVED assertions for, when relaying an
+    # already-verified actor onward -- never the audience it verifies
+    # INCOMING assertions against (that's `audience`, above, fixed to
+    # this service's own identity). Mirrors control-plane's/
+    # investigator-service's own `SERVICE_ASSERTION_AUDIENCE` default
+    # exactly, so a derived assertion lands on the SAME audience value
+    # the receiving service already expects of a directly-minted one.
+    control_plane_audience: str
+    investigator_audience: str
+
+    @classmethod
+    def from_env(cls) -> "ServiceAssertionSettings":
+        raw = os.environ.get("SERVICE_ASSERTION_SIGNING_SECRET", "")
+        return cls(
+            secret=raw if raw.strip() else None,
+            issuer=os.environ.get("SERVICE_ASSERTION_ISSUER", "web-console"),
+            audience=os.environ.get("SERVICE_ASSERTION_AUDIENCE_AGENT_RUNTIME", "agent-runtime-service"),
+            max_clock_skew_seconds=_float_env("SERVICE_ASSERTION_MAX_CLOCK_SKEW_SECONDS", 30.0),
+            control_plane_audience=os.environ.get("SERVICE_ASSERTION_AUDIENCE_CONTROL_PLANE", "control-plane"),
+            investigator_audience=os.environ.get("SERVICE_ASSERTION_AUDIENCE_INVESTIGATOR", "investigator-service"),
         )
 
 

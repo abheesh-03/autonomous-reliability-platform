@@ -25,6 +25,13 @@ class Incident(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    # Phase 14: see database/migrations/V10__add_organization_scoping.sql.
+    # Every row (including every pre-Phase-14 row, backfilled to the
+    # fixed legacy-org constant -- core/config.py's
+    # LEGACY_LOCAL_DEVELOPMENT_ORGANIZATION_ID) has a real, non-null
+    # organization_id. Exposed here deliberately: a caller legitimately
+    # scoped to this incident's organization is entitled to know it.
+    organization_id: uuid.UUID
     source: str
     source_fingerprint: str
     title: str

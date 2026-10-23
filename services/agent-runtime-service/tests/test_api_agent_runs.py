@@ -20,7 +20,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from agent_runtime_service.api.agent_runs import router as agent_runs_router
 from agent_runtime_service.clients.control_plane import ControlPlaneUnavailableError
 from agent_runtime_service.clients.investigator import InvestigatorUnavailableError
-from agent_runtime_service.config import RuntimeBounds
+from agent_runtime_service.config import OrganizationContextSettings, RuntimeBounds, ServiceAssertionSettings
 from agent_runtime_service.domain.incident_snapshot import IncidentSnapshot
 from agent_runtime_service.domain.investigation import InvestigationReport
 from agent_runtime_service.graph.build import compile_graph
@@ -75,6 +75,14 @@ def _build_app(control_plane=None, investigator=None) -> FastAPI:
     # real pending interrupt at all) but required for the app to be
     # constructed the same shape the real main.py builds it.
     app.state.control_plane_client = control_plane
+    # Phase 14: disabled by default, same as the real app's lifespan
+    # would read from an unset CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT
+    # -- every one of these pre-Phase-14 tests exercises the
+    # unauthenticated-by-default path unchanged. See
+    # test_api_organization_scoping.py for the enabled path.
+    app.state.organization_context_settings = OrganizationContextSettings(enabled=False)
+    app.state.service_assertion_settings = ServiceAssertionSettings(
+        secret=None, issuer="web-console", audience="agent-runtime-service", max_clock_skew_seconds=30, control_plane_audience="control-plane", investigator_audience="investigator-service")
     return app
 
 

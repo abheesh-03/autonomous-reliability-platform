@@ -24,11 +24,15 @@ from fastapi import APIRouter, Depends
 
 from control_plane.api.auth import require_webhook_token
 from control_plane.api.dependencies import get_incident_repository
+from control_plane.core.authz import require_legacy_ingestion_allowed
 from control_plane.domain.alertmanager_webhook import AlertmanagerWebhookPayload, WebhookAckResponse
 from control_plane.ingestion.service import ingest_alertmanager_webhook
 from control_plane.repositories.incident_repository import IncidentRepository
 
-router = APIRouter(prefix="/internal/v1", dependencies=[Depends(require_webhook_token)])
+router = APIRouter(
+    prefix="/internal/v1",
+    dependencies=[Depends(require_webhook_token), Depends(require_legacy_ingestion_allowed)],
+)
 
 
 @router.post("/alertmanager/webhook", response_model=WebhookAckResponse)

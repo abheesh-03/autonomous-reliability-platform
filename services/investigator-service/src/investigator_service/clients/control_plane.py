@@ -15,6 +15,8 @@ import logging
 
 import httpx
 
+from investigator_service.authz import current_actor, sign_derivative_assertion
+from investigator_service.config import ServiceAssertionSettings
 from investigator_service.domain.incident_snapshot import IncidentEventSnapshot, IncidentSnapshot
 
 logger = logging.getLogger("investigator_service.control_plane")
@@ -35,6 +37,8 @@ class ControlPlaneClient:
         connect_timeout: float,
         request_timeout: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        internal_read_token: str = "",
+        service_assertion_settings: ServiceAssertionSettings | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = httpx.Timeout(request_timeout, connect=connect_timeout)
@@ -42,12 +46,36 @@ class ControlPlaneClient:
         # httpx.MockTransport here to simulate control-plane's real
         # HTTP responses without any network call.
         self._transport = transport
+        # Phase 14 correction round, Issue 3: this service's own
+        # distinct internal-read identity
+        # (CONTROL_PLANE_INTERNAL_READ_TOKEN_INVESTIGATOR) -- only
+        # actually required by control-plane once
+        # CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT is enabled. Kept
+        # as the fallback for legacy/local-dev callers that never
+        # relay an actor at all (see _internal_headers, below).
+        self._internal_read_token = internal_read_token
+        # Phase 14 correction round, Blocker 1: when a relayed actor is
+        # bound for the current request (authz.bind_actor, set by
+        # api/investigations.py), every GET below relays a FRESH,
+        # further-derived assertion naming that EXACT actor instead --
+        # control-plane's own incident/evidence routes no longer accept
+        # the bare internal token above at all.
+        self._service_assertion_settings = service_assertion_settings
+
+    def _internal_headers(self) -> dict[str, str]:
+        actor = current_actor()
+        if actor is not None and self._service_assertion_settings is not None:
+            token = sign_derivative_assertion(
+                actor, self._service_assertion_settings, audience=self._service_assertion_settings.control_plane_audience
+            )
+            return {"X-Service-Assertion": token}
+        return {"X-Internal-Service-Token": self._internal_read_token} if self._internal_read_token else {}
 
     async def get_incident(self, incident_id: str) -> IncidentSnapshot:
         url = f"{self._base_url}/api/v1/incidents/{incident_id}"
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                resp = await client.get(url)
+                resp = await client.get(url, headers=self._internal_headers())
         except httpx.HTTPError as exc:
             raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
 
@@ -77,7 +105,7 @@ class ControlPlaneClient:
         url = f"{self._base_url}/api/v1/incidents/{incident_id}/kubernetes-evidence"
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                resp = await client.get(url)
+                resp = await client.get(url, headers=self._internal_headers())
         except httpx.HTTPError as exc:
             raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
 
@@ -100,7 +128,7 @@ class ControlPlaneClient:
         url = f"{self._base_url}/api/v1/incidents/{incident_id}/aws-evidence"
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                resp = await client.get(url)
+                resp = await client.get(url, headers=self._internal_headers())
         except httpx.HTTPError as exc:
             raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
 
@@ -130,7 +158,7 @@ class ControlPlaneClient:
             url = f"{self._base_url}/api/v1/incidents/{incident_id}/events"
             try:
                 async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                    resp = await client.get(url, params={"limit": page_size, "offset": offset})
+                    resp = await client.get(url, params={"limit": page_size, "offset": offset}, headers=self._internal_headers())
             except httpx.HTTPError as exc:
                 raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
 

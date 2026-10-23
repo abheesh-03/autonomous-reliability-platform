@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { backendErrorResponse } from "../../../../../lib/server/bff-error-response";
 import { decideRemediationProposal, getRemediationProposal } from "../../../../../lib/server/control-plane-client";
 import { rejectCrossOriginMutation } from "../../../../../lib/server/origin-guard";
+import { requireActorOrUnauthorized, signAssertion } from "../../../../../lib/server/actor";
 
 // Gate C's one new mutation boundary: records a human/operator
 // decision on an ALREADY-DURABLE remediation proposal. This route
@@ -42,6 +43,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
   const originRejection = rejectCrossOriginMutation(request);
   if (originRejection) return originRejection;
 
+  // Phase 14 Gate 7 (security-critical): CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN
+  // (still attached by decideRemediationProposal below, unchanged)
+  // alone is no longer treated as sufficient by THIS BFF either -- a
+  // real, currently-authenticated actor is required before this route
+  // even attempts the decision call, and that actor's own signed
+  // assertion is forwarded so control-plane can independently verify
+  // their role/organization against the proposal's owning incident.
+  const actorCheck = await requireActorOrUnauthorized();
+  if (!actorCheck.ok) return actorCheck.response;
+  const controlPlaneToken = await signAssertion(actorCheck.actor, "control-plane");
+
   const { proposalId } = await params;
 
   if (!UUID_PATTERN.test(proposalId)) {
@@ -54,7 +66,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     return backendErrorResponse("validation", "The decision request was rejected as invalid.");
   }
 
-  const proposalResult = await getRemediationProposal(proposalId);
+  const proposalResult = await getRemediationProposal(proposalId, controlPlaneToken);
   if (!proposalResult.ok) {
     return backendErrorResponse(proposalResult.error.kind);
   }
@@ -64,6 +76,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     proposalResult.data.status,
     body.decision,
     body.comment,
+    controlPlaneToken,
   );
   if (!decisionResult.ok) {
     return backendErrorResponse(decisionResult.error.kind);

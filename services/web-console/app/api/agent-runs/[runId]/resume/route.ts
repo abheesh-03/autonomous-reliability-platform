@@ -3,6 +3,7 @@ import { getAgentRun, resumeAgentRun } from "../../../../../lib/server/agent-run
 import { backendErrorResponse } from "../../../../../lib/server/bff-error-response";
 import { getRemediationProposal } from "../../../../../lib/server/control-plane-client";
 import { rejectCrossOriginMutation } from "../../../../../lib/server/origin-guard";
+import { requireActorOrUnauthorized, signAssertion } from "../../../../../lib/server/actor";
 
 // Gate B's mutation boundary: executes/continues an ALREADY-DURABLE
 // AgentRun. This is a SEPARATE HTTP request from Stage 4's own
@@ -27,13 +28,21 @@ export async function POST(request: Request, { params }: { params: Promise<{ run
   const originRejection = rejectCrossOriginMutation(request);
   if (originRejection) return originRejection;
 
+  // Phase 14 Gate 5/7: a real, currently-authenticated actor is
+  // required for every mutation this console's BFF performs -- never
+  // just the existing origin/CSRF guard above.
+  const actorCheck = await requireActorOrUnauthorized();
+  if (!actorCheck.ok) return actorCheck.response;
+  const controlPlaneToken = await signAssertion(actorCheck.actor, "control-plane");
+  const agentRuntimeToken = await signAssertion(actorCheck.actor, "agent-runtime-service");
+
   const { runId } = await params;
 
   if (!UUID_PATTERN.test(runId)) {
     return backendErrorResponse("validation");
   }
 
-  const agentRunResult = await getAgentRun(runId);
+  const agentRunResult = await getAgentRun(runId, agentRuntimeToken);
   if (!agentRunResult.ok) {
     return backendErrorResponse(agentRunResult.error.kind);
   }
@@ -55,7 +64,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ run
     // ever disagrees with this pre-check, the backend's own 409 is
     // still the final word; this is an optimization, not the only
     // safety net.)
-    const proposalResult = await getRemediationProposal(agentRun.remediation_proposal_id);
+    const proposalResult = await getRemediationProposal(agentRun.remediation_proposal_id, controlPlaneToken);
     if (!proposalResult.ok) {
       return backendErrorResponse(proposalResult.error.kind);
     }
@@ -64,7 +73,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ run
     }
   }
 
-  const resumeResult = await resumeAgentRun(runId);
+  const resumeResult = await resumeAgentRun(runId, agentRuntimeToken);
   if (!resumeResult.ok) {
     return backendErrorResponse(resumeResult.error.kind);
   }

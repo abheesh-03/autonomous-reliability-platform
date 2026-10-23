@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from control_plane.api.auth import require_lifecycle_token
 from control_plane.api.dependencies import get_incident_repository
+from control_plane.core.authz import ActorContext, get_actor_context, require_same_organization
 from control_plane.domain.incident import (
     VALID_SEVERITIES,
     VALID_STATUSES,
@@ -40,6 +41,7 @@ router = APIRouter(prefix="/api/v1")
 @router.get("/incidents", response_model=IncidentListResponse)
 async def list_incidents(
     repo: Annotated[IncidentRepository, Depends(get_incident_repository)],
+    actor: Annotated[ActorContext | None, Depends(get_actor_context)],
     status: Annotated[str | None, Query(description="Filter by incident status")] = None,
     severity: Annotated[str | None, Query(description="Filter by incident severity")] = None,
     source: Annotated[str | None, Query(description="Filter by originating monitoring system")] = None,
@@ -57,8 +59,21 @@ async def list_incidents(
     if severity is not None and severity not in VALID_SEVERITIES:
         raise HTTPException(status_code=422, detail=f"invalid severity filter: {severity!r}")
 
+    # Phase 14 Gate 5: when organization-context enforcement is on,
+    # `actor` is guaranteed non-None here (get_actor_context raises 401
+    # itself otherwise) -- the filter is applied INSIDE the repository
+    # query, never after fetching unscoped rows. Phase 14 correction
+    # round, Blocker 1: there is no internal-service bypass here at
+    # all anymore -- `actor` is always a real, verified ActorContext
+    # (human, or an internal service relaying one) or None.
+    organization_filter = actor.organization_id if actor is not None else None
     rows, total = await repo.list_incidents(
-        status=status, severity=severity, source=source, limit=limit, offset=offset
+        status=status,
+        severity=severity,
+        source=source,
+        limit=limit,
+        offset=offset,
+        organization_id=organization_filter,
     )
     return IncidentListResponse(
         items=[Incident.model_validate(dict(row)) for row in rows],
@@ -72,12 +87,19 @@ async def list_incidents(
 async def get_incident(
     incident_id: uuid.UUID,
     repo: Annotated[IncidentRepository, Depends(get_incident_repository)],
+    actor: Annotated[ActorContext | None, Depends(get_actor_context)],
 ) -> Incident:
     # `incident_id: uuid.UUID` on the path parameter makes FastAPI
     # reject a malformed UUID with 422 before this body ever runs.
     row = await repo.get_by_id(incident_id)
     if row is None:
         raise HTTPException(status_code=404, detail="incident not found")
+    # Gate 5's object-specific pattern: (1) resolve the resource above,
+    # (2)/(3) validate its actual tenant against the real actor below.
+    # A cross-tenant lookup of a KNOWN valid UUID gets the exact same
+    # 404 as a nonexistent one -- never a 403 that would confirm the
+    # resource exists in another organization.
+    require_same_organization(actor, row["organization_id"])
     return Incident.model_validate(dict(row))
 
 
@@ -85,28 +107,33 @@ async def get_incident(
 async def list_incident_events(
     incident_id: uuid.UUID,
     repo: Annotated[IncidentRepository, Depends(get_incident_repository)],
+    actor: Annotated[ActorContext | None, Depends(get_actor_context)],
     limit: Annotated[int, Query(ge=1, le=100, description="Page size")] = 20,
     offset: Annotated[int, Query(ge=0, description="Number of records to skip")] = 0,
 ) -> IncidentEventListResponse:
     """Phase 3E: the incident's full, append-only audit timeline —
     every accepted creation, observation, and status transition,
-    oldest first. Read-only, unauthenticated, same local-development
-    policy as every other GET route in this module (see
-    docs/architecture/phase-3e-incident-audit.md). Not a generic
-    incident-editing API: there is no corresponding write endpoint
-    here or anywhere else — events are only ever written as a direct
-    consequence of an accepted mutation elsewhere in this module or
-    ingestion/service.py (see repositories/incident_repository.py).
+    oldest first. Read-only, same local-development policy as every
+    other GET route in this module when organization-context
+    enforcement is disabled (see
+    docs/architecture/phase-3e-incident-audit.md); tenant-scoped (Phase
+    14 Gate 8: "Protect... investigation reports; evidence references")
+    when it is enabled. Not a generic incident-editing API: there is no
+    corresponding write endpoint here or anywhere else — events are
+    only ever written as a direct consequence of an accepted mutation
+    elsewhere in this module or ingestion/service.py (see
+    repositories/incident_repository.py).
 
     An incident that exists but has no recorded history yet (e.g. a
     pre-Phase-3E incident, or one that has only ever been read) is a
     genuine 200 with an empty `items` list — never fabricated, and
     never conflated with 404 (which means the incident itself does not
-    exist).
+    exist, or belongs to a different organization).
     """
     incident = await repo.get_by_id(incident_id)
     if incident is None:
         raise HTTPException(status_code=404, detail="incident not found")
+    require_same_organization(actor, incident["organization_id"])
 
     rows, total = await repo.get_incident_events(incident_id, limit=limit, offset=offset)
     return IncidentEventListResponse(
@@ -126,6 +153,7 @@ async def transition_incident_status(
     incident_id: uuid.UUID,
     body: IncidentStatusTransitionRequest,
     repo: Annotated[IncidentRepository, Depends(get_incident_repository)],
+    actor: Annotated[ActorContext | None, Depends(get_actor_context)],
 ) -> Incident:
     """Explicit, validated incident lifecycle transitions — see
     domain/lifecycle.py for the full state machine. `expected_status`
@@ -136,6 +164,17 @@ async def transition_incident_status(
     """
     expected = body.expected_status
     target = body.target_status
+
+    # Phase 14 Gate 5: this endpoint already requires
+    # CONTROL_PLANE_LIFECYCLE_TOKEN (see the route decorator above);
+    # when organization-context enforcement is ALSO on, the actor's
+    # own organization must additionally own this incident -- defense
+    # in depth, neither check alone is relaxed by the other.
+    if actor is not None:
+        existing_for_tenant_check = await repo.get_by_id(incident_id)
+        if existing_for_tenant_check is None:
+            raise HTTPException(status_code=404, detail="incident not found")
+        require_same_organization(actor, existing_for_tenant_check["organization_id"])
 
     if expected == target:
         # Documented no-op (domain/lifecycle.py's module docstring):

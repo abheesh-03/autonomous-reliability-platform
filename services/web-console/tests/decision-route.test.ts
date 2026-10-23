@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { APIError } from "better-auth";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fail, ok } from "../lib/server/http";
 
@@ -10,12 +11,61 @@ vi.mock("../lib/server/control-plane-client", () => ({
   decideRemediationProposal: vi.fn(),
   getRemediationProposal: vi.fn(),
 }));
+// Phase 14 correction round: only the Next.js/Better-Auth PLUMBING is
+// mocked here -- lib/server/actor.ts's own resolveActor/
+// requireActorOrUnauthorized run for REAL against these, so a test
+// simulating "no session" or "a revoked member" exercises the actual
+// authorization decision, not a stubbed-out tautology.
+vi.mock("next/headers", () => ({
+  headers: vi.fn(async () => new Headers()),
+}));
+vi.mock("@/lib/auth/auth", () => ({
+  auth: { api: { getSession: vi.fn(), getActiveMember: vi.fn() } },
+}));
 
 import { POST } from "../app/api/remediation-proposals/[proposalId]/decision/route";
+import { auth } from "@/lib/auth/auth";
 import { decideRemediationProposal, getRemediationProposal } from "../lib/server/control-plane-client";
 
 const getRemediationProposalMock = getRemediationProposal as unknown as ReturnType<typeof vi.fn>;
 const decideRemediationProposalMock = decideRemediationProposal as unknown as ReturnType<typeof vi.fn>;
+const getSessionMock = auth.api.getSession as unknown as ReturnType<typeof vi.fn>;
+const getActiveMemberMock = auth.api.getActiveMember as unknown as ReturnType<typeof vi.fn>;
+
+const ACTOR_USER_ID = "88888888-8888-8888-8888-888888888888";
+const ACTOR_ORG_ID = "99999999-9999-9999-9999-999999999999";
+
+function mockAuthenticatedActor(role = "OWNER") {
+  getSessionMock.mockResolvedValue({
+    user: { id: ACTOR_USER_ID },
+    session: { activeOrganizationId: ACTOR_ORG_ID },
+  });
+  getActiveMemberMock.mockResolvedValue({
+    id: "member-1",
+    userId: ACTOR_USER_ID,
+    organizationId: ACTOR_ORG_ID,
+    role,
+  });
+}
+
+function mockNoSession() {
+  getSessionMock.mockResolvedValue(null);
+}
+
+function mockRevokedMember() {
+  getSessionMock.mockResolvedValue({
+    user: { id: ACTOR_USER_ID },
+    session: { activeOrganizationId: ACTOR_ORG_ID },
+  });
+  // Mirrors the REAL better-auth behavior this module's own
+  // getActiveMemberOrNull wrapper (lib/server/actor.ts) is specifically
+  // written to handle: getActiveMember THROWS, it does not resolve to
+  // a falsy value, when the caller has no active-organization
+  // membership any more.
+  getActiveMemberMock.mockRejectedValue(
+    APIError.from("BAD_REQUEST", { code: "MEMBER_NOT_FOUND", message: "Member not found" }),
+  );
+}
 
 const PROPOSAL_ID = "44444444-4444-4444-4444-444444444444";
 const INCIDENT_ID = "22222222-2222-2222-2222-222222222222";
@@ -59,6 +109,11 @@ function callRoute(body: unknown, origin: string | null = TRUSTED_ORIGIN) {
 
 beforeEach(() => {
   vi.stubEnv("WEB_CONSOLE_TRUSTED_ORIGIN", TRUSTED_ORIGIN);
+  // Every pre-existing test below already assumes a real, resolvable
+  // actor (that was true even before Phase 14 added the auth gate to
+  // this route) -- the dedicated auth tests further down override this
+  // explicitly to exercise the actual unauthenticated/revoked paths.
+  mockAuthenticatedActor();
 });
 
 afterEach(() => {
@@ -78,7 +133,13 @@ describe("POST /api/remediation-proposals/[proposalId]/decision", () => {
 
     expect(response.status).toBe(200);
     expect(decideRemediationProposalMock).toHaveBeenCalledTimes(1);
-    expect(decideRemediationProposalMock).toHaveBeenCalledWith(PROPOSAL_ID, "pending_approval", "approve", "looks safe");
+    expect(decideRemediationProposalMock).toHaveBeenCalledWith(
+      PROPOSAL_ID,
+      "pending_approval",
+      "approve",
+      "looks safe",
+      expect.any(String),
+    );
     expect(body).toEqual({
       id: PROPOSAL_ID,
       status: "approved",
@@ -95,7 +156,13 @@ describe("POST /api/remediation-proposals/[proposalId]/decision", () => {
     const response = await callRoute({ decision: "reject" });
 
     expect(response.status).toBe(200);
-    expect(decideRemediationProposalMock).toHaveBeenCalledWith(PROPOSAL_ID, "pending_approval", "reject", undefined);
+    expect(decideRemediationProposalMock).toHaveBeenCalledWith(
+      PROPOSAL_ID,
+      "pending_approval",
+      "reject",
+      undefined,
+      expect.any(String),
+    );
   });
 
   it("a stale/illegal transition reported by the backend is a safe conflict, never retried", async () => {
@@ -148,7 +215,13 @@ describe("POST /api/remediation-proposals/[proposalId]/decision", () => {
     // The call always uses the server's OWN fresh read ("pending_approval"
     // from the mock above), never the attacker/stale-client-controlled
     // "executing" value that was smuggled into the request body.
-    expect(decideRemediationProposalMock).toHaveBeenCalledWith(PROPOSAL_ID, "pending_approval", "approve", undefined);
+    expect(decideRemediationProposalMock).toHaveBeenCalledWith(
+      PROPOSAL_ID,
+      "pending_approval",
+      "approve",
+      undefined,
+      expect.any(String),
+    );
   });
 
   it("rejects a malformed proposal identifier before any backend call", async () => {
@@ -238,6 +311,44 @@ describe("POST /api/remediation-proposals/[proposalId]/decision", () => {
       const response = await callRoute({ decision: "approve" }, TRUSTED_ORIGIN);
 
       expect(response.status).toBe(200);
+      expect(decideRemediationProposalMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("real actor resolution (Phase 14 Gate 9/Blocker 1)", () => {
+    it("no session at all -> 401, before any backend call", async () => {
+      mockNoSession();
+
+      const response = await callRoute({ decision: "approve" });
+      const body = await response.json();
+
+      expect(response.status).toBe(401);
+      expect(body.error).toBe("unauthorized");
+      expect(getRemediationProposalMock).not.toHaveBeenCalled();
+      expect(decideRemediationProposalMock).not.toHaveBeenCalled();
+    });
+
+    it("a revoked/removed member's still-valid session cannot decide anything -- 401, no mutation", async () => {
+      mockRevokedMember();
+
+      const response = await callRoute({ decision: "approve" });
+      const body = await response.json();
+
+      expect(response.status).toBe(401);
+      expect(body.error).toBe("unauthorized");
+      expect(getRemediationProposalMock).not.toHaveBeenCalled();
+      expect(decideRemediationProposalMock).not.toHaveBeenCalled();
+    });
+
+    it("a real, resolvable actor forwards a signed assertion that genuinely reaches the backend call", async () => {
+      mockAuthenticatedActor();
+      getRemediationProposalMock.mockResolvedValue(ok(proposalWith({ status: "pending_approval" })));
+      decideRemediationProposalMock.mockResolvedValue(ok(proposalWith({ status: "approved" })));
+
+      const response = await callRoute({ decision: "approve" });
+
+      expect(response.status).toBe(200);
+      expect(getActiveMemberMock).toHaveBeenCalled();
       expect(decideRemediationProposalMock).toHaveBeenCalledTimes(1);
     });
   });

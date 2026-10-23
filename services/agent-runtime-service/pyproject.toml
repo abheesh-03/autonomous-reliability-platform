@@ -23,6 +23,10 @@ dependencies = [
     "langgraph-checkpoint==4.3.0",
     "langgraph-checkpoint-postgres==3.2.0",
     "psycopg[binary,pool]==3.3.6",
+    # Phase 14: verifies the signed service assertion web-console's BFF
+    # mints for this service (authz.py) -- same mature library
+    # control-plane uses, never homegrown signature verification.
+    "pyjwt==2.10.1",
 ]
 
 [project.optional-dependencies]

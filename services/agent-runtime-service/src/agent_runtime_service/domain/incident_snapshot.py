@@ -30,6 +30,11 @@ class IncidentSnapshot(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: uuid.UUID
+    # Phase 14: see control_plane/domain/incident.py. Required (not
+    # Optional) -- control-plane always returns a real, non-null value
+    # for every incident, including every pre-Phase-14 row (backfilled
+    # to the fixed legacy-org constant).
+    organization_id: uuid.UUID
     source: str
     source_fingerprint: str
     title: str

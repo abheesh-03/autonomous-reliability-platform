@@ -6,23 +6,85 @@ retrieval/UUID handling and FULL audit-event pagination, per Phase 5
 import json
 
 import httpx
+import jwt
 import pytest
 
+from investigator_service.authz import ActorContext, bind_actor
 from investigator_service.clients.control_plane import (
     ControlPlaneClient,
     ControlPlaneUnavailableError,
     IncidentNotFoundError,
 )
+from investigator_service.config import ServiceAssertionSettings
 from tests.conftest import SAMPLE_INCIDENT_ID, event_json, incident_json
 
 
-def _client(handler) -> ControlPlaneClient:
+def _client(handler, **kwargs) -> ControlPlaneClient:
     return ControlPlaneClient(
         "http://control-plane.invalid",
         connect_timeout=1.0,
         request_timeout=1.0,
         transport=httpx.MockTransport(handler),
+        **kwargs,
     )
+
+
+# ---------------------------------------------------------------------
+# Phase 14 correction round, Blocker 1: when a relayed actor is bound,
+# this client must relay a FURTHER-derived X-Service-Assertion naming
+# that exact actor, not the bare internal token control-plane's own
+# incident/evidence routes no longer accept at all.
+# ---------------------------------------------------------------------
+
+_ASSERTION_SETTINGS = ServiceAssertionSettings(
+    secret="test-shared-assertion-secret",
+    trusted_issuers=frozenset({"agent-runtime-service"}),
+    audience="investigator-service",
+    max_clock_skew_seconds=5,
+    control_plane_audience="control-plane",
+    retrieval_audience="retrieval-service",
+)
+
+
+async def test_a_bound_actor_is_relayed_as_a_further_derived_assertion_not_the_bare_token():
+    seen_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.update(request.headers)
+        return httpx.Response(200, json=incident_json())
+
+    client = _client(handler, internal_read_token="bare-static-token", service_assertion_settings=_ASSERTION_SETTINGS)
+    actor = ActorContext(user_id="user-1", organization_id="11111111-1111-1111-1111-111111111111", role="ENGINEER")
+
+    with bind_actor(actor):
+        await client.get_incident(str(SAMPLE_INCIDENT_ID))
+
+    assert "x-service-assertion" in seen_headers
+    assert "x-internal-service-token" not in seen_headers
+    payload = jwt.decode(
+        seen_headers["x-service-assertion"],
+        _ASSERTION_SETTINGS.secret,
+        algorithms=["HS256"],
+        audience="control-plane",
+    )
+    assert payload["iss"] == "investigator-service"
+    assert payload["sub"] == "user-1"
+    assert payload["org"] == "11111111-1111-1111-1111-111111111111"
+    assert payload["role"] == "ENGINEER"
+
+
+async def test_with_no_bound_actor_the_bare_internal_token_is_sent_as_a_fallback():
+    seen_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.update(request.headers)
+        return httpx.Response(200, json=incident_json())
+
+    client = _client(handler, internal_read_token="bare-static-token", service_assertion_settings=_ASSERTION_SETTINGS)
+    await client.get_incident(str(SAMPLE_INCIDENT_ID))
+
+    assert seen_headers.get("x-internal-service-token") == "bare-static-token"
+    assert "x-service-assertion" not in seen_headers
 
 
 async def test_get_incident_success():

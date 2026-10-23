@@ -42,23 +42,30 @@ def test_resolve_write_tokens_returns_all_unchanged_when_distinct():
         "executor-value",
         "k8s-value",
         "aws-value",
+        None,
+        None,
+        None,
     )
 
 
 def test_resolve_write_tokens_returns_both_none_when_identical():
-    assert resolve_write_tokens("same-value", "same-value") == (None, None, None, None, None, None, None)
+    assert resolve_write_tokens("same-value", "same-value") == (None, None, None, None, None, None, None, None, None, None)
 
 
 def test_resolve_write_tokens_preserves_one_unconfigured_token():
     # Exactly one token being unconfigured (None) must be unaffected —
     # it continues to fail closed only for its own endpoint, same as
     # before this guard existed.
-    assert resolve_write_tokens(None, "lifecycle-value") == (None, "lifecycle-value", None, None, None, None, None)
-    assert resolve_write_tokens("webhook-value", None) == ("webhook-value", None, None, None, None, None, None)
+    assert resolve_write_tokens(None, "lifecycle-value") == (
+        None, "lifecycle-value", None, None, None, None, None, None, None, None,
+    )
+    assert resolve_write_tokens("webhook-value", None) == (
+        "webhook-value", None, None, None, None, None, None, None, None, None,
+    )
 
 
 def test_resolve_write_tokens_both_unconfigured_stays_both_none():
-    assert resolve_write_tokens(None, None) == (None, None, None, None, None, None, None)
+    assert resolve_write_tokens(None, None) == (None, None, None, None, None, None, None, None, None, None)
 
 
 def test_resolve_write_tokens_clears_only_the_colliding_pair():
@@ -66,7 +73,7 @@ def test_resolve_write_tokens_clears_only_the_colliding_pair():
     # actually collide, leaving every other distinct token untouched —
     # never a blanket "any collision anywhere clears everything".
     result = resolve_write_tokens("webhook-value", "lifecycle-value", "same-value", "same-value", "executor-value")
-    assert result == ("webhook-value", "lifecycle-value", None, None, "executor-value", None, None)
+    assert result == ("webhook-value", "lifecycle-value", None, None, "executor-value", None, None, None, None, None)
 
 
 def test_resolve_write_tokens_remediation_tokens_cannot_collide_with_webhook_or_lifecycle():
@@ -74,7 +81,7 @@ def test_resolve_write_tokens_remediation_tokens_cannot_collide_with_webhook_or_
     # webhook/lifecycle token must also fail closed — not just
     # collisions among the three new tokens themselves.
     result = resolve_write_tokens("same-value", "lifecycle-value", "same-value", "approver-value", "executor-value")
-    assert result == (None, "lifecycle-value", None, "approver-value", "executor-value", None, None)
+    assert result == (None, "lifecycle-value", None, "approver-value", "executor-value", None, None, None, None, None)
 
 
 def test_resolve_write_tokens_kubernetes_ingestion_token_cannot_collide_with_any_other():
@@ -85,7 +92,9 @@ def test_resolve_write_tokens_kubernetes_ingestion_token_cannot_collide_with_any
     result = resolve_write_tokens(
         "same-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value", "same-value"
     )
-    assert result == (None, "lifecycle-value", "proposal-value", "approver-value", "executor-value", None, None)
+    assert result == (
+        None, "lifecycle-value", "proposal-value", "approver-value", "executor-value", None, None, None, None, None,
+    )
 
 
 def test_resolve_write_tokens_aws_ingestion_token_cannot_collide_with_any_other():
@@ -100,7 +109,41 @@ def test_resolve_write_tokens_aws_ingestion_token_cannot_collide_with_any_other(
         "webhook-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value",
         "same-value", "same-value",
     )
-    assert result == ("webhook-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value", None, None)
+    assert result == (
+        "webhook-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value",
+        None, None, None, None, None,
+    )
+
+
+def test_resolve_write_tokens_internal_read_tokens_cannot_collide_with_each_other():
+    # Phase 14 correction round, Issue 3: the three NEW internal
+    # read-only service identities join the same pairwise guard.
+    result = resolve_write_tokens(
+        "webhook-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value",
+        "k8s-value", "aws-value",
+        "same-internal-value", "same-internal-value", "tool-gateway-value",
+    )
+    assert result == (
+        "webhook-value", "lifecycle-value", "proposal-value", "approver-value", "executor-value",
+        "k8s-value", "aws-value",
+        None, None, "tool-gateway-value",
+    )
+
+
+def test_resolve_write_tokens_internal_read_token_cannot_collide_with_an_existing_write_token():
+    # An internal read-only credential must never silently double as
+    # the human remediation-approver token (or any other existing
+    # write-capable token) if misconfigured to the same value.
+    result = resolve_write_tokens(
+        "webhook-value", "lifecycle-value", "proposal-value", "same-value", "executor-value",
+        "k8s-value", "aws-value",
+        "same-value", "investigator-value", "tool-gateway-value",
+    )
+    assert result == (
+        "webhook-value", "lifecycle-value", "proposal-value", None, "executor-value",
+        "k8s-value", "aws-value",
+        None, "investigator-value", "tool-gateway-value",
+    )
 
 
 # ---------------------------------------------------------------------

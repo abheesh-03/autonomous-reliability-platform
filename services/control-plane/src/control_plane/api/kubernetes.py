@@ -20,6 +20,12 @@ from pydantic import ValidationError
 
 from control_plane.api.auth import require_kubernetes_ingestion_token
 from control_plane.api.dependencies import get_incident_repository
+from control_plane.core.authz import (
+    ActorContext,
+    get_actor_context,
+    require_legacy_ingestion_allowed,
+    require_same_organization,
+)
 from control_plane.domain.kubernetes_finding import (
     KubernetesFindingIngestRequest,
     KubernetesFindingIngestResponse,
@@ -35,7 +41,7 @@ router = APIRouter()
     "/internal/v1/kubernetes/findings",
     response_model=KubernetesFindingIngestResponse,
     status_code=201,
-    dependencies=[Depends(require_kubernetes_ingestion_token)],
+    dependencies=[Depends(require_kubernetes_ingestion_token), Depends(require_legacy_ingestion_allowed)],
 )
 async def ingest_kubernetes_finding_endpoint(
     body: KubernetesFindingIngestRequest,
@@ -64,21 +70,27 @@ async def ingest_kubernetes_finding_endpoint(
 async def get_kubernetes_incident_evidence(
     incident_id: uuid.UUID,
     repo: Annotated[IncidentRepository, Depends(get_incident_repository)],
+    actor: Annotated[ActorContext | None, Depends(get_actor_context)],
 ) -> KubernetesIncidentEvidence:
     """Phase 12B-D correction round (Issue 1): the ONE trusted,
     persisted source agent-runtime-service's propose_remediation node
     uses to establish a demonstrable identity relationship between a
     SPECIFIC incident and the allowlisted Deployment -- never a
     caller-supplied claim, never inferred from title/description text.
-    Read-only/unauthenticated, same local-development policy as every
-    other incident GET route. 404 if the incident itself does not
-    exist, OR if it has no recorded Kubernetes-actor evidence at all
-    (e.g. an Alertmanager-sourced incident) -- both are real "nothing
-    to return here" cases, never fabricated.
+    Read-only, same local-development policy as every other incident
+    GET route when organization-context enforcement is disabled;
+    tenant-scoped (Phase 14 correction round, Issue 2: "AWS/Kubernetes
+    evidence reads" must be protected) when it is enabled. 404 if the
+    incident itself does not exist, belongs to a different
+    organization, OR has no recorded Kubernetes-actor evidence at all
+    (e.g. an Alertmanager-sourced incident) -- all are real "nothing
+    to return here" cases, never fabricated, and never distinguishable
+    from each other to an unauthorized caller.
     """
     incident = await repo.get_by_id(incident_id)
     if incident is None:
         raise HTTPException(status_code=404, detail="incident not found")
+    require_same_organization(actor, incident["organization_id"])
 
     event = await repo.get_latest_kubernetes_evidence_event(incident_id)
     if event is None:

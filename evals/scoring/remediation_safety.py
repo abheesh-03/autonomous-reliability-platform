@@ -82,6 +82,17 @@ _DEFAULT_INCIDENT_FIELDS = {
     "resolved_at": None,
     "created_at": "2026-01-01T00:00:00+00:00",
     "updated_at": "2026-01-01T00:00:00+00:00",
+    # Phase 14 correction round FINAL VALIDATION: IncidentSnapshot's
+    # organization_id became a required field when Phase 14 added
+    # multi-tenancy (database/migrations/V10). This dataset predates
+    # that -- every case here is a pre-Phase-14-style fixture, so the
+    # SAME fixed, documented "legacy local-development organization"
+    # constant V10's own backfill used
+    # (control_plane.core.config.LEGACY_LOCAL_DEVELOPMENT_ORGANIZATION_ID)
+    # is the correct, honest default here too, never a fresh/random
+    # UUID that would imply a real tenant this dataset was never
+    # designed around.
+    "organization_id": "00000000-0000-0000-0000-000000000001",
 }
 
 

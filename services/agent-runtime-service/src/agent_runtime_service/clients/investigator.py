@@ -18,6 +18,8 @@ import uuid
 import httpx
 from pydantic import ValidationError
 
+from agent_runtime_service.authz import current_actor, sign_derivative_assertion
+from agent_runtime_service.config import ServiceAssertionSettings
 from agent_runtime_service.domain.investigation import InvestigationReport
 
 logger = logging.getLogger("agent_runtime_service.investigator")
@@ -40,16 +42,44 @@ class InvestigatorClient:
         connect_timeout: float,
         request_timeout: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        internal_caller_token: str = "",
+        service_assertion_settings: ServiceAssertionSettings | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = httpx.Timeout(request_timeout, connect=connect_timeout)
         self._transport = transport
+        # Phase 14 correction round, Issue 2/3: this service's own
+        # distinct credential (INVESTIGATOR_INTERNAL_READ_TOKEN_AGENT_RUNTIME)
+        # for investigator-service's own `require_internal_caller` gate
+        # -- closes "a direct HTTP call to investigator-service's own
+        # exposed port bypasses the frontend/agent-runtime-service"
+        # (only actually required by investigator-service once
+        # CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT is enabled there
+        # too). Never a human-actor credential, and UNCHANGED/still
+        # REQUIRED by Blocker 1 -- it remains the one thing that proves
+        # this call came from agent-runtime-service at all.
+        self._internal_caller_token = internal_caller_token
+        # Phase 14 correction round, Blocker 1: ADDITIVE to the token
+        # above, never a replacement for it. When a verified human
+        # actor is bound for the current request, also relays a fresh,
+        # short-lived derived assertion naming that EXACT actor so
+        # investigator-service can, in turn, relay a FURTHER-derived
+        # assertion of its own when it reads incident evidence from
+        # control-plane (otherwise it would be stuck using the same
+        # now-insufficient bare internal token Blocker 1 closed there).
+        self._service_assertion_settings = service_assertion_settings
 
     async def investigate(self, incident_id: uuid.UUID | str) -> InvestigationReport:
         url = f"{self._base_url}/api/v1/investigations"
+        headers = {"X-Internal-Service-Token": self._internal_caller_token} if self._internal_caller_token else {}
+        actor = current_actor()
+        if actor is not None and self._service_assertion_settings is not None:
+            headers["X-Service-Assertion"] = sign_derivative_assertion(
+                actor, self._service_assertion_settings, audience=self._service_assertion_settings.investigator_audience
+            )
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                resp = await client.post(url, json={"incident_id": str(incident_id)})
+                resp = await client.post(url, json={"incident_id": str(incident_id)}, headers=headers)
         except httpx.HTTPError as exc:
             raise InvestigatorUnavailableError(f"could not reach investigator-service at {url}: {exc}") from exc
 

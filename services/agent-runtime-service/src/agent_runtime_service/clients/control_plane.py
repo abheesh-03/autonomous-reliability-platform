@@ -31,6 +31,8 @@ import uuid
 import httpx
 from pydantic import ValidationError
 
+from agent_runtime_service.authz import current_actor, sign_derivative_assertion
+from agent_runtime_service.config import ServiceAssertionSettings
 from agent_runtime_service.domain.incident_snapshot import IncidentSnapshot
 from agent_runtime_service.domain.remediation import KubernetesIncidentEvidence, RemediationProposal
 
@@ -103,6 +105,8 @@ class ControlPlaneClient:
         request_timeout: float,
         transport: httpx.AsyncBaseTransport | None = None,
         remediation_proposal_token: str = "",
+        internal_read_token: str = "",
+        service_assertion_settings: ServiceAssertionSettings | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = httpx.Timeout(request_timeout, connect=connect_timeout)
@@ -113,14 +117,49 @@ class ControlPlaneClient:
         # Phase 8: the ONE remediation credential this service holds --
         # sent ONLY on create_remediation_proposal below, never on any
         # GET (both the incident GET and the proposal GET remain
-        # genuinely unauthenticated/read-only).
+        # genuinely unauthenticated/read-only when organization-context
+        # enforcement is disabled).
         self._remediation_proposal_token = remediation_proposal_token
+        # Phase 14 correction round, Issue 3: this service's own
+        # distinct, bounded "internal read" identity
+        # (CONTROL_PLANE_INTERNAL_READ_TOKEN_AGENT_RUNTIME) -- sent on
+        # every GET below, in its OWN dedicated header
+        # (X-Internal-Service-Token, never Authorization). Only
+        # actually REQUIRED by control-plane once
+        # CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT is enabled; sending
+        # it unconditionally is harmless when it's disabled (control-
+        # plane simply never reads the header in that mode). Never used
+        # for, and never sufficient for, a human-approval decision --
+        # this client has no method that calls the decision endpoint at
+        # all.
+        self._internal_read_token = internal_read_token
+        # Phase 14 correction round, Blocker 1: when the current request
+        # has a verified human actor bound (authz.bind_actor, set at
+        # api/agent_runs.py's own API boundary), every GET below relays
+        # a FRESH, short-lived derived assertion carrying that EXACT
+        # actor instead of the bare static internal token -- control-
+        # plane's own incident/evidence routes no longer accept the
+        # bare token at all (see core/authz.py there). The static token
+        # is sent ONLY as a fallback when no actor is bound at all
+        # (organization-context enforcement disabled -- legacy
+        # local-development mode, where control-plane ignores both
+        # headers on these routes anyway).
+        self._service_assertion_settings = service_assertion_settings
+
+    def _internal_headers(self) -> dict[str, str]:
+        actor = current_actor()
+        if actor is not None and self._service_assertion_settings is not None:
+            token = sign_derivative_assertion(
+                actor, self._service_assertion_settings, audience=self._service_assertion_settings.control_plane_audience
+            )
+            return {"X-Service-Assertion": token}
+        return {"X-Internal-Service-Token": self._internal_read_token} if self._internal_read_token else {}
 
     async def get_incident(self, incident_id: str) -> IncidentSnapshot:
         url = f"{self._base_url}/api/v1/incidents/{incident_id}"
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                resp = await client.get(url)
+                resp = await client.get(url, headers=self._internal_headers())
         except httpx.HTTPError as exc:
             raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
 
@@ -185,13 +224,19 @@ class ControlPlaneClient:
             body["target_cluster"] = target_cluster
         if expected_resource_uid is not None:
             body["expected_resource_uid"] = expected_resource_uid
+        # Phase 14 FINAL MACHINE-IDENTITY TENANT-BOUNDARY FIX, Issue C:
+        # ADDITIVE to the existing proposal-creation Bearer token --
+        # when a verified actor is bound for the current request,
+        # relays a derived assertion naming it, so control-plane can
+        # independently verify this proposal's target incident
+        # actually belongs to that same actor's organization before
+        # creating anything ("prevent a machine credential from
+        # creating... an unrelated tenant's remediation proposal").
+        headers = {"Authorization": f"Bearer {self._remediation_proposal_token}"}
+        headers.update(self._internal_headers())
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                resp = await client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {self._remediation_proposal_token}"},
-                    json=body,
-                )
+                resp = await client.post(url, headers=headers, json=body)
         except httpx.HTTPError as exc:
             raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
 
@@ -247,7 +292,7 @@ class ControlPlaneClient:
         url = f"{self._base_url}/api/v1/incidents/{incident_id}/kubernetes-evidence"
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                resp = await client.get(url)
+                resp = await client.get(url, headers=self._internal_headers())
         except httpx.HTTPError as exc:
             raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
 
@@ -280,7 +325,7 @@ class ControlPlaneClient:
         url = f"{self._base_url}/api/v1/remediation-proposals/{proposal_id}"
         try:
             async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                resp = await client.get(url)
+                resp = await client.get(url, headers=self._internal_headers())
         except httpx.HTTPError as exc:
             raise ControlPlaneUnavailableError(f"could not reach control-plane at {url}: {exc}") from exc
 
