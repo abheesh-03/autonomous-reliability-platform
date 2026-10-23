@@ -297,9 +297,43 @@ jobs:
         working-directory: services/web-console
         run: npm test
 
+      # Post-commit fix (GitHub Actions run #39976783998): lib/auth/auth.ts
+      # constructs its Better Auth instance eagerly at MODULE LOAD time
+      # (`export const auth = betterAuth({ secret: requiredEnv("BETTER_AUTH_SECRET"), ... })`)
+      # -- so `next build`'s route-configuration-collection phase throws
+      # the moment it imports that module graph (every route importing
+      # lib/server/actor.ts, transitively), regardless of whether any
+      # real auth/database operation ever runs. This happens BEFORE
+      # this job's own "Create runtime .env from .env.example" step
+      # further below, so no .env-sourced value is available here yet
+      # -- and must never be, since this step performs no real
+      # database write and needs no PERSISTENT secret at all, only a
+      # value satisfying the constructor's own non-empty check.
+      #
+      # A cryptographically random, ephemeral, build-only value --
+      # generated fresh in this one step's own subshell via Node's
+      # built-in `crypto` module (already guaranteed present; Node was
+      # just set up above, so this adds no new tool dependency the way
+      # shelling out to `openssl` would) -- is scoped to this single
+      # `run:` invocation's process only. It is never exported to
+      # $GITHUB_ENV, never written to any file, never logged (GitHub
+      # Actions never echoes a command-substitution's resolved value,
+      # only the literal command text), never read anywhere else in
+      # this job, and does not appear in any generated .next/ build
+      # artifact (verified directly: this exact value's own session-
+      # signing use never touches a static asset, a NEXT_PUBLIC_
+      # variable, or any rendered component). It is NEVER used for an
+      # actual user session -- the real runtime container
+      # (docker-compose.yml's web-console service, started later in
+      # this job via `make db-up`) reads its own separate,
+      # persistent BETTER_AUTH_SECRET from the real .env file created
+      # by scripts/init-web-console-db.sh, completely independent of
+      # this build-time value.
       - name: Build web-console
         working-directory: services/web-console
-        run: npm run build
+        run: |
+          BETTER_AUTH_SECRET="$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")" \
+            npm run build
 
       # Phase 10: deterministic offline AI evaluation -- deliberately
       # placed HERE, as the fast offline gate BEFORE the expensive
@@ -1285,9 +1319,26 @@ jobs:
       - name: Dump recent incident/audit state on failure
         if: failure()
         run: |
+          # Post-commit fix (GitHub Actions run #39976783998): this
+          # step previously sourced ./.env UNCONDITIONALLY, so a
+          # failure occurring BEFORE the "Create runtime .env from
+          # .env.example" step further up this job (e.g. the
+          # web-console build failure this exact run hit) produced a
+          # SECOND, unrelated, confusing failure here (". ./.env: No
+          # such file or directory") on top of the real one -- never
+          # itself prints .env's contents either way, only sources it
+          # into this step's own shell variables.
+          if [ ! -f ./.env ]; then
+            echo "runtime .env has not been created yet -- the failure occurred before this job's own Compose/runtime initialization steps ran. Skipping incident/audit diagnostics (there is no database to query yet)."
+            exit 0
+          fi
           set -a
           . ./.env
           set +a
+          if [ -z "$(docker compose ps -q postgres 2>/dev/null)" ]; then
+            echo "postgres is not running yet -- the failure occurred before this job's own 'Start Compose environment' step. Skipping incident/audit diagnostics."
+            exit 0
+          fi
           echo "--- reliability.incidents (most recent 20, by created_at desc) ---"
           docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
             SELECT id, source_fingerprint, title, status, first_seen_at, last_seen_at, resolved_at
