@@ -166,6 +166,7 @@ class FakeIncidentRepository:
         occurrence_starts_at,
         actor_type="alertmanager",
         extra_metadata=None,
+        organization_id=None,
     ):
         metadata = {
             "source_fingerprint": source_fingerprint,
@@ -204,7 +205,7 @@ class FakeIncidentRepository:
         self.rows.append(
             {
                 "id": new_id,
-                "organization_id": "00000000-0000-0000-0000-000000000001",
+                "organization_id": str(organization_id) if organization_id is not None else "00000000-0000-0000-0000-000000000001",
                 "source": source,
                 "source_fingerprint": source_fingerprint,
                 "title": title,
@@ -291,7 +292,9 @@ class FakeIncidentRepository:
                 return row
         return None
 
-    async def resolve_active_incident_for_fingerprint(self, incident_id, *, resolved_at):
+    async def resolve_active_incident_for_fingerprint(
+        self, incident_id, *, resolved_at, actor_type="alertmanager", resolution_source="alertmanager_webhook"
+    ):
         for row in self.rows:
             if row["id"] == incident_id:
                 if row["status"] in ("resolved", "closed"):
@@ -303,10 +306,10 @@ class FakeIncidentRepository:
                 self._record_event(
                     incident_id,
                     event_type="status_transition",
-                    actor_type="alertmanager",
+                    actor_type=actor_type,
                     previous_status=previous_status,
                     new_status="resolved",
-                    metadata={"resolution_source": "alertmanager_webhook"},
+                    metadata={"resolution_source": resolution_source},
                 )
                 return row
         return None

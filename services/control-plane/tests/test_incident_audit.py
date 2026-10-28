@@ -72,6 +72,37 @@ def test_firing_alert_records_a_created_event(use_repository, client):
     assert item["incident_id"] == str(incident_id)
 
 
+async def test_otel_telemetry_actor_type_events_serialize_without_error(use_repository, client):
+    """Phase 16 Gate 6 REGRESSION: a real bug found via a real,
+    end-to-end Playwright run (not a mock) -- V15's migration widened
+    reliability.incident_events' own real database CHECK constraint to
+    accept 'otel-telemetry', but domain/incident_event.py's `ActorType`
+    Literal was never widened to match, so GET .../events crashed with
+    a real 500 (a Pydantic ValidationError) the first time a genuinely
+    otel-telemetry-attributed event was ever read back. This exercises
+    the REAL route's own Pydantic response validation (not merely the
+    in-memory fake repository, which cannot by itself catch a
+    model-shape mismatch) -- the exact layer that actually crashed."""
+    repo = use_repository([])
+    incident_id, created = await repo.upsert_firing_incident(
+        source="otel-telemetry",
+        source_fingerprint="service:11111111-1111-1111-1111-111111111111",
+        title="otel-sample-service is returning an elevated error rate",
+        description="80 of 100 requests (80%) returned 5xx.",
+        severity="warning",
+        first_seen_at=datetime.now(UTC),
+        last_seen_at=datetime.now(UTC),
+        occurrence_starts_at=datetime.now(UTC),
+        actor_type="otel-telemetry",
+    )
+    assert created is True
+
+    events_response = client.get(_events_url(incident_id))
+    assert events_response.status_code == 200
+    body = events_response.json()
+    assert body["items"][0]["actor_type"] == "otel-telemetry"
+
+
 def test_repeat_firing_into_active_incident_records_an_observed_event(use_repository, client):
     occurrence_starts_at = datetime.now(UTC) - timedelta(hours=1)
     existing = make_incident_row(

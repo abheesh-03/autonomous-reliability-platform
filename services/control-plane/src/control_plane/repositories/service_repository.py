@@ -76,6 +76,21 @@ class ServiceRepository:
         rows = (await self._session.execute(page_stmt)).mappings().all()
         return rows, total
 
+    async def get_by_id_for_organization(
+        self, organization_id: uuid.UUID | str, service_id: uuid.UUID | str
+    ) -> Mapping | None:
+        """Phase 16 Gate 2: the one lookup every integration-credential
+        and telemetry route uses to prove "this service belongs to the
+        calling actor's own organization" BEFORE creating a credential
+        or accepting/displaying telemetry for it -- scoped by BOTH
+        columns, never service_id alone (a service_id belonging to a
+        different organization must never resolve here)."""
+        stmt = sa.select(services_table).where(
+            services_table.c.id == str(service_id),
+            services_table.c.organization_id == str(organization_id),
+        )
+        return (await self._session.execute(stmt)).mappings().first()
+
     async def create_service(
         self,
         *,

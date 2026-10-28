@@ -16,8 +16,10 @@ from control_plane.db.session import get_session
 from control_plane.repositories.auth_membership_repository import AuthMembershipRepository
 from control_plane.repositories.dashboard_repository import DashboardRepository
 from control_plane.repositories.incident_repository import IncidentRepository
+from control_plane.repositories.integration_credential_repository import IntegrationCredentialRepository
 from control_plane.repositories.remediation_repository import RemediationRepository
 from control_plane.repositories.service_repository import ServiceRepository
+from control_plane.repositories.telemetry_repository import TelemetryRepository
 
 
 async def get_incident_repository(
@@ -60,3 +62,15 @@ async def get_service_repository(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ServiceRepository:
     return ServiceRepository(session)
+
+
+async def get_integration_credential_repository(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> IntegrationCredentialRepository:
+    return IntegrationCredentialRepository(session)
+
+
+async def get_telemetry_repository(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TelemetryRepository:
+    return TelemetryRepository(session)

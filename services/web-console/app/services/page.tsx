@@ -71,33 +71,35 @@ export default async function ServicesPage({
             {result.data.items.map((service) => {
               const Icon = KIND_ICONS[service.kind];
               return (
-                <Card key={service.id}>
-                  <CardContent className="space-y-3 pt-5">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2.5">
-                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-surface-hover text-fg-muted">
-                          <Icon className="h-4 w-4" aria-hidden="true" />
-                        </div>
-                        <div>
-                          <p className="font-medium text-fg">{service.name}</p>
-                          <p className="text-xs text-fg-subtle">{SERVICE_KIND_LABELS[service.kind]}</p>
+                <Link key={service.id} href={`/services/${service.id}`} className="block">
+                  <Card className="h-full transition-colors hover:bg-surface-hover">
+                    <CardContent className="space-y-3 pt-5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2.5">
+                          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-surface-hover text-fg-muted">
+                            <Icon className="h-4 w-4" aria-hidden="true" />
+                          </div>
+                          <div>
+                            <p className="font-medium text-fg">{service.name}</p>
+                            <p className="text-xs text-fg-subtle">{SERVICE_KIND_LABELS[service.kind]}</p>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    {service.description && <p className="text-sm text-fg-muted">{service.description}</p>}
-                    <div className="flex items-center justify-between pt-1">
-                      {service.language ? (
-                        <Badge tone="neutral">{service.language}</Badge>
-                      ) : (
-                        <span className="text-xs text-fg-subtle">Language not specified</span>
-                      )}
-                      <Badge tone="neutral" dot>
-                        Not connected
-                      </Badge>
-                    </div>
-                    <p className="text-xs text-fg-subtle">Registered {formatTimestamp(service.created_at)}</p>
-                  </CardContent>
-                </Card>
+                      {service.description && <p className="text-sm text-fg-muted">{service.description}</p>}
+                      <div className="flex items-center justify-between pt-1">
+                        {service.language ? (
+                          <Badge tone="neutral">{service.language}</Badge>
+                        ) : (
+                          <span className="text-xs text-fg-subtle">Language not specified</span>
+                        )}
+                        <Badge tone="neutral" dot>
+                          View integration
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-fg-subtle">Registered {formatTimestamp(service.created_at)}</p>
+                    </CardContent>
+                  </Card>
+                </Link>
               );
             })}
           </div>

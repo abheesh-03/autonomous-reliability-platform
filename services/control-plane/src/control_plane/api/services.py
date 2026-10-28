@@ -48,6 +48,22 @@ async def list_services(
     )
 
 
+@router.get("/services/{service_id}", response_model=Service)
+async def get_service(
+    service_id: str,
+    repo: Annotated[ServiceRepository, Depends(get_service_repository)],
+    actor: Annotated[ActorContext, Depends(require_actor_context)],
+) -> Service:
+    """Phase 16 Gate 5/7: the Services detail page's own data source --
+    404 (never any other status) for a service that does not exist OR
+    belongs to a different organization, the same convention every
+    other cross-tenant lookup in this service already uses."""
+    row = await repo.get_by_id_for_organization(actor.organization_id, service_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="service not found")
+    return Service.model_validate(dict(row))
+
+
 @router.post("/services", response_model=Service, status_code=201)
 async def create_service(
     body: CreateServiceRequest,

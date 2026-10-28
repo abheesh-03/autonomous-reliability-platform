@@ -166,6 +166,7 @@ class IncidentRepository:
         occurrence_starts_at: datetime,
         actor_type: str = "alertmanager",
         extra_metadata: Mapping[str, object] | None = None,
+        organization_id: uuid.UUID | str | None = None,
     ) -> tuple[uuid.UUID, bool]:
         """Atomically create-or-update the single ACTIVE incident for
         (source, source_fingerprint) — Phase 3C's real, database-level
@@ -238,8 +239,8 @@ class IncidentRepository:
         is what makes 'kubernetes' a legal actor_type for 'created'/
         'observed' events at all).
         """
-        # Phase 14: every existing ingestion path is not yet
-        # tenant-aware (Gate 6 is deferred -- see
+        # Phase 14: every PRE-Phase-16 ingestion path is not yet
+        # tenant-aware (Gate 6 was deferred -- see
         # docs/architecture/phase-14-security-multitenancy.md's "known
         # limitations"), so this explicitly inserts the fixed legacy
         # organization id rather than relying solely on the column's
@@ -249,8 +250,16 @@ class IncidentRepository:
         # (database/migrations/V10__add_organization_scoping.sql), so
         # organization_id must be a real, explicit value in this
         # INSERT, not merely implied by a column default.
+        #
+        # Phase 16 Gate 6: the ONE real, genuinely tenant-aware caller
+        # (ingestion/telemetry_threshold_detector.py, reached only from
+        # a real, authenticated integration credential's own verified
+        # organization_id -- never a caller-supplied claim) passes an
+        # explicit `organization_id` here. Every pre-existing caller
+        # passes nothing and is completely unaffected -- same
+        # unconditional legacy-org fallback as before, by construction.
         insert_stmt = pg_insert(incidents_table).values(
-            organization_id=LEGACY_LOCAL_DEVELOPMENT_ORGANIZATION_ID,
+            organization_id=str(organization_id) if organization_id is not None else LEGACY_LOCAL_DEVELOPMENT_ORGANIZATION_ID,
             source=source,
             source_fingerprint=source_fingerprint,
             title=title,
@@ -584,6 +593,8 @@ class IncidentRepository:
         incident_id: uuid.UUID,
         *,
         resolved_at: datetime,
+        actor_type: str = "alertmanager",
+        resolution_source: str = "alertmanager_webhook",
     ) -> Mapping | None:
         """Alertmanager-driven automatic resolution
         (ingestion/service.py): resolves `incident_id` directly to
@@ -654,9 +665,9 @@ class IncidentRepository:
         await self._record_event(
             incident_id,
             event_type="status_transition",
-            actor_type="alertmanager",
+            actor_type=actor_type,
             previous_status=previous_status,
             new_status="resolved",
-            metadata={"resolution_source": "alertmanager_webhook"},
+            metadata={"resolution_source": resolution_source},
         )
         return row

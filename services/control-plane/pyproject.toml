@@ -17,6 +17,20 @@ dependencies = [
     # mints (core/authz.py) -- a mature, widely-used JWT library, never
     # homegrown signature verification.
     "pyjwt==2.10.1",
+    # Phase 16 correction round (item 3): independent verification found
+    # the official OpenTelemetry Python HTTP metrics exporter
+    # (opentelemetry-exporter-otlp-proto-http) hardcodes
+    # `Content-Type: application/x-protobuf` and has NO JSON code path
+    # at all -- a JSON-only ingestion endpoint is therefore incompatible
+    # with every official OTel SDK's default HTTP metrics exporter.
+    # This is the official project's own generated protobuf message
+    # definitions (pure Python + protobuf, no C toolchain needed) --
+    # used only to decode a real OTLP/HTTP protobuf body into the exact
+    # same validated shape the existing JSON path already produces (see
+    # ingestion/otlp_protobuf.py); it does not change this service's own
+    # OTLP/HTTP JSON support, which remains for samples/otel-sample-app/
+    # and any other hand-built JSON client.
+    "opentelemetry-proto==1.45.1",
 ]
 
 [project.optional-dependencies]

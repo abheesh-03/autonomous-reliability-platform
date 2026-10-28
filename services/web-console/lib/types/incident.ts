@@ -46,7 +46,7 @@ export const INCIDENT_EVENT_TYPES = [
 ] as const;
 export type IncidentEventType = (typeof INCIDENT_EVENT_TYPES)[number];
 
-export const INCIDENT_EVENT_ACTOR_TYPES = ["alertmanager", "operator"] as const;
+export const INCIDENT_EVENT_ACTOR_TYPES = ["alertmanager", "operator", "kubernetes", "aws", "otel-telemetry"] as const;
 export type IncidentEventActorType = (typeof INCIDENT_EVENT_ACTOR_TYPES)[number];
 
 export interface IncidentEvent {

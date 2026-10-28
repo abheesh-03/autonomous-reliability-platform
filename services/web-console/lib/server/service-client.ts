@@ -72,6 +72,34 @@ export async function listServices(
   return ok(body as ServiceListResponse);
 }
 
+export async function getService(serviceId: string, actorToken: string): Promise<BackendResult<RegisteredService>> {
+  const result = await getJson(
+    `${CONTROL_PLANE_URL}/api/v1/services/${encodeURIComponent(serviceId)}`,
+    undefined,
+    actorAuthHeader(actorToken),
+  );
+  if ("networkError" in result) {
+    return fail("unavailable", "control-plane unreachable");
+  }
+  if (result.parseError) {
+    return fail("malformed", "control-plane returned a non-JSON service response");
+  }
+  if (result.status === 401) {
+    return fail("unauthorized", "this server could not authenticate to control-plane for the service registry");
+  }
+  if (result.status === 404) {
+    return fail("not_found", "service not found");
+  }
+  if (result.status !== 200) {
+    return fail("unavailable", `control-plane returned unexpected status ${result.status} for the service`);
+  }
+  const body = result.body as Partial<RegisteredService> | null;
+  if (!body || typeof body.id !== "string") {
+    return fail("malformed", "control-plane service response did not match the expected shape");
+  }
+  return ok(body as RegisteredService);
+}
+
 export async function createService(
   input: { name: string; kind: ServiceKind; language: string | null; description: string | null },
   actorToken: string,

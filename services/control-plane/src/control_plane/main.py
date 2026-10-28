@@ -32,10 +32,14 @@ from collections.abc import AsyncIterator
 from control_plane.api.aws import router as aws_router
 from control_plane.api.dashboard import router as dashboard_router
 from control_plane.api.health import router as health_router
+from control_plane.api.integrations import router as integrations_router
+from control_plane.api.service_telemetry import router as service_telemetry_router
 from control_plane.api.services import router as services_router
 from control_plane.api.incidents import router as incidents_router
 from control_plane.api.kubernetes import router as kubernetes_router
 from control_plane.api.remediation import router as remediation_router
+from control_plane.api.telemetry_ingest import router as telemetry_ingest_router
+from control_plane.api.telemetry_limits import TelemetryBodySizeLimitMiddleware
 from control_plane.api.webhook import router as webhook_router
 from control_plane.api.webhook_limits import WebhookBodySizeLimitMiddleware
 from control_plane.core.config import (
@@ -156,6 +160,11 @@ app = FastAPI(
 # unaffected.
 app.add_middleware(WebhookBodySizeLimitMiddleware)
 
+# Phase 16 Gate 4: same ASGI-level, pre-buffering size guard as the
+# webhook middleware above, scoped to the new telemetry ingestion path
+# only -- see api/telemetry_limits.py's own docstring.
+app.add_middleware(TelemetryBodySizeLimitMiddleware)
+
 app.include_router(health_router)
 app.include_router(incidents_router)
 app.include_router(webhook_router)
@@ -164,6 +173,9 @@ app.include_router(kubernetes_router)
 app.include_router(aws_router)
 app.include_router(dashboard_router)
 app.include_router(services_router)
+app.include_router(integrations_router)
+app.include_router(telemetry_ingest_router)
+app.include_router(service_telemetry_router)
 
 
 async def _database_unavailable(request: Request, exc: Exception) -> JSONResponse:
