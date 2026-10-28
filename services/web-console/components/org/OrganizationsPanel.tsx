@@ -2,9 +2,15 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { Building2, Mail, Users as UsersIcon } from "lucide-react";
 
 import { authClient } from "@/lib/auth/client";
 import { PLATFORM_ROLE_NAMES } from "@/lib/auth/access-control";
+import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Input, Label, Select } from "../ui/input";
+import { EmptyState } from "../ui/empty-state";
 
 interface OrganizationSummary {
   id: string;
@@ -73,239 +79,274 @@ export function OrganizationsPanel({
   // inaccessible buttons" means backend independently re-checks, not
   // that the UI should offer actions indiscriminately).
   const canManageMembers = activeRole === "OWNER" || activeRole === "ADMIN";
+  const pendingMyInvitations = myInvitations.filter((invitation) => invitation.status === "pending");
+  const pendingInvitations = invitations.filter((invitation) => invitation.status === "pending");
 
   return (
-    <div style={{ display: "grid", gap: "2rem" }}>
+    <div className="space-y-6">
       {error && (
-        <p role="alert" style={{ color: "#f3c9c9" }}>
+        <p role="alert" className="rounded-lg border border-critical-fg/30 bg-critical-soft-bg px-4 py-3 text-sm text-critical-fg">
           {error}
         </p>
       )}
 
-      <section>
-        <h2>Your organizations</h2>
-        <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: "0.5rem" }}>
-          {organizations.length === 0 && <li style={{ color: "#9fb3c8" }}>No organizations yet.</li>}
-          {organizations.map((org) => (
-            <li
-              key={org.id}
-              style={{
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                padding: "0.75rem 1rem",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
-              <span>
-                <strong>{org.name}</strong> <span style={{ color: "#6b7f93" }}>({org.slug})</span>
-                {org.id === activeOrganizationId && <span style={{ marginLeft: "0.5rem" }}>— active</span>}
-              </span>
-              {org.id !== activeOrganizationId && (
-                <button
-                  disabled={busy}
-                  onClick={() => run(() => authClient.organization.setActive({ organizationId: org.id }))}
+      <Card>
+        <CardHeader>
+          <CardTitle>Your organizations</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {organizations.length === 0 ? (
+            <EmptyState icon={Building2} title="No organizations yet" />
+          ) : (
+            <ul className="space-y-2">
+              {organizations.map((org) => (
+                <li
+                  key={org.id}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-border p-3"
                 >
-                  Switch to this organization
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
+                  <div className="flex items-center gap-2">
+                    <Building2 className="h-4 w-4 text-fg-subtle" aria-hidden="true" />
+                    <span className="font-medium text-fg">{org.name}</span>
+                    <span className="text-xs text-fg-subtle">({org.slug})</span>
+                    {org.id === activeOrganizationId && (
+                      <Badge tone="success" dot>
+                        Active
+                      </Badge>
+                    )}
+                  </div>
+                  {org.id !== activeOrganizationId && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => run(() => authClient.organization.setActive({ organizationId: org.id }))}
+                    >
+                      Switch
+                    </Button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
 
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            const slug = newOrgName
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/g, "-")
-              .replace(/(^-|-$)/g, "");
-            run(() => authClient.organization.create({ name: newOrgName, slug }));
-            setNewOrgName("");
-          }}
-          style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}
-        >
-          <input
-            type="text"
-            required
-            placeholder="New organization name"
-            value={newOrgName}
-            onChange={(event) => setNewOrgName(event.target.value)}
-          />
-          <button type="submit" disabled={busy || newOrgName.trim().length === 0}>
-            Create organization
-          </button>
-        </form>
-      </section>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              const slug = newOrgName
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "-")
+                .replace(/(^-|-$)/g, "");
+              run(() => authClient.organization.create({ name: newOrgName, slug }));
+              setNewOrgName("");
+            }}
+            className="flex items-end gap-2"
+          >
+            <div className="flex-1">
+              <Label htmlFor="new-org-name">New organization</Label>
+              <Input
+                id="new-org-name"
+                required
+                placeholder="Acme Platform Team"
+                value={newOrgName}
+                onChange={(event) => setNewOrgName(event.target.value)}
+              />
+            </div>
+            <Button type="submit" disabled={busy || newOrgName.trim().length === 0}>
+              Create
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
 
-      {myInvitations.length > 0 && (
-        <section>
-          <h2>Invitations addressed to you</h2>
-          <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: "0.5rem" }}>
-            {myInvitations
-              .filter((invitation) => invitation.status === "pending")
-              .map((invitation) => (
+      {pendingMyInvitations.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Invitations addressed to you</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ul className="space-y-2">
+              {pendingMyInvitations.map((invitation) => (
                 <li
                   key={invitation.id}
-                  style={{
-                    border: "1px solid var(--border)",
-                    borderRadius: 8,
-                    padding: "0.75rem 1rem",
-                    display: "flex",
-                    justifyContent: "space-between",
-                  }}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-border p-3"
                 >
-                  <span>Role offered: {invitation.role}</span>
-                  <span style={{ display: "flex", gap: "0.5rem" }}>
-                    <button
+                  <span className="flex items-center gap-2 text-sm text-fg">
+                    <Mail className="h-4 w-4 text-fg-subtle" aria-hidden="true" />
+                    Role offered: <Badge tone="accent">{invitation.role}</Badge>
+                  </span>
+                  <span className="flex gap-2">
+                    <Button
+                      size="sm"
                       disabled={busy}
                       onClick={() => run(() => authClient.organization.acceptInvitation({ invitationId: invitation.id }))}
                     >
                       Accept
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
                       disabled={busy}
                       onClick={() => run(() => authClient.organization.rejectInvitation({ invitationId: invitation.id }))}
                     >
                       Reject
-                    </button>
+                    </Button>
                   </span>
                 </li>
               ))}
-          </ul>
-        </section>
+            </ul>
+          </CardContent>
+        </Card>
       )}
 
       {activeOrganizationId && (
-        <section>
-          <h2>Members</h2>
-          <p style={{ color: "#9fb3c8" }}>Your role in this organization: {activeRole ?? "unknown"}</p>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border)" }}>
-                <th>Member</th>
-                <th>Role</th>
-                {canManageMembers && <th>Actions</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {members.map((member) => (
-                <tr key={member.id} style={{ borderBottom: "1px solid var(--border)" }}>
-                  <td>{member.user?.email ?? member.userId}</td>
-                  <td>
-                    {canManageMembers && member.userId !== currentUserId ? (
-                      <select
-                        defaultValue={member.role}
-                        disabled={busy}
-                        onChange={(event) =>
-                          run(() =>
-                            authClient.organization.updateMemberRole({
-                              memberId: member.id,
-                              role: event.target.value,
-                            }),
-                          )
-                        }
-                      >
-                        {PLATFORM_ROLE_NAMES.map((role) => (
-                          <option key={role} value={role}>
-                            {role}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      member.role
-                    )}
-                  </td>
-                  {canManageMembers && (
-                    <td>
-                      {member.userId !== currentUserId && (
-                        <button
-                          disabled={busy}
-                          onClick={() => run(() => authClient.organization.removeMember({ memberIdOrEmail: member.id }))}
-                        >
-                          Remove
-                        </button>
+        <Card>
+          <CardHeader>
+            <CardTitle>Members</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="flex items-center gap-1.5 text-sm text-fg-muted">
+              <UsersIcon className="h-3.5 w-3.5" aria-hidden="true" />
+              Your role in this organization: <Badge tone="neutral">{activeRole ?? "unknown"}</Badge>
+            </p>
+            <div className="overflow-hidden rounded-lg border border-border">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-surface-sunken text-left text-xs font-medium uppercase tracking-wide text-fg-subtle">
+                    <th className="px-3 py-2">Member</th>
+                    <th className="px-3 py-2">Role</th>
+                    {canManageMembers && <th className="px-3 py-2">Actions</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {members.map((member) => (
+                    <tr key={member.id} className="border-b border-border last:border-0">
+                      <td className="px-3 py-2.5 text-fg">{member.user?.email ?? member.userId}</td>
+                      <td className="px-3 py-2.5">
+                        {canManageMembers && member.userId !== currentUserId ? (
+                          <Select
+                            defaultValue={member.role}
+                            disabled={busy}
+                            className="w-32"
+                            onChange={(event) =>
+                              run(() =>
+                                authClient.organization.updateMemberRole({
+                                  memberId: member.id,
+                                  role: event.target.value,
+                                }),
+                              )
+                            }
+                          >
+                            {PLATFORM_ROLE_NAMES.map((role) => (
+                              <option key={role} value={role}>
+                                {role}
+                              </option>
+                            ))}
+                          </Select>
+                        ) : (
+                          <Badge tone="neutral">{member.role}</Badge>
+                        )}
+                      </td>
+                      {canManageMembers && (
+                        <td className="px-3 py-2.5">
+                          {member.userId !== currentUserId && (
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              disabled={busy}
+                              onClick={() => run(() => authClient.organization.removeMember({ memberIdOrEmail: member.id }))}
+                            >
+                              Remove
+                            </Button>
+                          )}
+                        </td>
                       )}
-                    </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
 
-          {canManageMembers && (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                run(() =>
-                  authClient.organization.inviteMember({
-                    email: inviteEmail,
-                    // The access-control plugin's generic role type is
-                    // inferred from `platformRoles` (lib/auth/auth.ts) --
-                    // narrowed from this form's own PLATFORM_ROLE_NAMES
-                    // union at runtime; the cast here is a type-level
-                    // formality, not a loosened runtime check (Better
-                    // Auth's own server endpoint independently rejects
-                    // any value outside its real configured role set).
-                    role: inviteRole as Parameters<typeof authClient.organization.inviteMember>[0]["role"],
-                  }),
-                );
-                setInviteEmail("");
-              }}
-              style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}
-            >
-              <input
-                type="email"
-                required
-                placeholder="Invite by email"
-                value={inviteEmail}
-                onChange={(event) => setInviteEmail(event.target.value)}
-              />
-              <select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)}>
-                {PLATFORM_ROLE_NAMES.map((role) => (
-                  <option key={role} value={role}>
-                    {role}
-                  </option>
-                ))}
-              </select>
-              <button type="submit" disabled={busy}>
-                Send invitation
-              </button>
-            </form>
-          )}
+            {canManageMembers && (
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  run(() =>
+                    authClient.organization.inviteMember({
+                      email: inviteEmail,
+                      // The access-control plugin's generic role type is
+                      // inferred from `platformRoles` (lib/auth/auth.ts) --
+                      // narrowed from this form's own PLATFORM_ROLE_NAMES
+                      // union at runtime; the cast here is a type-level
+                      // formality, not a loosened runtime check (Better
+                      // Auth's own server endpoint independently rejects
+                      // any value outside its real configured role set).
+                      role: inviteRole as Parameters<typeof authClient.organization.inviteMember>[0]["role"],
+                    }),
+                  );
+                  setInviteEmail("");
+                }}
+                className="flex items-end gap-2"
+              >
+                <div className="flex-1">
+                  <Label htmlFor="invite-email">Invite by email</Label>
+                  <Input
+                    id="invite-email"
+                    type="email"
+                    required
+                    placeholder="teammate@example.com"
+                    value={inviteEmail}
+                    onChange={(event) => setInviteEmail(event.target.value)}
+                  />
+                </div>
+                <Select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)} className="w-32">
+                  {PLATFORM_ROLE_NAMES.map((role) => (
+                    <option key={role} value={role}>
+                      {role}
+                    </option>
+                  ))}
+                </Select>
+                <Button type="submit" disabled={busy}>
+                  Send invite
+                </Button>
+              </form>
+            )}
 
-          {invitations.filter((i) => i.status === "pending").length > 0 && (
-            <div style={{ marginTop: "1rem" }}>
-              <h3>Pending invitations</h3>
-              <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: "0.4rem" }}>
-                {invitations
-                  .filter((invitation) => invitation.status === "pending")
-                  .map((invitation) => (
-                    <li key={invitation.id} style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span>
+            {pendingInvitations.length > 0 && (
+              <div>
+                <h3 className="mb-2 text-sm font-medium text-fg">Pending invitations</h3>
+                <ul className="space-y-1.5">
+                  {pendingInvitations.map((invitation) => (
+                    <li key={invitation.id} className="flex items-center justify-between text-sm">
+                      <span className="text-fg-muted">
                         {invitation.email} — {invitation.role}
                       </span>
                       {canManageMembers && (
-                        <button
+                        <Button
+                          size="sm"
+                          variant="ghost"
                           disabled={busy}
                           onClick={() => run(() => authClient.organization.cancelInvitation({ invitationId: invitation.id }))}
                         >
                           Revoke
-                        </button>
+                        </Button>
                       )}
                     </li>
                   ))}
-              </ul>
-            </div>
-          )}
+                </ul>
+              </div>
+            )}
 
-          <div style={{ marginTop: "1.5rem" }}>
-            <button disabled={busy} onClick={() => run(() => authClient.organization.leave({ organizationId: activeOrganizationId }))}>
-              Leave this organization
-            </button>
-          </div>
-        </section>
+            <div className="border-t border-border pt-4">
+              <Button
+                variant="outline"
+                disabled={busy}
+                onClick={() => run(() => authClient.organization.leave({ organizationId: activeOrganizationId }))}
+              >
+                Leave this organization
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
     </div>
   );

@@ -1,3 +1,4 @@
+import { AlertTriangle } from "lucide-react";
 import type { BackendErrorKind } from "../lib/server/http";
 
 // Professional operator-facing failure states -- never the raw
@@ -18,15 +19,10 @@ export function BackendFailure({ kind }: { kind: BackendErrorKind }) {
   return (
     <div
       role="alert"
-      style={{
-        border: "1px solid #5a2a2a",
-        background: "#1a0f0f",
-        color: "#f3c9c9",
-        borderRadius: 8,
-        padding: "1rem",
-      }}
+      className="flex items-start gap-2.5 rounded-lg border border-critical-fg/30 bg-critical-soft-bg px-4 py-3 text-sm text-critical-fg"
     >
-      {MESSAGES[kind]}
+      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+      <span>{MESSAGES[kind]}</span>
     </div>
   );
 }

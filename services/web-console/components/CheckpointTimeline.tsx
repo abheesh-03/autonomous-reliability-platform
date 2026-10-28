@@ -9,24 +9,22 @@ import type { AgentRunHistoryEntry } from "../lib/types/agent-run";
 // terminal/current state (see AgentRunSummary/WorkflowProgress).
 export function CheckpointTimeline({ entries }: { entries: AgentRunHistoryEntry[] }) {
   if (entries.length === 0) {
-    return <p style={{ color: "#9fb3c8" }}>No checkpoint history recorded.</p>;
+    return <p className="text-sm text-fg-muted">No checkpoint history recorded.</p>;
   }
   return (
-    <ol style={{ listStyle: "none", padding: 0, display: "grid", gap: "0.5rem" }}>
+    <ol className="grid grid-cols-1 gap-2">
       {entries.map((entry) => (
-        <li
-          key={entry.checkpoint_id}
-          style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "0.75rem" }}
-        >
+        <li key={entry.checkpoint_id} className="rounded-lg border border-border bg-surface p-3 text-sm">
           <div>
-            <strong>step {entry.step}</strong> -- <span>{entry.node}</span>{" "}
-            <span style={{ color: "#9fb3c8" }}>({entry.status_at_step})</span>
+            <strong className="font-medium text-fg">step {entry.step}</strong>{" "}
+            <span className="text-fg">-- {entry.node}</span>{" "}
+            <span className="text-fg-muted">({entry.status_at_step})</span>
           </div>
           {entry.next_nodes.length > 0 && (
-            <div style={{ color: "#9fb3c8", fontSize: "0.9rem" }}>next: {entry.next_nodes.join(", ")}</div>
+            <div className="text-fg-muted">next: {entry.next_nodes.join(", ")}</div>
           )}
-          <div style={{ color: "#6b7f93", fontSize: "0.85rem" }}>{formatTimestamp(entry.created_at)}</div>
-          <div style={{ color: "#6b7f93", fontSize: "0.75rem" }}>checkpoint: {entry.checkpoint_id}</div>
+          <div className="text-xs text-fg-subtle">{formatTimestamp(entry.created_at)}</div>
+          <div className="text-xs text-fg-subtle">checkpoint: {entry.checkpoint_id}</div>
         </li>
       ))}
     </ol>

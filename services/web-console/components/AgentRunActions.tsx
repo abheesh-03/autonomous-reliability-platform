@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { Button } from "./ui/button";
 
 // Receives only safe, non-secret values -- never a token, never a
 // backend URL. On ANY outcome (success, safe failure, or an ambiguous
@@ -50,12 +51,12 @@ export function AgentRunActions({
   }
 
   return (
-    <div>
-      <button onClick={handleClick} disabled={pending}>
-        {pending ? "Working…" : label}
-      </button>
+    <div className="space-y-2">
+      <Button onClick={handleClick} disabled={pending} loading={pending}>
+        {label}
+      </Button>
       {error && (
-        <p role="alert" style={{ color: "#f3c9c9", marginTop: "0.4rem" }}>
+        <p role="alert" className="text-sm text-critical-fg">
           {error}
         </p>
       )}

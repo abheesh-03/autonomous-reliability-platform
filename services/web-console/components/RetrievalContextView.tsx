@@ -7,7 +7,7 @@ import type { RetrievalContext, RetrievedContextItem } from "../lib/types/agent-
 export function RetrievalContextView({ context }: { context: RetrievalContext }) {
   return (
     <div>
-      <p style={{ color: "#9fb3c8" }}>
+      <p className="text-sm text-fg-muted">
         outcome: {context.outcome}
         {context.detail ? ` -- ${context.detail}` : ""}
       </p>
@@ -20,18 +20,18 @@ export function RetrievalContextView({ context }: { context: RetrievalContext })
 function RetrievedContextGroup({ title, items }: { title: string; items: RetrievedContextItem[] }) {
   if (items.length === 0) return null;
   return (
-    <div style={{ marginTop: "0.75rem" }}>
-      <h4 style={{ margin: "0 0 0.5rem", fontSize: "0.95rem", color: "#9fb3c8" }}>{title}</h4>
-      <ol style={{ listStyle: "none", padding: 0, display: "grid", gap: "0.4rem" }}>
+    <div className="mt-3">
+      <h4 className="mb-2 text-sm font-semibold text-fg">{title}</h4>
+      <ol className="grid grid-cols-1 gap-2">
         {items.map((item) => (
-          <li key={item.context_id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "0.6rem" }}>
-            <div>
-              <strong>{item.title}</strong>{" "}
-              <span style={{ color: "#6b7f93", fontSize: "0.8rem" }}>
+          <li key={item.context_id} className="rounded-lg border border-border bg-surface p-3 text-sm">
+            <div className="break-words">
+              <strong className="font-medium text-fg">{item.title}</strong>{" "}
+              <span className="text-xs text-fg-subtle">
                 ({item.source_key}, similarity {item.similarity.toFixed(3)})
               </span>
             </div>
-            <div style={{ color: "#9fb3c8", fontSize: "0.9rem" }}>{item.excerpt}</div>
+            <div className="break-words text-fg-muted">{item.excerpt}</div>
           </li>
         ))}
       </ol>

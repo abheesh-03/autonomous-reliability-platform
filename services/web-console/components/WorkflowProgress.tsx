@@ -1,3 +1,5 @@
+import { Check } from "lucide-react";
+
 export function WorkflowProgress({
   completedNodes,
   currentNode,
@@ -7,35 +9,20 @@ export function WorkflowProgress({
 }) {
   return (
     <div>
-      <p style={{ color: "#9fb3c8", margin: "0 0 0.5rem" }}>
+      <p className="mb-2 text-sm text-fg-muted">
         {completedNodes.length} completed node{completedNodes.length === 1 ? "" : "s"}
       </p>
-      <ol style={{ listStyle: "none", padding: 0, display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+      <ol className="flex flex-wrap gap-2">
         {completedNodes.map((node, index) => (
           <li
             key={`${node}-${index}`}
-            style={{
-              border: "1px solid #2a4a33",
-              background: "#0f1a12",
-              color: "#a8f3c0",
-              borderRadius: 6,
-              padding: "0.25rem 0.6rem",
-              fontSize: "0.85rem",
-            }}
+            className="flex items-center gap-1 rounded-md border border-success-fg/30 bg-success-soft-bg px-2.5 py-1 text-xs font-medium text-success-fg"
           >
+            <Check className="h-3 w-3" aria-hidden="true" />
             {node}
           </li>
         ))}
-        <li
-          style={{
-            border: "1px solid var(--accent)",
-            background: "#0f1a24",
-            color: "var(--accent)",
-            borderRadius: 6,
-            padding: "0.25rem 0.6rem",
-            fontSize: "0.85rem",
-          }}
-        >
+        <li className="rounded-md border border-accent bg-accent-soft-bg px-2.5 py-1 text-xs font-medium text-accent-soft-fg">
           {currentNode} (current)
         </li>
       </ol>

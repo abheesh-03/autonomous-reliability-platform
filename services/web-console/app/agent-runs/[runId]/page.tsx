@@ -11,6 +11,7 @@ import { RemediationDecisionControl } from "../../../components/RemediationDecis
 import { RemediationStateCard } from "../../../components/RemediationStateCard";
 import { SeverityBadge, StatusBadgePill } from "../../../components/StatusBadge";
 import { WorkflowProgress } from "../../../components/WorkflowProgress";
+import { Card, CardContent, CardHeader, CardTitle } from "../../../components/ui/card";
 import { formatTimestamp } from "../../../lib/format";
 import { getAgentRun, getAgentRunHistory } from "../../../lib/server/agent-runtime-client";
 import { getIncident, getRemediationProposal } from "../../../lib/server/control-plane-client";
@@ -35,12 +36,12 @@ export default async function AgentRunPage({
       notFound();
     }
     return (
-      <main style={{ maxWidth: 900, margin: "0 auto", padding: "2rem 1.5rem" }}>
-        <p>
-          <Link href="/">&larr; Dashboard</Link>
-        </p>
+      <div className="mx-auto max-w-3xl space-y-4">
+        <Link href="/" className="text-sm text-fg-muted hover:text-fg">
+          &larr; Dashboard
+        </Link>
         <BackendFailure kind={agentRunResult.error.kind} />
-      </main>
+      </div>
     );
   }
 
@@ -62,37 +63,28 @@ export default async function AgentRunPage({
   const liveIncidentResult = await getIncident(agentRun.incident_id, controlPlaneToken);
 
   return (
-    <main style={{ maxWidth: 900, margin: "0 auto", padding: "2rem 1.5rem" }}>
+    <div className="mx-auto max-w-3xl space-y-6">
       <LiveRunPolling
         status={agentRun.status}
         incidentStatus={liveIncidentResult.ok ? liveIncidentResult.data.status : null}
       />
-      <p>
-        <Link href="/">&larr; Dashboard</Link>
-      </p>
-      <h1 style={{ marginTop: "0.5rem" }}>Agent run</h1>
+      <Link href="/" className="text-sm text-fg-muted hover:text-fg">
+        &larr; Dashboard
+      </Link>
+      <h1 className="text-xl font-semibold text-fg">AI investigation</h1>
 
       {agentRun.status === "waiting_for_approval" && (
-        <div
-          role="status"
-          style={{
-            border: "1px solid #5a4a1f",
-            background: "#1a140a",
-            color: "#f3e2a8",
-            borderRadius: 8,
-            padding: "1rem",
-            marginBottom: "1rem",
-          }}
-        >
+        <div role="status" className="rounded-xl border border-warning-fg/30 bg-warning-soft-bg p-4 text-sm text-warning-fg">
           Waiting for human approval.
           {agentRun.remediation_proposal_id && (
             <>
               {" "}
-              Remediation proposal <code>{agentRun.remediation_proposal_id}</code> has not been decided yet.
+              Remediation proposal <code className="font-mono text-xs">{agentRun.remediation_proposal_id}</code> has
+              not been decided yet.
             </>
           )}
           {agentRun.remediation_proposal_id && proposalResult?.ok && (
-            <div style={{ marginTop: "0.75rem" }}>
+            <div className="mt-3">
               <RemediationDecisionControl
                 runId={agentRun.run_id}
                 proposalId={agentRun.remediation_proposal_id}
@@ -105,18 +97,8 @@ export default async function AgentRunPage({
       )}
 
       {agentRun.status === "failed" && (
-        <div
-          role="alert"
-          style={{
-            border: "1px solid #5a2a2a",
-            background: "#1a0f0f",
-            color: "#f3c9c9",
-            borderRadius: 8,
-            padding: "1rem",
-            marginBottom: "1rem",
-          }}
-        >
-          <div>Run failed.</div>
+        <div role="alert" className="space-y-1 rounded-xl border border-critical-fg/30 bg-critical-soft-bg p-4 text-sm text-critical-fg">
+          <div className="font-medium">Run failed.</div>
           {agentRun.error_code && <div>error_code: {agentRun.error_code}</div>}
           {agentRun.error_detail && <div>{agentRun.error_detail}</div>}
           <div>{agentRun.resumable ? "This run remains resumable." : "This run is not resumable."}</div>
@@ -126,116 +108,158 @@ export default async function AgentRunPage({
       <AgentRunSummary agentRun={agentRun} />
 
       {agentRun.status !== "waiting_for_approval" && (
-        <div style={{ marginTop: "1rem" }}>
-          <AgentRunActions
-            runId={agentRun.run_id}
-            currentNode={agentRun.current_node}
-            resumable={agentRun.resumable}
-          />
-        </div>
+        <AgentRunActions runId={agentRun.run_id} currentNode={agentRun.current_node} resumable={agentRun.resumable} />
       )}
 
-      <section style={{ marginTop: "2rem" }}>
-        <h2>Workflow progress</h2>
-        <WorkflowProgress completedNodes={agentRun.completed_nodes} currentNode={agentRun.current_node} />
+      <section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Workflow progress</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <WorkflowProgress completedNodes={agentRun.completed_nodes} currentNode={agentRun.current_node} />
+          </CardContent>
+        </Card>
       </section>
 
-      <section style={{ marginTop: "2rem" }}>
-        <h2>Checkpoint history</h2>
-        {!historyResult.ok ? (
-          <BackendFailure kind={historyResult.error.kind} />
-        ) : (
-          <CheckpointTimeline entries={historyResult.data.entries} />
-        )}
+      <section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Checkpoint history</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!historyResult.ok ? (
+              <BackendFailure kind={historyResult.error.kind} />
+            ) : (
+              <CheckpointTimeline entries={historyResult.data.entries} />
+            )}
+          </CardContent>
+        </Card>
       </section>
 
-      <section style={{ marginTop: "2rem" }}>
-        <h2>Live incident state</h2>
-        <p style={{ color: "#9fb3c8", fontSize: "0.85rem", marginTop: "-0.3rem" }}>
-          Read directly from control-plane just now -- distinct from the durable snapshot below, which was captured
-          at an earlier point in this run.
-        </p>
-        {!liveIncidentResult.ok ? (
-          <BackendFailure kind={liveIncidentResult.error.kind} />
-        ) : (
-          <div
-            style={{
-              border: "1px solid #2a4a5a",
-              background: "#0a1a1f",
-              borderRadius: 8,
-              padding: "0.75rem 1rem",
-            }}
-          >
-            <p style={{ display: "flex", gap: "0.5rem", margin: 0 }}>
-              <SeverityBadge severity={liveIncidentResult.data.severity} />
-              <StatusBadgePill status={liveIncidentResult.data.status} />
+      <section>
+        <Card>
+          <CardContent className="pt-5">
+            {/* Deliberately in the SAME container as the status content
+                below it (never a separate CardHeader) -- the real
+                Playwright acceptance spec locates this live status via
+                `getByText("Live incident state").locator("..")`, which
+                only reaches this element's own immediate parent. */}
+            <CardTitle className="mb-1">Live incident state</CardTitle>
+            <p className="mb-3 text-xs text-fg-subtle">
+              Read directly from control-plane just now -- distinct from the durable snapshot below, which was
+              captured at an earlier point in this run.
             </p>
-            <dl style={{ display: "grid", gridTemplateColumns: "10rem 1fr", rowGap: "0.3rem", fontSize: "0.9rem", marginTop: "0.5rem" }}>
-              <dt style={{ color: "#9fb3c8" }}>Last seen</dt>
-              <dd>{formatTimestamp(liveIncidentResult.data.last_seen_at)}</dd>
-              <dt style={{ color: "#9fb3c8" }}>Resolved at</dt>
-              <dd>{liveIncidentResult.data.resolved_at ? formatTimestamp(liveIncidentResult.data.resolved_at) : "Not yet resolved"}</dd>
-            </dl>
-          </div>
-        )}
+            {!liveIncidentResult.ok ? (
+              <BackendFailure kind={liveIncidentResult.error.kind} />
+            ) : (
+              <div className="rounded-lg border border-border bg-surface-sunken p-3">
+                <p className="flex gap-2">
+                  <SeverityBadge severity={liveIncidentResult.data.severity} />
+                  <StatusBadgePill status={liveIncidentResult.data.status} />
+                </p>
+                <dl className="mt-2 grid grid-cols-[8rem_minmax(0,1fr)] sm:grid-cols-[10rem_minmax(0,1fr)] gap-y-1.5 text-sm">
+                  <dt className="text-fg-muted">Last seen</dt>
+                  <dd className="text-fg break-words">{formatTimestamp(liveIncidentResult.data.last_seen_at)}</dd>
+                  <dt className="text-fg-muted">Resolved at</dt>
+                  <dd className="text-fg break-words">
+                    {liveIncidentResult.data.resolved_at ? formatTimestamp(liveIncidentResult.data.resolved_at) : "Not yet resolved"}
+                  </dd>
+                </dl>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </section>
 
-      <section style={{ marginTop: "2rem" }}>
-        <h2>Incident snapshot (durable, as captured during this run)</h2>
-        {agentRun.incident_snapshot ? (
-          <div>
-            <p style={{ display: "flex", gap: "0.5rem" }}>
-              <SeverityBadge severity={agentRun.incident_snapshot.severity} />
-              <StatusBadgePill status={agentRun.incident_snapshot.status} />
-            </p>
-            <p>
-              <Link href={`/incidents/${agentRun.incident_snapshot.id}`}>{agentRun.incident_snapshot.title}</Link>
-            </p>
-            <dl style={{ display: "grid", gridTemplateColumns: "10rem 1fr", rowGap: "0.3rem", fontSize: "0.9rem" }}>
-              <dt style={{ color: "#9fb3c8" }}>Source</dt>
-              <dd>{agentRun.incident_snapshot.source}</dd>
-              <dt style={{ color: "#9fb3c8" }}>First seen</dt>
-              <dd>{formatTimestamp(agentRun.incident_snapshot.first_seen_at)}</dd>
-            </dl>
-          </div>
-        ) : (
-          <p style={{ color: "#9fb3c8" }}>No incident snapshot captured yet.</p>
-        )}
+      <section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Incident snapshot (durable, as captured during this run)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {agentRun.incident_snapshot ? (
+              <div>
+                <p className="flex gap-2">
+                  <SeverityBadge severity={agentRun.incident_snapshot.severity} />
+                  <StatusBadgePill status={agentRun.incident_snapshot.status} />
+                </p>
+                <p className="mt-2">
+                  <Link href={`/incidents/${agentRun.incident_snapshot.id}`} className="text-accent-soft-fg hover:underline">
+                    {agentRun.incident_snapshot.title}
+                  </Link>
+                </p>
+                <dl className="mt-2 grid grid-cols-[8rem_minmax(0,1fr)] sm:grid-cols-[10rem_minmax(0,1fr)] gap-y-1.5 text-sm">
+                  <dt className="text-fg-muted">Source</dt>
+                  <dd className="text-fg break-words">{agentRun.incident_snapshot.source}</dd>
+                  <dt className="text-fg-muted">First seen</dt>
+                  <dd className="text-fg break-words">{formatTimestamp(agentRun.incident_snapshot.first_seen_at)}</dd>
+                </dl>
+              </div>
+            ) : (
+              <p className="text-sm text-fg-muted">No incident snapshot captured yet.</p>
+            )}
+          </CardContent>
+        </Card>
       </section>
 
-      <section style={{ marginTop: "2rem" }}>
-        <h2>Investigation report</h2>
-        {agentRun.investigation_report ? (
-          <InvestigationReportView report={agentRun.investigation_report} resultQuality={agentRun.result_quality} />
-        ) : (
-          <p style={{ color: "#9fb3c8" }}>No investigation report yet.</p>
-        )}
+      <section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Investigation report</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {agentRun.investigation_report ? (
+              <InvestigationReportView report={agentRun.investigation_report} resultQuality={agentRun.result_quality} />
+            ) : (
+              <p className="text-sm text-fg-muted">No investigation report yet.</p>
+            )}
+          </CardContent>
+        </Card>
       </section>
 
-      <section style={{ marginTop: "2rem" }}>
-        <h2>Remediation</h2>
-        <RemediationStateCard agentRun={agentRun} proposalResult={proposalResult} />
+      <section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Remediation</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <RemediationStateCard agentRun={agentRun} proposalResult={proposalResult} />
+          </CardContent>
+        </Card>
       </section>
 
-      <section style={{ marginTop: "2rem" }}>
-        <h2>Recovery verification</h2>
-        {agentRun.recovery_verification ? (
-          <RecoveryVerificationCard verification={agentRun.recovery_verification} />
-        ) : (
-          <p style={{ color: "#9fb3c8" }}>Recovery verification not yet performed.</p>
-        )}
+      <section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Recovery verification</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {agentRun.recovery_verification ? (
+              <RecoveryVerificationCard verification={agentRun.recovery_verification} />
+            ) : (
+              <p className="text-sm text-fg-muted">Recovery verification not yet performed.</p>
+            )}
+          </CardContent>
+        </Card>
       </section>
 
       {agentRun.validation_notes.length > 0 && (
-        <section style={{ marginTop: "2rem" }}>
-          <h2>Validation notes</h2>
-          <ul style={{ color: "#9fb3c8" }}>
-            {agentRun.validation_notes.map((note, index) => (
-              <li key={index}>{note}</li>
-            ))}
-          </ul>
+        <section>
+          <Card>
+            <CardHeader>
+              <CardTitle>Validation notes</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ul className="space-y-1 text-sm text-fg-muted">
+                {agentRun.validation_notes.map((note, index) => (
+                  <li key={index}>{note}</li>
+                ))}
+              </ul>
+            </CardContent>
+          </Card>
         </section>
       )}
-    </main>
+    </div>
   );
 }

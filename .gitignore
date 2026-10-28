@@ -76,6 +76,9 @@ coverage/
 *.cover
 .coverage
 
+# --- Phase 15 design-review screenshots (regenerated on every capture run) ---
+services/web-console/e2e/screenshots-output/
+
 # --- Phase 11A incident intelligence catalog ---
 # The generic build/ and coverage/ patterns above are unanchored, so
 # they would otherwise also swallow catalog/build/ (a real, partially

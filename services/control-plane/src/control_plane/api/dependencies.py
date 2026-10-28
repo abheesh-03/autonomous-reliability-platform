@@ -14,8 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.db.session import get_session
 from control_plane.repositories.auth_membership_repository import AuthMembershipRepository
+from control_plane.repositories.dashboard_repository import DashboardRepository
 from control_plane.repositories.incident_repository import IncidentRepository
 from control_plane.repositories.remediation_repository import RemediationRepository
+from control_plane.repositories.service_repository import ServiceRepository
 
 
 async def get_incident_repository(
@@ -43,3 +45,18 @@ async def get_remediation_repository(
     # mutation in ONE atomic transaction (see
     # repositories/remediation_repository.py's own docstring).
     return RemediationRepository(session)
+
+
+async def get_dashboard_repository(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> DashboardRepository:
+    # Phase 15: read-only, so sharing the request-scoped session has no
+    # transactional consequence -- same convention as every other
+    # repository dependency above.
+    return DashboardRepository(session)
+
+
+async def get_service_repository(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ServiceRepository:
+    return ServiceRepository(session)

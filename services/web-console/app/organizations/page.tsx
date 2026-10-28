@@ -62,8 +62,11 @@ export default async function OrganizationsPage() {
   }
 
   return (
-    <main style={{ maxWidth: 900, margin: "0 auto", padding: "2rem 1.5rem" }}>
-      <h1>Organizations</h1>
+    <div className="mx-auto max-w-3xl space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold text-fg">Team &amp; organization</h1>
+        <p className="mt-1 text-sm text-fg-muted">Manage organizations, membership, and invitations.</p>
+      </div>
       <OrganizationsPanel
         organizations={organizations ?? []}
         activeOrganizationId={activeOrganizationId}
@@ -73,6 +76,6 @@ export default async function OrganizationsPage() {
         myInvitations={myInvitations}
         currentUserId={session.user.id}
       />
-    </main>
+    </div>
   );
 }

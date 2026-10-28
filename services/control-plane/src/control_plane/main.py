@@ -30,7 +30,9 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 from control_plane.api.aws import router as aws_router
+from control_plane.api.dashboard import router as dashboard_router
 from control_plane.api.health import router as health_router
+from control_plane.api.services import router as services_router
 from control_plane.api.incidents import router as incidents_router
 from control_plane.api.kubernetes import router as kubernetes_router
 from control_plane.api.remediation import router as remediation_router
@@ -160,6 +162,8 @@ app.include_router(webhook_router)
 app.include_router(remediation_router)
 app.include_router(kubernetes_router)
 app.include_router(aws_router)
+app.include_router(dashboard_router)
+app.include_router(services_router)
 
 
 async def _database_unavailable(request: Request, exc: Exception) -> JSONResponse:

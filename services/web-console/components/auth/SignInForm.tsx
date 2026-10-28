@@ -4,6 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { authClient } from "@/lib/auth/client";
+import { Button } from "../ui/button";
+import { Input, Label } from "../ui/input";
 
 /**
  * Phase 14 Gate 2/9: calls Better Auth's own real client method
@@ -24,48 +26,57 @@ export function SignInForm() {
     event.preventDefault();
     setPending(true);
     setError(null);
-    const { error: signInError } = await authClient.signIn.email({ email, password });
-    setPending(false);
-    if (signInError) {
-      setError("Invalid email or password.");
-      return;
+    // Independent-review correction round: see RegisterForm.tsx's own
+    // identical fix for the full explanation -- a thrown (not merely
+    // resolved-with-error) failure from authClient must never leave
+    // this button disabled/spinning with no feedback.
+    try {
+      const { error: signInError } = await authClient.signIn.email({ email, password });
+      if (signInError) {
+        setError("Invalid email or password.");
+        return;
+      }
+      router.push("/organizations");
+      router.refresh();
+    } catch {
+      setError("Could not reach the server. Check your connection and try again.");
+    } finally {
+      setPending(false);
     }
-    router.push("/organizations");
-    router.refresh();
   }
 
   return (
-    <form onSubmit={handleSubmit} style={{ display: "grid", gap: "0.75rem", maxWidth: 360 }}>
-      <label>
-        Email
-        <input
+    <form onSubmit={handleSubmit} className="grid gap-4">
+      <div>
+        <Label htmlFor="sign-in-email">Email</Label>
+        <Input
+          id="sign-in-email"
           type="email"
           required
           autoComplete="email"
           value={email}
           onChange={(event) => setEmail(event.target.value)}
-          style={{ display: "block", width: "100%" }}
         />
-      </label>
-      <label>
-        Password
-        <input
+      </div>
+      <div>
+        <Label htmlFor="sign-in-password">Password</Label>
+        <Input
+          id="sign-in-password"
           type="password"
           required
           autoComplete="current-password"
           value={password}
           onChange={(event) => setPassword(event.target.value)}
-          style={{ display: "block", width: "100%" }}
         />
-      </label>
+      </div>
       {error && (
-        <p role="alert" style={{ color: "#f3c9c9" }}>
+        <p role="alert" className="text-sm text-critical-fg">
           {error}
         </p>
       )}
-      <button type="submit" disabled={pending}>
-        {pending ? "Signing in…" : "Sign in"}
-      </button>
+      <Button type="submit" disabled={pending} loading={pending} className="mt-1">
+        Sign in
+      </Button>
     </form>
   );
 }

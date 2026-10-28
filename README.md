@@ -215,6 +215,21 @@ still no authentication on the read endpoints, no incident
 audit-history table, and no automatic remediation or AI functionality
 of any kind.
 
+**Note on this section's currency:** the narrative above reflects Phases
+2–8; Phases 9 through 15 each have their own architecture document under
+`docs/architecture/` and are not individually narrated here. As of
+**Phase 15 — Premium SaaS Product Experience**, the operator web console
+(`services/web-console`) has a real, application-agnostic dashboard,
+incident/investigation workspace, a minimal organization-scoped service
+registry, and an honest integrations page, built on Tailwind CSS v4 and
+Radix UI primitives. Every Phase 14 authentication/authorization/tenant-
+isolation guarantee is unchanged. See
+[docs/architecture/phase-15-product-experience.md](docs/architecture/phase-15-product-experience.md)
+for the full writeup, including two real bugs found and fixed during this
+phase (a Docker build that silently shipped unprocessed CSS, and a
+backend authorization check that rejected every valid request in this
+platform's own default local-development configuration).
+
 ## Problem this project will eventually solve
 
 Production incidents today typically require a human on-call engineer to:

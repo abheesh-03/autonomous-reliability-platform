@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { AccountMenu } from "../components/AccountMenu";
+import { RootShell } from "../components/shell/root-shell";
+import { ThemeScript } from "../components/theme/theme-script";
+import { ToastProvider } from "../components/ui/toast";
+import { TooltipProvider } from "../components/ui/tooltip";
 
 export const metadata: Metadata = {
   title: "Reliability Console",
@@ -14,10 +17,16 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <ThemeScript />
+      </head>
       <body>
-        <AccountMenu />
-        {children}
+        <TooltipProvider delayDuration={200}>
+          <ToastProvider>
+            <RootShell>{children}</RootShell>
+          </ToastProvider>
+        </TooltipProvider>
       </body>
     </html>
   );

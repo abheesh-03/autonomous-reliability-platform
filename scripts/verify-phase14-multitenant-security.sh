@@ -68,6 +68,13 @@ NET="phase14-verify-net-$$"
 PG="phase14-verify-pg-$$"
 WEB="phase14-verify-web-$$"
 CP="phase14-verify-cp-$$"
+# Phase 15: a container-local named volume, shadowing (never writing
+# into) the HOST's own bind-mounted node_modules at that one subpath
+# -- see the $WEB container's own startup command below for why this
+# is required now that Tailwind v4 (@tailwindcss/postcss ->
+# lightningcss) pulls in a PLATFORM-SPECIFIC native binary. Removed in
+# cleanup() below on every run, including failure -- never left behind.
+WEB_NODE_MODULES_VOLUME="phase14-verify-web-node-modules-$$"
 
 ASSERTION_SECRET="phase14-verify-assertion-secret-$$"
 BETTER_AUTH_SECRET="phase14-verify-better-auth-secret-at-least-32-chars-$$"
@@ -85,6 +92,7 @@ cleanup() {
   echo "=== cleaning up (passed: $PASS_COUNT, failed: $FAIL_COUNT) ==="
   docker rm -f "$WEB" "$CP" "$PG" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
+  docker volume rm "$WEB_NODE_MODULES_VOLUME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -137,8 +145,40 @@ docker exec "$PG" psql -U app -d reliability_platform -v ON_ERROR_STOP=1 -c "
 GRANT SELECT ON ALL TABLES IN SCHEMA auth TO app;
 "
 
-echo "=== starting web-console (real Next.js dev server) against this database ==="
-docker run -d --rm --name "$WEB" --network "$NET" -v "$REPO_ROOT/services/web-console:/app" -w /app \
+echo "=== starting web-console (real Next.js PRODUCTION server -- next build && next start) against this database ==="
+# Phase 15 fix, in two parts:
+#
+# 1. The HOST's own bind-mounted node_modules
+#    (${REPO_ROOT}/services/web-console/node_modules) was installed on
+#    the HOST's own platform (e.g. darwin-arm64 on an Apple Silicon
+#    Mac). The second -v below mounts a container-local, disposable
+#    named volume AT THAT ONE SUBPATH, shadowing (never reading OR
+#    writing) the host's own node_modules -- `npm ci` then installs a
+#    fresh, correctly-platformed node_modules into that volume,
+#    exactly like the real production Dockerfile already does (`RUN
+#    npm ci` inside its own Linux builder stage, never a host
+#    bind-mount).
+#
+# 2. This previously ran `npm run dev` (Turbopack dev server).
+#    Tailwind v4's @tailwindcss/postcss pulls in lightningcss, a
+#    native binary with platform-specific prebuilt packages
+#    (lightningcss-linux-arm64-gnu, etc.) -- confirmed present and
+#    correctly installed by `npm ci` above, yet Turbopack's own DEV-MODE
+#    module resolution for lightningcss's dynamic, template-literal
+#    `require(...)` still failed to locate it ("Cannot find module
+#    '../lightningcss.linux-arm64-gnu.node'"), crashing every real
+#    page render with a 500. The real production build (`next build`,
+#    via the real Dockerfile, and this platform's own real CI/Playwright
+#    acceptance run) was independently confirmed NOT to hit this --
+#    it is specific to Turbopack's dev-mode bundler. Switched to the
+#    SAME `next build && next start` production path the real
+#    Dockerfile and every other real verification in this platform
+#    already uses, rather than chase a dev-server-only bundler quirk
+#    this script never needed to depend on in the first place.
+docker run -d --rm --name "$WEB" --network "$NET" \
+  -v "$REPO_ROOT/services/web-console:/app" \
+  -v "${WEB_NODE_MODULES_VOLUME}:/app/node_modules" \
+  -w /app \
   -p "${WEB_PORT}:3101" \
   -e BETTER_AUTH_SECRET="$BETTER_AUTH_SECRET" \
   -e WEB_CONSOLE_DB_HOST="$PG" -e WEB_CONSOLE_DB_USER=web_console -e WEB_CONSOLE_DB_PASSWORD="$PG_PASSWORD" \
@@ -148,7 +188,7 @@ docker run -d --rm --name "$WEB" --network "$NET" -v "$REPO_ROOT/services/web-co
   -e WEB_CONSOLE_DISABLE_SPECIAL_RATE_LIMITS=true \
   -e WEB_CONSOLE_CONTROL_PLANE_URL="http://${CP}:8000" \
   -e CONTROL_PLANE_REMEDIATION_APPROVER_TOKEN="$APPROVER_TOKEN" \
-  node:24-slim bash -c "npm run dev -- -p 3101 -H 0.0.0.0" >/dev/null
+  node:24-slim bash -c "npm ci && npm run build && npx next start -p 3101 -H 0.0.0.0" >/dev/null
 
 echo "=== starting control-plane (real FastAPI app) against this database, secure mode ON ==="
 docker run -d --rm --name "$CP" --network "$NET" -v "$REPO_ROOT/services/control-plane:/app" -w /app \

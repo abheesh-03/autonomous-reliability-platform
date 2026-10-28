@@ -15,6 +15,7 @@ import type {
   RemediationProposalListResponse,
   RemediationProposalStatus,
 } from "../types/remediation";
+import type { DashboardSummary } from "../types/dashboard";
 import {
   type BackendResult,
   buildQuery,
@@ -456,4 +457,50 @@ export async function getAllRemediationProposalEvents(
   return fetchAllPages((limit, offset) =>
     getRemediationProposalEventsPage(proposalId, limit, offset, actorToken),
   );
+}
+
+/**
+ * Phase 15 Gate 10: the dashboard's ENTIRE data source -- one bounded,
+ * server-aggregated call, never a client-side loop fetching every
+ * incident to compute counts/charts in the browser. See
+ * control-plane's own api/dashboard.py for the exact bounded queries
+ * behind every field.
+ *
+ * Independent-review correction round, BLOCKER 1: `actorToken` is now
+ * REQUIRED (never optional) -- control-plane's own
+ * require_actor_context dependency rejects a missing/absent assertion
+ * with 401 unconditionally for this endpoint, exactly like
+ * listServices/createService (lib/server/service-client.ts). There is
+ * no longer a legacy, unauthenticated call shape for this function.
+ */
+export async function getDashboardSummary(
+  activityDays: number | undefined,
+  actorToken: string,
+): Promise<BackendResult<DashboardSummary>> {
+  const query = buildQuery({ activity_days: activityDays });
+  const result = await getJson(
+    `${CONTROL_PLANE_URL}/api/v1/dashboard/summary${query}`,
+    undefined,
+    actorAuthHeader(actorToken),
+  );
+  if ("networkError" in result) {
+    return fail("unavailable", "control-plane unreachable");
+  }
+  if (result.parseError) {
+    return fail("malformed", "control-plane returned a non-JSON dashboard summary response");
+  }
+  if (result.status === 401) {
+    return fail("unauthorized", "this server could not authenticate to control-plane for the dashboard summary");
+  }
+  if (result.status === 422) {
+    return fail("validation", "control-plane rejected the dashboard summary query parameters");
+  }
+  if (result.status !== 200) {
+    return fail("unavailable", `control-plane returned unexpected status ${result.status} for the dashboard summary`);
+  }
+  const body = result.body as Partial<DashboardSummary> | null;
+  if (!body || !body.counts || typeof body.pending_approvals_count !== "number" || !Array.isArray(body.activity)) {
+    return fail("malformed", "control-plane dashboard summary response did not match the expected shape");
+  }
+  return ok(body as DashboardSummary);
 }

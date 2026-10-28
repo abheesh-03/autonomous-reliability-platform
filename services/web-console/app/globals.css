@@ -1,9 +1,144 @@
-:root {
-  color-scheme: light dark;
-  --background: #0b0f14;
-  --foreground: #e6edf3;
-  --accent: #4ea1ff;
-  --border: #243140;
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------
+ * Design tokens. Dark (deep navy/slate) is the default and primary
+ * theme; `[data-theme="light"]` on <html> (set by components/theme/
+ * ThemeToggle.tsx, persisted in localStorage) switches to the light
+ * palette. Both share the same semantic token NAMES so every
+ * component below only ever references a token, never a raw color.
+ * ------------------------------------------------------------------- */
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+
+  --color-accent-50: #eff6ff;
+  --color-accent-400: #60a5fa;
+  --color-accent-500: #3b82f6;
+  --color-accent-600: #2563eb;
+
+  --color-teal-400: #2dd4bf;
+  --color-teal-500: #14b8a6;
+
+  --color-critical-400: #f87171;
+  --color-critical-500: #ef4444;
+  --color-warning-400: #fbbf24;
+  --color-warning-500: #f59e0b;
+  --color-info-400: #38bdf8;
+  --color-info-500: #0ea5e9;
+  --color-success-400: #34d399;
+  --color-success-500: #10b981;
+  --color-violet-400: #a78bfa;
+  --color-violet-500: #8b5cf6;
+
+  /* Semantic tokens below resolve through the runtime (theme-switchable)
+   * custom properties defined under :root / :root[data-theme="light"]
+   * further down this file -- CSS custom properties resolve at
+   * computed-value time, so this indirection is what lets a single set
+   * of Tailwind utilities (bg-surface, text-fg-muted, border-border, …)
+   * stay correct across both themes without any duplicated classes. */
+  --color-bg: var(--bg);
+  --color-bg-raised: var(--bg-raised);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft-bg: var(--accent-soft-bg);
+  --color-accent-soft-fg: var(--accent-soft-fg);
+  --color-teal: var(--teal);
+  --color-teal-soft-bg: var(--teal-soft-bg);
+  --color-critical-fg: var(--critical-fg);
+  --color-critical-soft-bg: var(--critical-soft-bg);
+  --color-warning-fg: var(--warning-fg);
+  --color-warning-soft-bg: var(--warning-soft-bg);
+  --color-info-fg: var(--info-fg);
+  --color-info-soft-bg: var(--info-soft-bg);
+  --color-success-fg: var(--success-fg);
+  --color-success-soft-bg: var(--success-soft-bg);
+  --color-violet-fg: var(--violet-fg);
+  --color-violet-soft-bg: var(--violet-soft-bg);
+}
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0a0e16;
+  --bg-raised: #10151f;
+  --surface: #121926;
+  --surface-hover: #161f2e;
+  --surface-sunken: #0d121b;
+  --border: #212b3a;
+  --border-strong: #2b3747;
+
+  --fg: #e8edf5;
+  --fg-muted: #94a3b8;
+  --fg-subtle: #64748b;
+
+  --accent: var(--color-accent-500);
+  --accent-fg: #ffffff;
+  --accent-soft-bg: color-mix(in srgb, var(--color-accent-500) 16%, transparent);
+  --accent-soft-fg: var(--color-accent-400);
+
+  --teal: var(--color-teal-500);
+  --teal-soft-bg: color-mix(in srgb, var(--color-teal-500) 16%, transparent);
+
+  --critical-fg: var(--color-critical-400);
+  --critical-soft-bg: color-mix(in srgb, var(--color-critical-500) 18%, transparent);
+  --warning-fg: var(--color-warning-400);
+  --warning-soft-bg: color-mix(in srgb, var(--color-warning-500) 18%, transparent);
+  --info-fg: var(--color-info-400);
+  --info-soft-bg: color-mix(in srgb, var(--color-info-500) 18%, transparent);
+  --success-fg: var(--color-success-400);
+  --success-soft-bg: color-mix(in srgb, var(--color-success-500) 18%, transparent);
+  --violet-fg: var(--color-violet-400);
+  --violet-soft-bg: color-mix(in srgb, var(--color-violet-500) 18%, transparent);
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -8px rgb(0 0 0 / 0.5);
+  --shadow-popover: 0 4px 12px rgb(0 0 0 / 0.5), 0 16px 48px -12px rgb(0 0 0 / 0.6);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f6f8fb;
+  --bg-raised: #ffffff;
+  --surface: #ffffff;
+  --surface-hover: #f1f5f9;
+  --surface-sunken: #eef2f7;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+
+  --fg: #0f1722;
+  --fg-muted: #51607a;
+  --fg-subtle: #7b8aa3;
+
+  --accent: var(--color-accent-600);
+  --accent-fg: #ffffff;
+  --accent-soft-bg: color-mix(in srgb, var(--color-accent-500) 10%, transparent);
+  --accent-soft-fg: var(--color-accent-600);
+
+  --teal: var(--color-teal-500);
+  --teal-soft-bg: color-mix(in srgb, var(--color-teal-500) 12%, transparent);
+
+  --critical-fg: #b91c1c;
+  --critical-soft-bg: color-mix(in srgb, var(--color-critical-500) 12%, transparent);
+  --warning-fg: #92400e;
+  --warning-soft-bg: color-mix(in srgb, var(--color-warning-500) 15%, transparent);
+  --info-fg: #0369a1;
+  --info-soft-bg: color-mix(in srgb, var(--color-info-500) 12%, transparent);
+  --success-fg: #047857;
+  --success-soft-bg: color-mix(in srgb, var(--color-success-500) 12%, transparent);
+  --violet-fg: #6d28d9;
+  --violet-soft-bg: color-mix(in srgb, var(--color-violet-500) 12%, transparent);
+
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.04), 0 8px 24px -8px rgb(15 23 42 / 0.08);
+  --shadow-popover: 0 4px 12px rgb(15 23 42 / 0.08), 0 16px 48px -12px rgb(15 23 42 / 0.16);
 }
 
 * {
@@ -14,16 +149,76 @@ html,
 body {
   margin: 0;
   padding: 0;
-  background: var(--background);
-  color: var(--foreground);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 a {
-  color: var(--accent);
+  color: var(--accent-soft-fg);
   text-decoration: none;
 }
-
 a:hover {
   text-decoration: underline;
+}
+
+/* Visible, consistent keyboard focus ring everywhere -- WCAG 2.2 AA. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+::selection {
+  background: var(--accent-soft-bg);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.96);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* Compact, consistent scrollbar on surfaces that need to scroll
+   internally (e.g. a wide table on a narrow viewport). */
+.thin-scrollbar {
+  scrollbar-width: thin;
+}
+.thin-scrollbar::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
 }

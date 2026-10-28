@@ -10,33 +10,29 @@ export function EvidenceList({
 }) {
   return (
     <div>
-      <h4 style={{ margin: "1rem 0 0.5rem", fontSize: "0.95rem", color: "#9fb3c8" }}>Source collection</h4>
-      <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: "0.3rem" }}>
+      <h4 className="mb-2 text-sm font-semibold text-fg">Source collection</h4>
+      <ul className="grid grid-cols-1 gap-1">
         {sourceOutcomes.map((outcome, index) => (
-          <li key={`${outcome.source}-${index}`} style={{ fontSize: "0.85rem", color: "#9fb3c8" }}>
+          <li key={`${outcome.source}-${index}`} className="text-xs text-fg-muted">
             {outcome.source}: {outcome.status} -- {outcome.detail}
           </li>
         ))}
       </ul>
 
-      <h4 style={{ margin: "1rem 0 0.5rem", fontSize: "0.95rem", color: "#9fb3c8" }}>
-        Evidence ({evidence.length})
-      </h4>
+      <h4 className="mb-2 mt-4 text-sm font-semibold text-fg">Evidence ({evidence.length})</h4>
       {evidence.length === 0 ? (
-        <p style={{ color: "#9fb3c8" }}>No evidence items.</p>
+        <p className="text-sm text-fg-muted">No evidence items.</p>
       ) : (
-        <ol style={{ listStyle: "none", padding: 0, display: "grid", gap: "0.5rem" }}>
+        <ol className="grid grid-cols-1 gap-2">
           {evidence.map((item) => (
-            <li key={item.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "0.6rem" }}>
+            <li key={item.id} className="rounded-lg border border-border bg-surface p-3 text-sm">
               <div>
-                <strong>{item.source}</strong>{" "}
-                <span style={{ color: "#6b7f93", fontSize: "0.8rem" }}>{item.id}</span>
+                <strong className="font-medium text-fg">{item.source}</strong>{" "}
+                <span className="text-xs text-fg-subtle">{item.id}</span>
               </div>
-              <div>{item.summary}</div>
+              <div className="text-fg-muted">{item.summary}</div>
               {item.observed_at && (
-                <div style={{ color: "#6b7f93", fontSize: "0.8rem" }}>
-                  observed {formatTimestamp(item.observed_at)}
-                </div>
+                <div className="text-xs text-fg-subtle">observed {formatTimestamp(item.observed_at)}</div>
               )}
             </li>
           ))}

@@ -10,7 +10,7 @@ WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci
 
-COPY tsconfig.json next.config.ts ./
+COPY tsconfig.json next.config.ts postcss.config.mjs ./
 COPY app/ app/
 COPY lib/ lib/
 COPY components/ components/

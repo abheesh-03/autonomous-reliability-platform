@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from typing import Annotated, Literal
 
 import jwt
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 # Phase 14 Gate 5: a SEPARATE header from `Authorization` -- several
 # routes this module protects (e.g. the remediation decision endpoint)
@@ -84,6 +84,22 @@ Role = Literal["OWNER", "ADMIN", "ENGINEER", "VIEWER", "INCIDENT_APPROVER"]
 # (enforced by agent-runtime-service, not this module) but may not
 # decide remediation.
 ROLES_THAT_MAY_DECIDE_REMEDIATION: frozenset[str] = frozenset({"OWNER", "INCIDENT_APPROVER"})
+
+# Phase 15 independent-review correction round, BLOCKER 2: registering a
+# service is an organization-scoped MUTATION (a new catalog entry every
+# member will subsequently see), not a read -- VIEWER (a real role, but
+# read-only by design) must not be able to create one. INCIDENT_APPROVER
+# is deliberately excluded too: that role's entire purpose is deciding
+# remediation proposals (see ROLES_THAT_MAY_DECIDE_REMEDIATION above),
+# not general organization/catalog administration -- granting it here
+# would be an undocumented scope creep, not a considered product
+# decision. OWNER, ADMIN, and ENGINEER may register a service: ENGINEER
+# is included deliberately (an engineer who owns a service's on-call
+# rotation is exactly who should be able to add it to the catalog),
+# mirroring Gate 3's own description of ENGINEER as able to "read and
+# start/resume investigations" -- registering the systems they operate
+# is the same class of operational, non-administrative action.
+ROLES_THAT_MAY_REGISTER_SERVICES: frozenset[str] = frozenset({"OWNER", "ADMIN", "ENGINEER"})
 
 # Phase 14 correction round, Blocker 1: tool-gateway's own internal
 # token may NEVER be used to read a proposal that has not yet been
@@ -244,6 +260,56 @@ async def get_actor_context(
     except InvalidServiceAssertionError as exc:
         logger.warning("rejected an invalid service assertion: %s", exc)
         raise HTTPException(status_code=401, detail="unauthorized") from exc
+
+
+async def require_actor_context(
+    request: Request,
+    x_service_assertion: Annotated[str | None, Header()] = None,
+) -> ActorContext:
+    """Phase 15: for brand-new, organization-scoped resources (the
+    services registry) that have no pre-Phase-14 legacy/unscoped
+    precedent to preserve -- unlike incidents/remediation, there is no
+    "fall back to the one shared legacy organization" behavior that
+    would ever be correct for data a real user is registering today.
+
+    Deliberately does NOT depend on get_actor_context: that
+    dependency's own first line (`if not
+    org_context_settings.enabled: return None`) skips assertion
+    verification ENTIRELY whenever CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT
+    is disabled (the pre-Phase-14 default, and this platform's own
+    normal local-development default) -- wrapping it would make this
+    dependency ALSO silently skip verification in that default
+    configuration, 401-ing on every real, validly-signed request the
+    web console ever sends. This function instead independently runs
+    the SAME real cryptographic verification
+    (verify_service_assertion) unconditionally, regardless of that
+    flag, so a genuinely authenticated web-console request succeeds
+    in both legacy and secure mode alike, and an unauthenticated one
+    is rejected in both alike.
+    """
+    if not x_service_assertion:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    assertion_settings: ServiceAssertionSettings = request.app.state.service_assertion_settings
+    try:
+        return verify_service_assertion(x_service_assertion, assertion_settings)
+    except InvalidServiceAssertionError as exc:
+        logger.warning("rejected an invalid service assertion: %s", exc)
+        raise HTTPException(status_code=401, detail="unauthorized") from exc
+
+
+def require_role(actor: ActorContext, allowed_roles: frozenset[str], *, action: str) -> None:
+    """A small, explicit, reusable role-gate -- raises 403 (never 404;
+    the actor IS a real, verified, same-organization member, so there is
+    no tenant-isolation reason to hide that this resource/action
+    exists) when the actor's own real, verified role is not in
+    `allowed_roles`. `action` is a short, human-readable description
+    used only in the log line, never echoed back to the caller."""
+    if actor.role not in allowed_roles:
+        logger.info(
+            "denied %s for role %s (user_id=%s, org=%s)", action, actor.role, actor.user_id, actor.organization_id
+        )
+        raise HTTPException(status_code=403, detail="you do not have permission to perform this action")
 
 
 async def require_legacy_ingestion_allowed(request: Request) -> None:

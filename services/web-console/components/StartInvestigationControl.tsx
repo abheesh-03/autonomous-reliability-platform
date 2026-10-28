@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { IncidentStatus } from "../lib/types/incident";
+import { Button } from "./ui/button";
 
 // The ONLY Client Component in Stage 4. Receives only safe, non-secret
 // values (an incident id and its current status) -- NEVER the
@@ -55,19 +56,19 @@ export function StartInvestigationControl({
   }
 
   return (
-    <div>
-      <button onClick={handleClick} disabled={pending}>
-        {pending ? "Starting…" : isRecoveryVariant ? "Create investigation run" : "Start AI investigation"}
-      </button>
+    <div className="space-y-2">
+      <Button onClick={handleClick} disabled={pending} loading={pending}>
+        {isRecoveryVariant ? "Create investigation run" : "Start AI investigation"}
+      </Button>
       {isRecoveryVariant && (
-        <p style={{ color: "#9fb3c8", fontSize: "0.85rem", marginTop: "0.4rem" }}>
+        <p className="text-sm text-fg-muted">
           This incident is already investigating. This console cannot list existing agent runs for an
           incident, so this action may create an additional run rather than resuming one that already
           exists.
         </p>
       )}
       {error && (
-        <p role="alert" style={{ color: "#f3c9c9", marginTop: "0.4rem" }}>
+        <p role="alert" className="text-sm text-critical-fg">
           {error}
         </p>
       )}

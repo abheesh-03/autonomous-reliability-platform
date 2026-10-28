@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { Button } from "./ui/button";
+import { Label } from "./ui/input";
 
 // Shown ONLY while the AgentRun is genuinely waiting_for_approval.
 // Receives only safe, non-secret values -- never an approver token,
@@ -75,28 +77,28 @@ export function RemediationDecisionControl({
 
   if (proposalStatus === "pending_approval") {
     return (
-      <div>
-        <label htmlFor="decision-comment" style={{ display: "block", marginBottom: "0.3rem" }}>
-          Comment (optional)
-        </label>
-        <textarea
-          id="decision-comment"
-          value={comment}
-          onChange={(event) => setComment(event.target.value)}
-          maxLength={1000}
-          rows={2}
-          style={{ width: "100%", marginBottom: "0.5rem" }}
-        />
-        <div style={{ display: "flex", gap: "0.5rem" }}>
-          <button onClick={() => handleDecision("approve")} disabled={pending}>
-            {pending ? "Working…" : "Approve"}
-          </button>
-          <button onClick={() => handleDecision("reject")} disabled={pending}>
-            {pending ? "Working…" : "Reject"}
-          </button>
+      <div className="space-y-2">
+        <div>
+          <Label htmlFor="decision-comment">Comment (optional)</Label>
+          <textarea
+            id="decision-comment"
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+            maxLength={1000}
+            rows={2}
+            className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
+          />
+        </div>
+        <div className="flex gap-2">
+          <Button variant="primary" onClick={() => handleDecision("approve")} disabled={pending} loading={pending}>
+            Approve
+          </Button>
+          <Button variant="destructive" onClick={() => handleDecision("reject")} disabled={pending} loading={pending}>
+            Reject
+          </Button>
         </div>
         {error && (
-          <p role="alert" style={{ color: "#f3c9c9", marginTop: "0.4rem" }}>
+          <p role="alert" className="text-sm text-critical-fg">
             {error}
           </p>
         )}
@@ -110,12 +112,12 @@ export function RemediationDecisionControl({
     // interrupt -- a separate, explicit action, never triggered
     // automatically by the decision above.
     return (
-      <div>
-        <button onClick={handleContinue} disabled={pending}>
-          {pending ? "Working…" : "Continue workflow"}
-        </button>
+      <div className="space-y-2">
+        <Button onClick={handleContinue} disabled={pending} loading={pending}>
+          Continue workflow
+        </Button>
         {error && (
-          <p role="alert" style={{ color: "#f3c9c9", marginTop: "0.4rem" }}>
+          <p role="alert" className="text-sm text-critical-fg">
             {error}
           </p>
         )}

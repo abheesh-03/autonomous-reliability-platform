@@ -1,6 +1,10 @@
 import Link from "next/link";
+import { Siren } from "lucide-react";
 import { BackendFailure } from "../../components/BackendFailure";
 import { SeverityBadge, StatusBadgePill } from "../../components/StatusBadge";
+import { EmptyState } from "../../components/ui/empty-state";
+import { Select } from "../../components/ui/input";
+import { Button } from "../../components/ui/button";
 import { formatTimestamp } from "../../lib/format";
 import { parseIncidentListSearchParams, type RawSearchParams } from "../../lib/incident-query";
 import { listIncidents } from "../../lib/server/control-plane-client";
@@ -25,40 +29,48 @@ export default async function IncidentsPage({
   const result = await listIncidents(parsed, actorToken);
 
   return (
-    <main style={{ maxWidth: 1100, margin: "0 auto", padding: "2rem 1.5rem" }}>
-      <p>
-        <Link href="/">&larr; Dashboard</Link>
-      </p>
-      <h1 style={{ marginTop: "0.5rem" }}>Incidents</h1>
+    <div className="space-y-5">
+      <div>
+        <h1 className="text-xl font-semibold text-fg">Incidents</h1>
+        <p className="mt-1 text-sm text-fg-muted">Every incident this organization has observed.</p>
+      </div>
 
-      <form method="get" style={{ display: "flex", gap: "0.75rem", margin: "1rem 0", flexWrap: "wrap" }}>
-        <label>
-          Status{" "}
-          <select name="status" defaultValue={parsed.status ?? ""}>
-            <option value="">(any)</option>
+      <form method="get" className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-surface p-3">
+        <label className="text-sm">
+          <span className="mb-1.5 block font-medium text-fg">Status</span>
+          <Select name="status" defaultValue={parsed.status ?? ""} className="w-40">
+            <option value="">Any</option>
             {INCIDENT_STATUSES.map((status) => (
               <option key={status} value={status}>
                 {status}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
-        <label>
-          Severity{" "}
-          <select name="severity" defaultValue={parsed.severity ?? ""}>
-            <option value="">(any)</option>
+        <label className="text-sm">
+          <span className="mb-1.5 block font-medium text-fg">Severity</span>
+          <Select name="severity" defaultValue={parsed.severity ?? ""} className="w-40">
+            <option value="">Any</option>
             {INCIDENT_SEVERITIES.map((severity) => (
               <option key={severity} value={severity}>
                 {severity}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
-        <label>
-          Source{" "}
-          <input type="text" name="source" defaultValue={parsed.source ?? ""} placeholder="alertmanager" />
+        <label className="text-sm">
+          <span className="mb-1.5 block font-medium text-fg">Source</span>
+          <input
+            type="text"
+            name="source"
+            defaultValue={parsed.source ?? ""}
+            placeholder="alertmanager"
+            className="h-9 w-48 rounded-lg border border-border bg-surface px-3 text-sm text-fg placeholder:text-fg-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
+          />
         </label>
-        <button type="submit">Filter</button>
+        <Button type="submit" variant="secondary">
+          Filter
+        </Button>
       </form>
 
       {!result.ok ? (
@@ -72,7 +84,7 @@ export default async function IncidentsPage({
           rawParams={rawParams}
         />
       )}
-    </main>
+    </div>
   );
 }
 
@@ -110,62 +122,76 @@ function IncidentTable({
   const hasPrev = offset > 0;
   const hasNext = offset + limit < total;
 
+  if (items.length === 0) {
+    return (
+      <div className="rounded-xl border border-border bg-surface">
+        <EmptyState icon={Siren} title="No incidents match this filter." />
+      </div>
+    );
+  }
+
   return (
-    <>
-      <p style={{ color: "#9fb3c8" }}>
+    <div className="overflow-hidden rounded-xl border border-border bg-surface">
+      <p className="border-b border-border px-4 py-2.5 text-sm text-fg-muted">
         {total} incident{total === 1 ? "" : "s"} total
       </p>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border)" }}>
-            <th>Severity</th>
-            <th>Status</th>
-            <th>Title</th>
-            <th>Source</th>
-            <th>First seen</th>
-            <th>Last seen</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.length === 0 ? (
-            <tr>
-              <td colSpan={6} style={{ padding: "1rem 0", color: "#9fb3c8" }}>
-                No incidents match this filter.
-              </td>
+      <div className="thin-scrollbar overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border text-left text-xs font-medium uppercase tracking-wide text-fg-subtle">
+              <th className="px-4 py-2.5">Severity</th>
+              <th className="px-4 py-2.5">Status</th>
+              <th className="px-4 py-2.5">Title</th>
+              <th className="px-4 py-2.5">Source</th>
+              <th className="px-4 py-2.5">First seen</th>
+              <th className="px-4 py-2.5">Last seen</th>
             </tr>
-          ) : (
-            items.map((incident) => (
-              <tr key={incident.id} style={{ borderBottom: "1px solid var(--border)" }}>
-                <td>
+          </thead>
+          <tbody>
+            {items.map((incident) => (
+              <tr key={incident.id} className="border-b border-border last:border-0 hover:bg-surface-hover">
+                <td className="px-4 py-3">
                   <SeverityBadge severity={incident.severity} />
                 </td>
-                <td>
+                <td className="px-4 py-3">
                   <StatusBadgePill status={incident.status} />
                 </td>
-                <td>
-                  <Link href={`/incidents/${incident.id}`}>{incident.title}</Link>
+                <td className="px-4 py-3">
+                  <Link href={`/incidents/${incident.id}`} className="font-medium text-fg hover:underline">
+                    {incident.title}
+                  </Link>
                 </td>
-                <td>{incident.source}</td>
-                <td>{formatTimestamp(incident.first_seen_at)}</td>
-                <td>{formatTimestamp(incident.last_seen_at)}</td>
+                <td className="px-4 py-3 text-fg-muted">{incident.source}</td>
+                <td className="px-4 py-3 text-fg-muted">{formatTimestamp(incident.first_seen_at)}</td>
+                <td className="px-4 py-3 text-fg-muted">{formatTimestamp(incident.last_seen_at)}</td>
               </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
-      <nav style={{ display: "flex", gap: "1rem", marginTop: "1rem" }}>
+      <nav className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
         {hasPrev ? (
-          <Link href={buildPageHref(rawParams, Math.max(0, offset - limit))}>&larr; Previous</Link>
+          <Link
+            href={buildPageHref(rawParams, Math.max(0, offset - limit))}
+            className="text-sm font-medium text-accent-soft-fg hover:underline"
+          >
+            ← Previous
+          </Link>
         ) : (
-          <span style={{ color: "#6b7f93" }}>&larr; Previous</span>
+          <span className="text-sm text-fg-subtle">← Previous</span>
         )}
         {hasNext ? (
-          <Link href={buildPageHref(rawParams, offset + limit)}>Next &rarr;</Link>
+          <Link
+            href={buildPageHref(rawParams, offset + limit)}
+            className="text-sm font-medium text-accent-soft-fg hover:underline"
+          >
+            Next →
+          </Link>
         ) : (
-          <span style={{ color: "#6b7f93" }}>Next &rarr;</span>
+          <span className="text-sm text-fg-subtle">Next →</span>
         )}
       </nav>
-    </>
+    </div>
   );
 }
