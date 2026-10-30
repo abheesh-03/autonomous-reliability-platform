@@ -16,7 +16,12 @@ export default function SignInPage() {
           <SignInForm />
         </CardContent>
       </Card>
-      <p className="mt-4 text-center text-sm text-fg-muted">
+      <p className="mt-3 text-center text-sm text-fg-muted">
+        <Link href="/forgot-password" className="font-medium text-accent-soft-fg hover:underline">
+          Forgot password?
+        </Link>
+      </p>
+      <p className="mt-2 text-center text-sm text-fg-muted">
         No account?{" "}
         <Link href="/register" className="font-medium text-accent-soft-fg hover:underline">
           Create one

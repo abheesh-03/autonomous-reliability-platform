@@ -14,19 +14,24 @@
  * rather than printing a live, usable verification token nobody but
  * this server's own log stream could ever see.
  *
- * "Secure deployment" is read from CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT
- * -- the SAME explicit flag control-plane's OrganizationContextSettings
- * and agent-runtime-service's own mirror of it already use to
- * distinguish a real, tenant-isolated deployment from local
- * development (see those services' core/config.py / config.py) --
- * never a second, independently-drifting flag.
+ * "Secure deployment" is read via lib/auth/deployment-mode.ts's
+ * `isSecureDeployment` -- the SAME explicit flag control-plane's
+ * OrganizationContextSettings and agent-runtime-service's own mirror
+ * of it already use to distinguish a real, tenant-isolated deployment
+ * from local development (see those services' core/config.py /
+ * config.py) -- never a second, independently-drifting flag.
+ *
+ * PHASE 17A UPDATE: a secure deployment no longer fails closed here
+ * unconditionally -- see `deliverVerificationEmail`'s own updated
+ * docstring below. It fails closed only when SMTP is ALSO not
+ * configured; once real SMTP delivery is wired up
+ * (lib/auth/mail-transport.ts), this is the real, non-faked send
+ * path.
  */
 import "server-only";
 
-function isSecureDeployment(): boolean {
-  const raw = (process.env.CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT ?? "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-}
+import { isSecureDeployment } from "./deployment-mode";
+import { isSmtpConfigured, sendMail } from "./mail-transport";
 
 /**
  * Thrown when a secure deployment has no real email-delivery
@@ -54,15 +59,35 @@ export class VerificationEmailNotConfiguredError extends Error {
 
 /**
  * The real implementation behind `auth.ts`'s `emailVerification.sendVerificationEmail`
- * hook. In local development (the default -- CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT
- * unset/false) this keeps the existing, already-reviewed behavior:
- * log the real, Better-Auth-generated token/URL server-side only,
- * never claiming it was actually emailed. In a secure deployment it
- * never logs the token at all and fails closed instead -- see
- * `VerificationEmailNotConfiguredError`'s own docstring for why that
- * is safe and does not break sign-up itself.
+ * hook.
+ *
+ * PHASE 17A: when real SMTP is configured (lib/auth/mail-transport.ts,
+ * SMTP_* environment variables), this ALWAYS sends a real email
+ * through it -- in local development too, if an operator chooses to
+ * configure SMTP there (never forced). When SMTP is NOT configured:
+ * local development (CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT
+ * unset/false) keeps the existing, already-reviewed behavior -- log
+ * the real, Better-Auth-generated token/URL server-side only, never
+ * claiming it was actually emailed. A secure deployment with no SMTP
+ * configured never logs the token at all and fails closed instead --
+ * see `VerificationEmailNotConfiguredError`'s own docstring for why
+ * that is safe and does not break sign-up itself. This function never
+ * logs a token or URL when SMTP delivery is what actually ran -- only
+ * the local-dev-only, no-SMTP-configured fallback path logs it.
  */
 export async function deliverVerificationEmail(user: { email: string }, url: string): Promise<void> {
+  if (isSmtpConfigured()) {
+    await sendMail({
+      to: user.email,
+      subject: "Verify your email address",
+      text: `Verify your email address by visiting the following link:\n\n${url}\n\nIf you did not request this, you can ignore this message.`,
+      html:
+        `<p>Verify your email address by clicking the link below:</p>` +
+        `<p><a href="${url}">Verify email address</a></p>` +
+        `<p>If you did not request this, you can ignore this message.</p>`,
+    });
+    return;
+  }
   if (isSecureDeployment()) {
     throw new VerificationEmailNotConfiguredError();
   }

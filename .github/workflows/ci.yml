@@ -1422,3 +1422,432 @@ jobs:
       - name: Stop Compose environment (preserve volumes)
         if: always()
         run: docker compose down
+
+  # Phase 17A: deployment-hardening acceptance. A SEPARATE job from
+  # `repository-validation` above (which is completely unchanged by
+  # this addition) -- its own disposable Compose project
+  # (COMPOSE_PROJECT_NAME=arp-deploy-ci), its own fresh volumes, and
+  # its own teardown (--volumes), never touching anything the other
+  # job's `docker compose` (default project) might also be using on
+  # the same runner. Real runtime evidence throughout -- no step here
+  # substitutes a static YAML read for an actual, running proof.
+  phase-17a-deployment-validation:
+    name: Phase 17A deployment validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      COMPOSE_PROJECT_NAME: arp-deploy-ci
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Confirm Docker Compose supports the !override merge tag (>= v2.24.4)
+        run: |
+          docker compose version
+          cat > /tmp/base-override-probe.yml <<'EOF'
+          services:
+            probe:
+              image: busybox
+              ports: ["127.0.0.1:18080:80"]
+          EOF
+          cat > /tmp/override-override-probe.yml <<'EOF'
+          services:
+            probe:
+              ports: !override []
+          EOF
+          result="$(docker compose -f /tmp/base-override-probe.yml -f /tmp/override-override-probe.yml config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["probe"].get("ports"))')"
+          [ "$result" = "None" ] || { echo "FAIL: !override did not fully replace the ports list on this Compose version -- got: $result"; exit 1; }
+          echo "PASS: !override correctly replaces (not concatenates) a list field on this runner's Docker Compose version."
+
+      - name: Check Phase 17A shell script syntax
+        run: |
+          for f in deploy/scripts/*.sh; do
+            echo "checking $f"
+            bash -n "$f"
+          done
+
+      - name: Generate CI-disposable deployment secrets
+        run: |
+          cp deploy/.env.deploy.example deploy/.env.deploy
+          # CORRECTION ROUND (second pass) -- real finding: SMTP_PORT
+          # was never overridden here, so it kept the example file's
+          # own default (587, a real SMTP relay's STARTTLS port).
+          # mailpit (deploy/docker-compose.test-smtp.yml) only ever
+          # listens on 1025 -- without this, web-console's real SMTP
+          # client gets `connect ECONNREFUSED ...:587` on every send
+          # attempt, so the "Real email verification/invitation/
+          # password-reset proof" step below could never have
+          # actually delivered a real email through mailpit at all.
+          sed -i \
+            -e 's#^DEPLOYMENT_PUBLIC_ORIGIN=.*#DEPLOYMENT_PUBLIC_ORIGIN=https://arp-deploy-ci.test#' \
+            -e 's#^SMTP_HOST=.*#SMTP_HOST=mailpit#' \
+            -e 's#^SMTP_FROM_ADDRESS=.*#SMTP_FROM_ADDRESS=noreply@arp-deploy-ci.test#' \
+            -e 's#^SMTP_SECURITY=.*#SMTP_SECURITY=none#' \
+            -e 's#^SMTP_PORT=.*#SMTP_PORT=1025#' \
+            deploy/.env.deploy
+          echo "ALLOW_INSECURE_SMTP_FOR_LOCAL_PROOF=true" >> deploy/.env.deploy
+
+      - name: Preflight MUST fail before secrets are generated (placeholder detection)
+        run: |
+          cp deploy/.env.deploy deploy/.env.deploy.realsecrets.bak
+          cp deploy/.env.deploy.example deploy/.env.deploy
+          sed -i \
+            -e 's#^DEPLOYMENT_PUBLIC_ORIGIN=.*#DEPLOYMENT_PUBLIC_ORIGIN=https://arp-deploy-ci.test#' \
+            deploy/.env.deploy
+          if ./deploy/scripts/preflight.sh; then
+            echo "FAIL: preflight passed against placeholder/empty secrets -- it must fail closed"
+            exit 1
+          fi
+          echo "PASS: preflight correctly rejected placeholder/missing secrets"
+          mv deploy/.env.deploy.realsecrets.bak deploy/.env.deploy
+
+      - name: Generate real deployment secrets and runtime DB roles SQL
+        run: ./deploy/scripts/init-deploy-secrets.sh
+
+      - name: Preflight MUST pass once real secrets are generated
+        run: ./deploy/scripts/preflight.sh
+
+      - name: Preflight fault-injection regression suite (malformed config, failed commands, invalid origins, insecure settings)
+        # CORRECTION ROUND (second pass): wires deploy/scripts/
+        # test-preflight-regressions.sh's 13 real fault-injection
+        # cases into CI itself -- previously only ever run manually.
+        # Safe to run here: it builds and restores its own disposable
+        # deploy/.env.deploy and deploy/secrets/ fixtures internally
+        # (never assumes either already exists), restoring the REAL
+        # secrets this job just generated above before this step
+        # exits, so every later step continues against them unchanged.
+        run: ./deploy/scripts/test-preflight-regressions.sh
+
+      - name: Restore.sh fault-injection regression suite (client-launch failure, connection failure, abnormal termination)
+        run: ./deploy/scripts/test-restore-regressions.sh
+
+      - name: Real auth.member grant-boundary proof, including the historical-default-privilege upgrade fixture (disposable, isolated infra)
+        run: ./deploy/scripts/test-auth-grant-boundary.sh
+
+      - name: Real Caddy log-redaction proof with the exact pinned image (verification-query, reset-path, and reset-landing-query tokens)
+        # CORRECTION ROUND (third pass): runs the EXACT, unmodified
+        # deploy/caddy/Caddyfile with the pinned caddy:2.10.2-alpine
+        # image against a disposable fake backend reproducing all
+        # three real Better Auth token-leak shapes -- proves the
+        # fields-map-key-collision fix (one combined regexp instead
+        # of two competing declarations for the same "request>uri"
+        # key) actually holds. Fully self-contained; does not touch
+        # this job's own running deployment stack.
+        run: ./deploy/scripts/test-caddy-redaction-proof.sh
+
+      - name: Email-flows log-scan fault-injection regressions (failed fetch, missing tokens, irrelevant log capture)
+        # CORRECTION ROUND (third pass): the exact independently
+        # reported bug -- `|| true` on the Caddy log fetch inside
+        # deploy/scripts/test-email-flows.sh meant a failed fetch (or
+        # an empty/irrelevant capture) could produce a false PASS.
+        # Fakes docker/python3 on PATH; never touches a real stack.
+        run: ./deploy/scripts/test-email-flows-log-scan-regressions.sh
+
+      - name: Confirm the fully merged deployment configuration publishes a port ONLY for caddy
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          offenders="$(docker compose --project-name "$COMPOSE_PROJECT_NAME" --env-file deploy/.env.deploy \
+            -f docker-compose.yml -f deploy/docker-compose.override.yml config --format json \
+            | python3 -c 'import json,sys; cfg=json.load(sys.stdin); print(",".join(n for n,s in cfg["services"].items() if s.get("ports") and n!="caddy"))')"
+          [ -z "$offenders" ] || { echo "FAIL: non-proxy services publish a port: $offenders"; exit 1; }
+          echo "PASS: only caddy publishes a port in the merged configuration"
+
+      - name: Bring up the deployment stack
+        run: ./deploy/scripts/deploy-up.sh
+
+      - name: Extract Caddy's local CA root certificate for explicit client trust
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          for _ in $(seq 1 30); do
+            docker compose --project-name "$COMPOSE_PROJECT_NAME" --env-file deploy/.env.deploy \
+              -f docker-compose.yml -f deploy/docker-compose.override.yml \
+              cp caddy:/data/caddy/pki/authorities/local/root.crt /tmp/caddy_root.crt 2>/dev/null && break
+            sleep 2
+          done
+          test -s /tmp/caddy_root.crt
+
+      - name: Real HTTPS proof -- explicit CA trust, no -k, no global TLS bypass
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          code="$(curl -s -o /dev/null -w '%{http_code}' --resolve arp-deploy-ci.test:443:127.0.0.1 --cacert /tmp/caddy_root.crt "$DEPLOYMENT_PUBLIC_ORIGIN/")"
+          [ "$code" != "000" ] || { echo "FAIL: HTTPS request failed outright (TLS handshake or connection failure)"; exit 1; }
+          echo "PASS: real TLS handshake succeeded against Caddy's own local CA (HTTP $code)"
+
+      - name: Trailing-slash and unexpected-method behavior for the telemetry ingestion route
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          CURL="curl -s -o /dev/null -w %{http_code} --resolve arp-deploy-ci.test:443:127.0.0.1 --cacert /tmp/caddy_root.crt"
+          trailing="$($CURL -X POST "$DEPLOYMENT_PUBLIC_ORIGIN/api/v1/telemetry/otlp/v1/metrics/" -d '{}')"
+          wrong_method="$($CURL -X GET "$DEPLOYMENT_PUBLIC_ORIGIN/api/v1/telemetry/otlp/v1/metrics")"
+          echo "trailing-slash status: $trailing ; wrong-method status: $wrong_method"
+          # CORRECTION ROUND (second pass): "!= 200" alone is also
+          # satisfied by a 500 crash, which is not evidence either
+          # request was correctly routed away from the ingestion
+          # contract -- a crashed backend proves nothing about
+          # routing. Measured for real against a live deployment: the
+          # trailing slash falls through to web-console, which 308s
+          # (its own Next.js trailing-slash normalization) to the
+          # no-slash path, itself unmatched; GET on the exact path
+          # also falls through and 404s. Both must be a real
+          # client-or-redirect response (2xx/3xx/4xx), never a 5xx and
+          # never literally 200 (which would mean it reached and was
+          # accepted by the ingestion contract).
+          for pair in "trailing:$trailing" "wrong_method:$wrong_method"; do
+            name="${pair%%:*}"; status="${pair#*:}"
+            if [ "$status" = "000" ]; then
+              echo "FAIL: $name got no response at all (connection/TLS failure) -- not valid proof of correct routing"; exit 1
+            fi
+            if [ "$status" -ge 500 ]; then
+              echo "FAIL: $name got a server error (HTTP $status) -- not valid proof of correct routing"; exit 1
+            fi
+            if [ "$status" = "200" ]; then
+              echo "FAIL: $name was accepted (HTTP 200) as if it were the exact ingestion path"; exit 1
+            fi
+          done
+          echo "PASS: neither a trailing slash nor an unexpected method reaches control-plane's ingestion contract unexpectedly"
+
+      - name: Legacy/internal routes are unreachable through the public proxy
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          CURL="curl -s -o /dev/null -w %{http_code} --resolve arp-deploy-ci.test:443:127.0.0.1 --cacert /tmp/caddy_root.crt"
+          # CORRECTION ROUND: this previously probed
+          # "/api/v1/alertmanager/webhook" -- NOT the real route
+          # (services/control-plane/src/control_plane/api/webhook.py
+          # registers it at "/internal/v1/alertmanager/webhook").
+          # Probing a path that never existed proved nothing about
+          # whether the REAL internal route is exposed through the
+          # public proxy. Also: the "incidents" result was previously
+          # only echoed, never asserted at all -- any status
+          # whatsoever would have let this step pass.
+          webhook="$($CURL -X POST "$DEPLOYMENT_PUBLIC_ORIGIN/internal/v1/alertmanager/webhook")"
+          incidents="$($CURL "$DEPLOYMENT_PUBLIC_ORIGIN/api/v1/incidents")"
+          echo "alertmanager webhook via proxy: $webhook ; direct incidents GET via proxy: $incidents"
+          # CORRECTION ROUND (second pass): "!= 200" alone is also
+          # satisfied by a 500, which proves nothing about whether
+          # the route is actually unreachable -- a crashed web-console
+          # would also return non-200 for a request that was, in
+          # fact, never routed anywhere near control-plane's real
+          # internal surface. Measured for real against a live
+          # deployment: both fall through to web-console's own
+          # routing and 404 (no matching route there either) --
+          # assert that exact value, not merely "not 200".
+          [ "$webhook" = "404" ] || { echo "FAIL: expected HTTP 404 (falls through to web-console, no matching route) for the internal Alertmanager webhook via the public proxy, got $webhook"; exit 1; }
+          [ "$incidents" = "404" ] || { echo "FAIL: expected HTTP 404 (falls through to web-console, no matching route) for the internal incidents list endpoint via the public proxy, got $incidents"; exit 1; }
+          echo "PASS: the legacy/internal control-plane surface is not exposed through the public proxy (both fall through to web-console's own routing, never control-plane directly)"
+
+      - name: Spoofed X-Forwarded-For does not bypass the trusted-proxy rate-limit boundary
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          CURL="curl -s -o /dev/null -w %{http_code} --resolve arp-deploy-ci.test:443:127.0.0.1 --cacert /tmp/caddy_root.crt"
+          # Caddy itself overwrites X-Forwarded-For -- a client-supplied
+          # value here must never reach control-plane unmodified. Fire
+          # enough invalid-credential requests, each claiming a
+          # DIFFERENT spoofed source IP, to exceed the real 10-failures/
+          # 5-minute auth-failure budget; if the spoofed header were
+          # honored end-to-end this would never trip (each request
+          # would look like it came from a fresh address).
+          tripped=0
+          for i in $(seq 1 15); do
+            code="$($CURL -X POST "$DEPLOYMENT_PUBLIC_ORIGIN/api/v1/telemetry/otlp/v1/metrics" \
+              -H "Authorization: Bearer cred_fakeidfortest$i.fakesecretvaluefortest$i" \
+              -H "X-Forwarded-For: 203.0.113.$i" \
+              -H "Content-Type: application/json" -d '{"resourceMetrics":[]}')"
+            [ "$code" = "429" ] && tripped=1
+          done
+          [ "$tripped" = "1" ] || { echo "FAIL: 15 requests with 15 different spoofed X-Forwarded-For values never tripped the auth-failure limiter -- the forged header may be bypassing the trusted-proxy boundary"; exit 1; }
+          echo "PASS: a spoofed, per-request-different X-Forwarded-For could not reset the auth-failure budget -- Caddy's own overwrite of this header is the only value control-plane ever sees"
+
+      - name: Negative origin test -- an untrusted Origin is rejected by the BFF
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          code="$(curl -s -o /dev/null -w '%{http_code}' --resolve arp-deploy-ci.test:443:127.0.0.1 --cacert /tmp/caddy_root.crt \
+            -X POST "$DEPLOYMENT_PUBLIC_ORIGIN/api/services" -H "Origin: https://evil.example" -H "Content-Type: application/json" -d '{}')"
+          echo "mutation request with an untrusted Origin: HTTP $code"
+          # CORRECTION ROUND (second pass): "!= 200" alone is also
+          # satisfied by a 500, which is not valid proof the Origin
+          # guard itself did the rejecting. Measured for real against
+          # a live deployment: web-console's own origin-guard
+          # middleware (lib/server/origin-guard.ts) rejects with a
+          # real 403 -- assert that exact value.
+          [ "$code" = "403" ] || { echo "FAIL: expected HTTP 403 (web-console's own origin-guard rejection) for a mutation request with an untrusted Origin, got $code"; exit 1; }
+          echo "PASS: an untrusted Origin was rejected with the real origin-guard's own 403"
+
+      - name: Real email verification/invitation/password-reset proof (disposable, non-public Mailpit receiver)
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          docker compose --project-name "$COMPOSE_PROJECT_NAME" --env-file deploy/.env.deploy \
+            -f docker-compose.yml -f deploy/docker-compose.override.yml -f deploy/docker-compose.test-smtp.yml \
+            up -d --build mailpit
+          # Phase 14's own established test-only override (already used
+          # by scripts/verify-phase14-multitenant-security.sh) --
+          # Better Auth's real, strict sign-in-specific rate limit
+          # (window 10s/max 3) otherwise trips against this script's own
+          # back-to-back real sign-ins; never set outside an explicit
+          # test run, and reverted immediately after this step.
+          WEB_CONSOLE_DISABLE_SPECIAL_RATE_LIMITS=true docker compose --project-name "$COMPOSE_PROJECT_NAME" --env-file deploy/.env.deploy \
+            -f docker-compose.yml -f deploy/docker-compose.override.yml -f deploy/docker-compose.test-smtp.yml \
+            up -d --build web-console
+          # CORRECTION ROUND: the script previously hardcoded
+          # "https://arp-deploy.test" and "deploy/caddy_root.crt" --
+          # neither matches this job's own real
+          # DEPLOYMENT_PUBLIC_ORIGIN (arp-deploy-ci.test, already
+          # exported above) or its own extracted CA path
+          # (/tmp/caddy_root.crt, see the "Extract Caddy's local CA
+          # root certificate" step). TEST_EMAIL_FLOWS_ORIGIN falls
+          # back to the already-exported DEPLOYMENT_PUBLIC_ORIGIN on
+          # its own; only the CA cert path needs to be set explicitly
+          # here.
+          #
+          # CORRECTION ROUND -- real finding: this step's own
+          # `WEB_CONSOLE_DISABLE_SPECIAL_RATE_LIMITS=true` override is
+          # explicitly documented as "reverted immediately after this
+          # step" (see comment above), but GitHub Actions runs each
+          # `run:` block under `bash -e` -- if the test script below
+          # ever failed, the step aborted on THAT line and the revert
+          # (bringing web-console back up without the override) never
+          # ran, leaving every LATER step in this job running against
+          # relaxed rate limits. `set +e`/capture/`set -e` makes the
+          # revert unconditional, and the step still correctly fails
+          # overall via the final `exit`.
+          set +e
+          TEST_EMAIL_FLOWS_CA_CERT=/tmp/caddy_root.crt ./deploy/scripts/test-email-flows.sh
+          test_status=$?
+          set -e
+          docker compose --project-name "$COMPOSE_PROJECT_NAME" --env-file deploy/.env.deploy \
+            -f docker-compose.yml -f deploy/docker-compose.override.yml \
+            up -d web-console
+          exit "$test_status"
+
+      - name: Real telemetry retention dry-run against the live stack (no deletion)
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          docker compose --project-name "$COMPOSE_PROJECT_NAME" --env-file deploy/.env.deploy \
+            -f docker-compose.yml -f deploy/docker-compose.override.yml \
+            exec -T retention-scheduler python3 ./prune-telemetry-samples.py
+
+      - name: Real telemetry retention bounds/lock-timeout proof (disposable, isolated infra)
+        # CORRECTION ROUND: the dry-run step above never exercises
+        # --execute, bounds validation, or the lock-contention/
+        # statement-timeout fix (scripts/prune-telemetry-samples.py's
+        # MAX_RUNTIME_SECONDS used to only be checked BETWEEN batches,
+        # never enforced on any single operation -- a lock-blocked
+        # DELETE could hang indefinitely). This script is fully
+        # self-contained (its own disposable Postgres instance/
+        # network/images, real Flyway migrations, a real deliberately
+        # held ACCESS EXCLUSIVE lock) and does not touch this job's
+        # own running deployment stack at all.
+        run: ./deploy/scripts/test-retention-timeout.sh
+
+      - name: Real backup proof
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          ./deploy/scripts/backup.sh
+          latest="$(ls -td "${BACKUP_OUTPUT_DIR:-./deploy/backups}"/*/ | head -1)"
+          echo "BACKUP_DIR=$latest" >> "$GITHUB_ENV"
+          test -f "${latest}manifest.json" || { echo "FAIL: no manifest.json produced"; exit 1; }
+          python3 -c "
+          import json
+          with open('${latest}manifest.json') as f:
+              m = json.load(f)
+          assert m.get('roles_dump_sha256') and m.get('db_dump_sha256'), 'manifest missing checksums'
+          print('PASS: backup manifest has real checksums')
+          "
+
+      - name: Real restore proof -- into a brand-new, disposable target (never the deployment's own running database)
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          network="$(docker compose --project-name "$COMPOSE_PROJECT_NAME" --env-file deploy/.env.deploy -f docker-compose.yml -f deploy/docker-compose.override.yml ps -q postgres | xargs docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}')"
+          docker run -d --name arp-restore-proof-tgt-ci --network "$network" \
+            -e POSTGRES_USER=restore_proof_super -e POSTGRES_PASSWORD=restore_proof_super_pw -e POSTGRES_DB=reliability_platform \
+            pgvector/pgvector:pg18
+          for _ in $(seq 1 30); do docker exec arp-restore-proof-tgt-ci pg_isready -U restore_proof_super >/dev/null 2>&1 && break; sleep 2; done
+          RESTORE_CREDS="$(mktemp)"
+          rm -f "$RESTORE_CREDS"
+          TARGET_PGPASSWORD=restore_proof_super_pw ./deploy/scripts/restore.sh \
+            --manifest "${BACKUP_DIR}manifest.json" \
+            --docker-network "$network" \
+            --target-host arp-restore-proof-tgt-ci --target-port 5432 --target-db reliability_platform \
+            --target-superuser restore_proof_super --target-superuser-password-env TARGET_PGPASSWORD \
+            --credentials-out "$RESTORE_CREDS"
+          echo "=== real post-restore proof: incidents table + role set exist on the restored target ==="
+          docker exec -e PGPASSWORD=restore_proof_super_pw arp-restore-proof-tgt-ci \
+            psql -U restore_proof_super -d reliability_platform -v ON_ERROR_STOP=1 \
+            -c "SELECT count(*) FROM reliability.incidents;" \
+            -c "SELECT rolname FROM pg_roles WHERE rolname IN ('control_plane_app','retrieval_app','web_console','agent_runtime') ORDER BY rolname;"
+          docker rm -f arp-restore-proof-tgt-ci
+          rm -f "$RESTORE_CREDS"
+
+      - name: Real restore-then-live-login proof (disposable, isolated infra -- not merely SQL introspection)
+        # CORRECTION ROUND: the SQL-only check above (table/role
+        # existence) is "additional evidence, never a substitute" for
+        # proving a restored database is actually usable by the real
+        # application. This script is fully self-contained -- its own
+        # disposable source+target Postgres instances, its own real
+        # web-console/control-plane images/containers, its own
+        # network -- and proves: a real user signs up, verifies
+        # (local-dev log-fallback link, not faked), signs in, and
+        # creates a real organization against a SOURCE stack; after a
+        # real backup.sh-shaped backup and the real, now-fixed
+        # restore.sh run into a brand-new TARGET, NEW web-console/
+        # control-plane containers using restore.sh's own freshly
+        # generated role passwords let that SAME user sign in again
+        # and read back the SAME organization and a real,
+        # organization-tagged incident row, through control-plane's
+        # real HTTP API (not a raw SQL substitute). Does not touch
+        # this job's own running deployment stack.
+        run: ./deploy/scripts/test-restore-live-login-proof.sh
+
+      - name: Real OTLP deployment-endpoint export proof (rendered onboarding snippet + official Python SDK ingestion)
+        # CORRECTION ROUND (second pass), item 5's first acknowledged
+        # missing deployment check: proves the real onboarding flow
+        # (sign up, verify, sign in, register a service, generate a
+        # credential) renders a copyable snippet whose endpoint is the
+        # real deployment's own public origin, and that the official
+        # `opentelemetry-exporter-otlp-proto-http` SDK, configured
+        # with exactly that snippet, actually exports through the
+        # real Caddy reverse proxy to control-plane. Fully
+        # self-contained disposable infra; does not touch this job's
+        # own running deployment stack.
+        run: ./deploy/scripts/test-otlp-deployment-export-proof.sh
+
+      - name: OTLP proof cleanup-ownership regressions (early build failure, name collisions with unrelated containers)
+        # CORRECTION ROUND (third pass), item 2: the OTLP export proof
+        # above used to `docker rm -f "web-console" "control-plane"
+        # "caddy"` unconditionally on EXIT, even on an early failure
+        # before any container existed -- deleting any unrelated
+        # containers already running under those exact bare names.
+        # Pre-creates real decoy containers literally named
+        # "control-plane"/"web-console", fault-injects the real proof
+        # script above (an early `docker build` failure, and a later
+        # Flyway-migration failure after several real resources
+        # exist), and proves the decoys are never touched while every
+        # resource the fault-injected run itself created is cleaned
+        # up. Does not touch this job's own running deployment stack.
+        run: ./deploy/scripts/test-otlp-proof-cleanup-regressions.sh
+
+      - name: Real cross-tenant resource denial and revoked-credential rejection proofs (disposable, isolated infra)
+        # CORRECTION ROUND (second pass), item 5's remaining two
+        # acknowledged missing deployment checks: proves, through a
+        # real Caddy+web-console+control-plane stack, that (1) an
+        # authenticated user in one real organization cannot read
+        # another real organization's resources, and (2) a revoked
+        # integration credential is rejected on ingestion, exercised
+        # with a fresh failure budget so an unrelated rate limit
+        # cannot be mistaken for the real revocation check. Fully
+        # self-contained disposable infra; does not touch this job's
+        # own running deployment stack.
+        run: ./deploy/scripts/test-cross-tenant-and-revocation-proof.sh
+
+      - name: Show deployment stack logs on failure
+        if: failure()
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          docker compose --project-name "$COMPOSE_PROJECT_NAME" --env-file deploy/.env.deploy \
+            -f docker-compose.yml -f deploy/docker-compose.override.yml logs --tail=200
+
+      - name: Tear down the disposable deployment stack and its volumes
+        if: always()
+        run: |
+          set -a; source deploy/.env.deploy; set +a
+          docker compose --project-name "$COMPOSE_PROJECT_NAME" --env-file deploy/.env.deploy \
+            -f docker-compose.yml -f deploy/docker-compose.override.yml down --volumes || true

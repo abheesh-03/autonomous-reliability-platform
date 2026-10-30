@@ -1,0 +1,28 @@
+# Phase 17A item 4: a DISPOSABLE, NON-PUBLIC local test SMTP receiver
+# for the real email-verification/invitation/password-reset proof
+# (deploy/scripts/test-email-flows.py). Merged ONLY by
+# deploy/scripts/test-email-flows.sh, via an explicit THIRD `-f` flag
+# on top of the real deployment files -- NEVER merged by
+# deploy/scripts/deploy-up.sh or any real deployment path, and never
+# referenced by deploy/docker-compose.override.yml. This file must
+# never ship in a real deployment.
+#
+# mailpit's SMTP port (1025) is reachable only by other containers on
+# this Compose project's own internal network (no publish at all --
+# web-console is the only real SMTP client, and it reaches `mailpit`
+# by its Compose service name). mailpit's own HTTP API/UI (used ONLY
+# by the test script below to fetch captured messages) is bound to
+# 127.0.0.1 only, never 0.0.0.0.
+services:
+  mailpit:
+    image: axllent/mailpit:v1.20.0
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:18025:8025"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M

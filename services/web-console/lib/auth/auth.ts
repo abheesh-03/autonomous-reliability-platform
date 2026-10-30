@@ -28,6 +28,8 @@ import { organization } from "better-auth/plugins";
 import { Pool } from "pg";
 
 import { accessControl, platformRoles } from "./access-control";
+import { isSecureDeployment } from "./deployment-mode";
+import { deliverResetPasswordEmail } from "./email-reset-delivery";
 import { deliverVerificationEmail } from "./email-verification-delivery";
 
 function requiredEnv(name: string): string {
@@ -77,18 +79,37 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
     // Gate 2: "Account recovery/email verification must not be
-    // faked." Sign-IN itself still does not require a verified email
-    // (no external email provider is configured -- see
-    // docs/architecture/phase-14-security-multitenancy.md's
-    // "unsupported production requirements" section) -- but see
+    // faked." Local development (the default) keeps the original
+    // Phase 14 behavior: sign-IN does not require a verified email,
+    // since no email provider exists there -- but see
     // `emailVerification` below and `requireEmailVerificationOnInvitation`
     // in the organization plugin: ACCEPTING or REJECTING an
     // invitation (the one place an unverified account could otherwise
     // claim someone else's identity, Phase 14 correction round Issue
     // 5) DOES require a verified email, using Better Auth's own real,
     // supported verification-token mechanism -- never faked.
-    requireEmailVerification: false,
+    //
+    // PHASE 17A item 4: a real secure deployment DOES require a
+    // verified email to sign in at all -- verified directly against
+    // the installed package's own route implementation
+    // (node_modules/better-auth/dist/api/routes/sign-in.mjs:338,
+    // `if (requireEmailVerification && !user.emailVerified) { ... }`)
+    // -- gated behind the SAME `isSecureDeployment()` flag used
+    // throughout this module, never a second toggle.
+    requireEmailVerification: isSecureDeployment(),
     minPasswordLength: 12,
+    // Phase 17A item 4: Better Auth's own real, supported
+    // forget-password/reset-password flow (verified against
+    // node_modules/better-auth/dist/api/routes/reset-password.mjs) --
+    // a real, single-use, time-limited reset token Better Auth itself
+    // generates and validates; this hook only delivers the real URL,
+    // never invents or manually validates a token itself. See
+    // lib/auth/email-reset-delivery.ts for the same local-dev-logs/
+    // secure-deployment-fails-closed rule `emailVerification` below
+    // already uses.
+    async sendResetPassword({ user, url }) {
+      await deliverResetPasswordEmail(user, url);
+    },
   },
 
   // Phase 14 correction round, Issue 5 / BLOCKER 3: a REAL,
@@ -135,6 +156,21 @@ export const auth = betterAuth({
   // silently rejected by the browser).
   advanced: {
     useSecureCookies: process.env.WEB_CONSOLE_USE_SECURE_COOKIES === "true",
+    // Phase 17A item 2: trusts `x-forwarded-for` for Better Auth's own
+    // built-in rate limiter and session IP tracking (verified against
+    // node_modules/@better-auth/core/dist/types/init-options.d.mts's
+    // real `ipAddress.ipAddressHeaders` option) ONLY when
+    // TRUSTED_PROXY_ENABLED is set -- which a real deployment sets
+    // (deploy/docker-compose.override.yml) BECAUSE this container
+    // publishes no port of its own there; Caddy (deploy/caddy/
+    // Caddyfile) is the only path in, and it OVERWRITES this header
+    // with the real connecting client's address on every request it
+    // proxies, never trusting whatever a client itself sent. Local
+    // development (TRUSTED_PROXY_ENABLED unset) leaves this
+    // unconfigured -- Better Auth's own default (the real, direct
+    // socket peer address) applies, exactly as before Phase 17A.
+    ipAddress:
+      process.env.TRUSTED_PROXY_ENABLED === "true" ? { ipAddressHeaders: ["x-forwarded-for"] } : undefined,
     // Phase 14 correction round, Issue 1: Better Auth's own DEFAULT
     // id generator produces an opaque random string that is NOT
     // guaranteed to be a syntactically valid UUID -- incompatible

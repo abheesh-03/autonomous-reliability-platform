@@ -1,0 +1,25 @@
+-- Phase 17A item 6: a useful index for the retention tool's own real
+-- access pattern.
+--
+-- ADDITIVE ONLY -- V1 through V16 are never edited (V13-V16 were
+-- already applied to at least one developer database before this
+-- migration was written; editing any of them in place would silently
+-- break Flyway's own checksum verification on that database).
+--
+-- V14's own two existing indexes are both useless for
+-- scripts/prune-telemetry-samples.py's real query shape
+-- (`WHERE observed_at < $cutoff`, with NO service_id/organization_id
+-- filter -- retention is global, not scoped to one tenant/service):
+--   - telemetry_samples_service_observed_at_idx (service_id,
+--     observed_at DESC) requires service_id as its leading column, so
+--     Postgres cannot use it to satisfy a bare observed_at predicate
+--     without a service_id equality filter.
+--   - telemetry_samples_organization_id_idx (organization_id) has no
+--     observed_at column at all.
+-- A plain index on observed_at alone is the one that actually serves
+-- this scan efficiently (and the retention tool's own batched
+-- `ORDER BY id LIMIT $n` within that filtered set, verified via a
+-- real EXPLAIN against seeded data during this round's acceptance
+-- test).
+CREATE INDEX telemetry_samples_observed_at_idx
+    ON reliability.telemetry_samples (observed_at);

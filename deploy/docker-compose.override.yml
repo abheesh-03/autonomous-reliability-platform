@@ -1,0 +1,477 @@
+# Phase 17A: single-host deployment overrides for the EXISTING,
+# UNCHANGED root docker-compose.yml.
+#
+# Requires Docker Compose v2.24.4 or later (tested with v5.1.3) for
+# the `!override` YAML merge-key tag used throughout this file --
+# without it, Compose's default list-merge behavior CONCATENATES this
+# file's `ports:`/`volumes:` entries onto the base file's own
+# (development) ones instead of replacing them, which is exactly the
+# "accidentally inheriting development port bindings" risk this
+# deployment configuration exists to avoid. `docker compose config`
+# (run by deploy/scripts/preflight.sh) is the real, automated proof
+# that the merge actually produced the intended result on THIS
+# Compose version -- never merely assumed.
+#
+# Invoked ONLY via deploy/scripts/deploy-up.sh, which always passes
+# both files together with an explicit, separate `--project-name` and
+# `--env-file deploy/.env.deploy` -- never used alone, and never
+# invoked against the developer's own default Compose project.
+#
+# Why an override (not a fully standalone rewrite): every service's
+# build context, image tag, healthcheck, and inter-service dependency
+# is already correct in the base file and exercised continuously by
+# the existing CI job -- copying all 18 service definitions into a
+# second, parallel file would both violate "avoid duplicating
+# configuration gratuitously" and create a second place every future
+# phase would have to remember to update identically. This file
+# changes ONLY what a deployment must change: which ports are
+# published (none, except the new reverse proxy), which credentials
+# each service authenticates with (new, least-privileged runtime
+# roles instead of the shared development role), logging/resource
+# bounds, and the few environment values that must reflect a real
+# public origin instead of http://127.0.0.1.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${DEPLOY_LOG_MAX_SIZE:-10m}"
+    max-file: "${DEPLOY_LOG_MAX_FILES:-3}"
+
+x-small-resources: &small-resources
+  deploy:
+    resources:
+      limits:
+        cpus: "0.50"
+        memory: 256M
+
+x-medium-resources: &medium-resources
+  deploy:
+    resources:
+      limits:
+        cpus: "1.00"
+        memory: 512M
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  # ------------------------------------------------------------------
+  # Data plane: bootstrap credential only; no published port.
+  # ------------------------------------------------------------------
+  postgres:
+    <<: *hardening
+    ports: !override []
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_BOOTSTRAP_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_BOOTSTRAP_PASSWORD}
+    # The base file's own healthcheck interpolates ${POSTGRES_USER} as
+    # a Compose-file-level variable (not a container env var) --
+    # deploy/.env.deploy deliberately never sets that name (it sets
+    # POSTGRES_BOOTSTRAP_USER instead, to make the bootstrap/runtime
+    # separation unmistakable), which left this healthcheck running
+    # `pg_isready -U  -d ...` (empty) and the container stuck
+    # "unhealthy" -- confirmed directly against a real run before this
+    # fix. `!override` replaces it with the real bootstrap identity.
+    healthcheck: !override
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_BOOTSTRAP_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.00"
+          memory: 1024M
+
+  flyway:
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      FLYWAY_USER: ${POSTGRES_BOOTSTRAP_USER}
+      FLYWAY_PASSWORD: ${POSTGRES_BOOTSTRAP_PASSWORD}
+    logging: *default-logging
+
+  # ------------------------------------------------------------------
+  # Application services: no published port (reached only through
+  # `caddy`, defined below, over the Compose-internal network);
+  # control-plane and retrieval-service authenticate as their new,
+  # least-privileged runtime roles (deploy/sql/
+  # 01-create-runtime-roles.sql.template) instead of the shared
+  # development POSTGRES_USER.
+  # ------------------------------------------------------------------
+  control-plane:
+    <<: [*hardening, *medium-resources]
+    ports: !override []
+    environment:
+      POSTGRES_USER: control_plane_app
+      POSTGRES_PASSWORD: ${CONTROL_PLANE_APP_DB_PASSWORD}
+      # Phase 17A item 2: the trusted-proxy boundary
+      # core/trusted_proxy.py enforces for rate-limit-relevant client
+      # IP resolution -- see that module's own docstring. Unset/false
+      # in local development (the base file never sets these at all),
+      # so `request.client.host` (the REAL, direct TCP peer) remains
+      # authoritative there; only this deployment, which actually sits
+      # behind a real proxy, enables trusting its header.
+      TRUSTED_PROXY_ENABLED: ${TRUSTED_PROXY_ENABLED:-true}
+      TRUSTED_PROXY_HOSTS: ${TRUSTED_PROXY_HOSTS:-caddy}
+    logging: *default-logging
+
+  retrieval-service:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    environment:
+      POSTGRES_USER: retrieval_app
+      POSTGRES_PASSWORD: ${RETRIEVAL_APP_DB_PASSWORD}
+    logging: *default-logging
+
+  investigator-service:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  agent-runtime-service:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  tool-gateway:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  # ------------------------------------------------------------------
+  # Internal demo/commerce services -- real telemetry/trace/log
+  # SOURCES for the observability stack and for Phase 16's own
+  # onboarding story, never externally reachable in this deployment
+  # (unlike local development, where checkout-service/payment-service
+  # publish host ports for manual poking).
+  # ------------------------------------------------------------------
+  checkout-service:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  payment-service:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  inventory-service:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  notification-service:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  # ------------------------------------------------------------------
+  # Shared observability -- all internal-only; Grafana/Prometheus/
+  # Alertmanager remain administrative surfaces, never proxied through
+  # `caddy`, per item 1's explicit instruction to keep them private.
+  # ------------------------------------------------------------------
+  otel-collector:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  tempo:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  loki:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  prometheus:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    logging: *default-logging
+
+  alertmanager:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    # Correction round: the base file bind-mounts the DEVELOPER'S OWN
+    # gitignored ./observability/alertmanager/secrets/webhook-token --
+    # absent on a clean checkout, and on an existing one holds the DEV
+    # CONTROL_PLANE_WEBHOOK_TOKEN, which is independently generated
+    # from (and may legitimately differ from) THIS deployment's own
+    # token. `!override` replaces the whole volumes list with the same
+    # alertmanager.yml config mount plus this deployment's OWN
+    # webhook-token file (deploy/secrets/webhook-token, written by
+    # deploy/scripts/init-deploy-secrets.sh from deploy/.env.deploy's
+    # own CONTROL_PLANE_WEBHOOK_TOKEN -- never the dev file, never
+    # read or written here).
+    volumes: !override
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./deploy/secrets/webhook-token:/etc/alertmanager/secrets/webhook-token:ro
+      - alertmanager_data:/alertmanager
+    logging: *default-logging
+
+  grafana:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    # No environment override needed here: the base file already
+    # reads GF_SECURITY_ADMIN_PASSWORD as
+    # "${GRAFANA_ADMIN_PASSWORD:-local_dev_only_change_me}" via
+    # Compose's own variable substitution -- as long as
+    # deploy/.env.deploy supplies a real, generated
+    # GRAFANA_ADMIN_PASSWORD (deploy/scripts/init-deploy-secrets.sh
+    # now does this; the prior round left it unset, silently falling
+    # back to the dev placeholder), that real value flows through
+    # with no override block required.
+    logging: *default-logging
+
+  # ------------------------------------------------------------------
+  # Alloy: Docker API access via the NEW `docker-socket-proxy` sidecar
+  # below (TCP, allowlisted, read-only-in-effect) instead of a direct
+  # bind-mount of the real Docker socket -- see item 1's own explicit
+  # instruction ("a read-only socket mount does not make Docker API
+  # operations read-only"). `volumes: !override` fully replaces the
+  # base file's own two-entry list (config file + direct socket mount)
+  # with this deployment's own config file (pointed at the proxy
+  # instead of the socket) and its own, separately-named data volume
+  # -- the direct socket mount is gone entirely.
+  # ------------------------------------------------------------------
+  alloy:
+    <<: [*hardening, *small-resources]
+    ports: !override []
+    volumes: !override
+      - ./deploy/observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy/data
+    # CORRECTION ROUND: docker-socket-proxy below now lives on its own
+    # dedicated, internal network instead of the implicit project
+    # default -- Alloy is the only intended consumer, so it must
+    # explicitly join BOTH: `default` (everything it already talks to
+    # -- loki/tempo/prometheus/otel-collector) plus the new
+    # `docker-socket-proxy-internal` network. Declaring `networks:` at
+    # all REPLACES the implicit default-network membership, so
+    # `default` must be listed explicitly to keep it.
+    networks:
+      - default
+      - docker-socket-proxy-internal
+    logging: *default-logging
+
+  # ------------------------------------------------------------------
+  # web-console: no published port; real public origin, Secure
+  # cookies, and real SMTP delivery (Phase 17A item 4) instead of
+  # local development's http://127.0.0.1 origin and log-only
+  # "verification email".
+  # ------------------------------------------------------------------
+  web-console:
+    <<: [*hardening, *medium-resources]
+    ports: !override []
+    environment:
+      WEB_CONSOLE_TRUSTED_ORIGIN: ${DEPLOYMENT_PUBLIC_ORIGIN}
+      # CORRECTION ROUND (second pass): dedicated to the rendered
+      # OTLP-ingestion snippet (app/services/[serviceId]/page.tsx) --
+      # deliberately a SEPARATE variable from WEB_CONSOLE_TRUSTED_ORIGIN
+      # above even though it happens to carry the same value in THIS
+      # deployment: that variable's own job (Better Auth's trusted-
+      # origin check) is unrelated to telemetry ingestion, and local
+      # dev needs the two to diverge (web-console's own origin vs.
+      # control-plane's direct port) -- a shared variable papered over
+      # that difference and broke local dev's rendered snippet too.
+      OTLP_INGEST_PUBLIC_ORIGIN: ${DEPLOYMENT_PUBLIC_ORIGIN}
+      WEB_CONSOLE_USE_SECURE_COOKIES: "true"
+      WEB_CONSOLE_DISABLE_SPECIAL_RATE_LIMITS: ${WEB_CONSOLE_DISABLE_SPECIAL_RATE_LIMITS:-false}
+      # Phase 17A item 4 bug fix: the base docker-compose.yml never
+      # passes this to web-console at all (only to control-plane/
+      # agent-runtime-service) -- without it, lib/auth/deployment-
+      # mode.ts's isSecureDeployment() always read undefined here,
+      # silently leaving requireEmailVerification/the trusted-proxy IP
+      # config off even when the real deployment flag was "true"
+      # everywhere else. Found by the real sign-in-before-verification
+      # proof in deploy/scripts/test-email-flows.py, which got a real
+      # 200 instead of the expected rejection before this fix.
+      CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT: ${CONTROL_PLANE_REQUIRE_ORGANIZATION_CONTEXT:-false}
+      # Correction round: the SAME class of bug as the fix above --
+      # lib/auth/auth.ts's own `advanced.ipAddress` block gates
+      # trusting X-Forwarded-For on `TRUSTED_PROXY_ENABLED === "true"`
+      # (see that file's own comment), but this variable was never
+      # passed to web-console at all (only to control-plane). Found
+      # this round by deploy/scripts/validate-merged-config.py's own
+      # explicit check of the ACTUAL merged environment, not merely
+      # deploy/.env.deploy's own value.
+      TRUSTED_PROXY_ENABLED: ${TRUSTED_PROXY_ENABLED:-true}
+      TRUSTED_PROXY_HOSTS: ${TRUSTED_PROXY_HOSTS:-caddy}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-}
+      SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+    logging: *default-logging
+
+  # ------------------------------------------------------------------
+  # NEW: the allowlisted Docker API proxy Alloy talks to instead of
+  # the raw socket. CONTAINERS=1 (list/inspect/stream logs) is the
+  # only category enabled; POST=0 (default) blocks every mutating
+  # call (create/start/stop/exec/kill/remove), and every other
+  # read-category flag is explicitly 0 too (IMAGES, NETWORKS, VOLUMES,
+  # EXEC, SERVICES, TASKS, NODES, SWARM, SYSTEM, INFO, PLUGINS,
+  # SESSION, DISTRIBUTION, BUILD, COMMIT, CONFIGS, GRPC -- VERSION=1 is
+  # required for the Docker client's own API-version handshake). Known
+  # residual exposure, documented rather than silently ignored:
+  # CONTAINERS=1 also permits GET .../containers/{id}/archive (a tar
+  # export of a container's filesystem) -- still a read-only
+  # capability, and vastly narrower than the raw socket (which also
+  # permits arbitrary container creation with arbitrary host mounts,
+  # image pulls, exec into any container, and swarm control), but
+  # worth a reader knowing about (see deploy/README.md's own
+  # "observability socket proxy" limitations note).
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    restart: unless-stopped
+    <<: *hardening
+    read_only: true
+    # CORRECTION ROUND: independent review correctly found this
+    # previously had NO `networks:` key at all, which means it
+    # implicitly joined the project's one flat default network --
+    # exactly the SAME network every other service in this stack
+    # (postgres, control-plane, web-console, everything) is also on,
+    # none of which have any legitimate reason to query the Docker
+    # API through it. Moving it to its OWN, dedicated network that
+    # only Alloy also joins means no other container can even reach
+    # its listening port at all, let alone call it. Declaring
+    # `networks:` at all REPLACES implicit default-network
+    # membership -- `default` is deliberately NOT listed here, so
+    # this service is no longer reachable from it.
+    networks:
+      - docker-socket-proxy-internal
+    # This image's own entrypoint generates /tmp/haproxy.cfg and
+    # haproxy itself needs to write /run/haproxy.pid -- real, minimal
+    # scratch-space needs, confirmed directly (the container
+    # crash-looped with "Read-only file system" / "Cannot create
+    # pidfile /run/haproxy.pid" before this was added). A tmpfs is
+    # still never persistent and never backed by the host filesystem.
+    tmpfs:
+      - /tmp
+      - /run
+      - /var/lib/haproxy
+    environment:
+      CONTAINERS: "1"
+      VERSION: "1"
+      POST: "0"
+      EVENTS: "0"
+      IMAGES: "0"
+      NETWORKS: "0"
+      VOLUMES: "0"
+      EXEC: "0"
+      SERVICES: "0"
+      TASKS: "0"
+      NODES: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      INFO: "0"
+      PLUGINS: "0"
+      SESSION: "0"
+      DISTRIBUTION: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      GRPC: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  # ------------------------------------------------------------------
+  # NEW: Phase 17A item 6 -- the explicit, documented retention
+  # scheduler. A plain, pinned, non-root Python image sleeping between
+  # runs and invoking scripts/prune-telemetry-samples.py on the
+  # interval below; its own failure path is observable via
+  # `docker compose logs retention-scheduler` and a non-zero exit from
+  # the script, never a silent no-op. Dry-run by default
+  # (TELEMETRY_RETENTION_DRY_RUN=true) until explicitly set to
+  # "false" in deploy/.env.deploy.
+  # ------------------------------------------------------------------
+  retention-scheduler:
+    build:
+      # Compose resolves a relative build context against the
+      # "project directory" (the FIRST -f file's own directory --
+      # here, the repository root, since docker-compose.yml is always
+      # listed first), NOT against this override file's own
+      # directory -- confirmed directly via `docker compose config`
+      # before relying on it. "." is therefore already the repository
+      # root.
+      context: .
+      dockerfile: deploy/retention-scheduler.Dockerfile
+    restart: unless-stopped
+    <<: *hardening
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: control_plane_app
+      POSTGRES_PASSWORD: ${CONTROL_PLANE_APP_DB_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TELEMETRY_RETENTION_DAYS: ${TELEMETRY_RETENTION_DAYS:-30}
+      TELEMETRY_RETENTION_DRY_RUN: ${TELEMETRY_RETENTION_DRY_RUN:-true}
+      TELEMETRY_RETENTION_BATCH_SIZE: ${TELEMETRY_RETENTION_BATCH_SIZE:-5000}
+      TELEMETRY_RETENTION_INTERVAL_HOURS: ${TELEMETRY_RETENTION_INTERVAL_HOURS:-24}
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  # ------------------------------------------------------------------
+  # NEW: the ONLY service with a published port -- the real, pinned
+  # reverse proxy. See deploy/caddy/Caddyfile for the exact two routes
+  # it ever proxies (the telemetry-ingestion path to control-plane,
+  # everything else to web-console) and deploy/README.md for the
+  # local-HTTPS-proof procedure.
+  # ------------------------------------------------------------------
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    <<: *hardening
+    depends_on:
+      web-console:
+        condition: service_healthy
+      control-plane:
+        condition: service_healthy
+    environment:
+      DEPLOYMENT_PUBLIC_ORIGIN: ${DEPLOYMENT_PUBLIC_ORIGIN}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+volumes:
+  alloy_data: {}
+  caddy_data: {}
+  caddy_config: {}
+
+networks:
+  # CORRECTION ROUND: dedicated to docker-socket-proxy + alloy only
+  # (see both services' own comments above). `internal: true` means
+  # Compose gives this network no gateway/route to the outside world
+  # at all -- consistent with the fact that nothing on it ever needs
+  # one; the real Docker API access it carries is entirely
+  # container-to-container.
+  docker-socket-proxy-internal:
+    internal: true

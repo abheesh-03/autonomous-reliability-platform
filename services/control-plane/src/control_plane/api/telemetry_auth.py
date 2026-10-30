@@ -21,14 +21,25 @@ credential id is just a public-looking string on the wire, so an
 attacker could exhaust the 10-failures/5-minute budget for a
 (fabricated) id, then simply use a different fabricated id on the very
 next request and never be bounded at all, from the SAME source. The
-limiter is now keyed EXCLUSIVELY by `request.client.host` -- the real
-TCP peer address ASGI/Starlette itself observed opening the
-connection, never a value the request body/headers can set. This
-service does not sit behind a trusted reverse proxy that strips/sets
-`X-Forwarded-For`, so that (or any other caller-suppliable "I am
-really at this IP" header) is deliberately never read or trusted here;
-doing so without a verified trusted-proxy boundary would just hand the
-attacker back exactly the bypass this fix closes.
+limiter is now keyed EXCLUSIVELY by the request's resolved client
+address (see `core/trusted_proxy.py::resolve_client_ip`), never a
+value the request body/headers can set directly. In local development
+(no reverse proxy, `TRUSTED_PROXY_ENABLED` unset) that resolved
+address is always the real TCP peer ASGI/Starlette itself observed
+opening the connection -- `X-Forwarded-For` is never read or trusted.
+
+PHASE 17A: a real single-host deployment DOES sit behind a reverse
+proxy (Caddy -- see deploy/caddy/Caddyfile and deploy/docker-compose.
+override.yml), which is the only way to reach this service at all in
+that deployment (no port is published for it directly). Trusting
+`X-Forwarded-For` unconditionally in THAT topology would otherwise
+collapse every distinct external client onto the proxy's own single
+container IP, defeating this limiter's entire purpose -- so
+`resolve_client_ip` trusts the header only when the request's own
+direct TCP peer is independently confirmed to be that configured
+proxy, and Caddy itself always OVERWRITES (never appends to) the
+header with the real connecting client's address before forwarding --
+see that module's own docstring for the full threat model.
 """
 
 import logging
@@ -40,6 +51,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from control_plane.api.dependencies import get_integration_credential_repository
 from control_plane.core.credentials import parse_bearer_token, verify_secret
 from control_plane.core.rate_limit import AUTH_FAILURE_RATE_LIMITER, INGESTION_RATE_LIMITER
+from control_plane.core.trusted_proxy import resolve_client_ip
 from control_plane.repositories.integration_credential_repository import IntegrationCredentialRepository
 
 logger = logging.getLogger("control_plane.telemetry_auth")
@@ -54,12 +66,11 @@ class TelemetryCredentialContext:
 
 
 def _source_key(request: Request) -> str:
-    """The AUTH-FAILURE limiter's only key: the real connecting peer
-    address, never anything the caller's request itself supplies (see
-    this module's own docstring for why a credential-id-derived key was
-    bypassable, and why `X-Forwarded-For` is never trusted here)."""
-    client = request.client
-    return f"ip:{client.host}" if client else "ip:unknown"
+    """The AUTH-FAILURE limiter's only key: the request's resolved
+    client address (see `core/trusted_proxy.py` for exactly when that
+    is allowed to come from `X-Forwarded-For` instead of the direct
+    TCP peer)."""
+    return f"ip:{resolve_client_ip(request)}"
 
 
 async def require_telemetry_credential(

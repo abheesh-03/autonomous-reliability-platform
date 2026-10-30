@@ -109,7 +109,36 @@ export default async function ServiceDetailPage({
                 serviceId={serviceId}
                 initialCredentials={integrationsResult.data.items}
                 canManage={canManage}
-                otlpEndpoint={process.env.NEXT_PUBLIC_OTLP_INGEST_ENDPOINT ?? "http://127.0.0.1:8000"}
+                // CORRECTION ROUND (second pass): `NEXT_PUBLIC_*`
+                // variables are inlined by Next.js at BUILD time, not
+                // read at runtime, so the original bug used a dead
+                // env var. The FIRST fix switched to
+                // `WEB_CONSOLE_TRUSTED_ORIGIN` -- wrong for a
+                // different reason: `docker-compose.yml`'s own local
+                // dev config sets that variable EXPLICITLY to
+                // `http://127.0.0.1:3101` (web-console's own origin,
+                // for Better Auth's trusted-origin check), which has
+                // no OTLP route at all -- so the `?? "..."` fallback
+                // below never actually applied in local dev either,
+                // and the rendered snippet pointed at the wrong
+                // service there too. A dedicated, purpose-specific
+                // variable fixes both environments at once:
+                // `OTLP_INGEST_PUBLIC_ORIGIN` is left UNSET in local
+                // dev (so this fallback -- control-plane's own direct
+                // port -- applies, unchanged from before either
+                // "fix"), and is explicitly set to
+                // `${DEPLOYMENT_PUBLIC_ORIGIN}` only in
+                // deploy/docker-compose.override.yml, where
+                // deploy/caddy/Caddyfile actually reverse-proxies the
+                // real external ingestion path
+                // (/api/v1/telemetry/otlp/v1/metrics) to control-plane
+                // at that same public origin -- control-plane's own
+                // :8000 is never reachable from outside the
+                // deployment at all. Still a plain, non-NEXT_PUBLIC_
+                // env var, read live per-request by this Server
+                // Component -- never derived from any client-supplied
+                // request header.
+                otlpEndpoint={process.env.OTLP_INGEST_PUBLIC_ORIGIN ?? "http://127.0.0.1:8000"}
               />
             ) : (
               <BackendFailure kind={integrationsResult.error.kind} />

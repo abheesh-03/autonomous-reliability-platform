@@ -1,0 +1,60 @@
+// Phase 17A deployment variant of observability/alloy/config.alloy --
+// the ONLY change from that file is the Docker API endpoint: a real
+// TCP connection to the `docker-socket-proxy` sidecar instead of a
+// direct bind-mount of /var/run/docker.sock. See deploy/docker-
+// compose.override.yml's own `docker-socket-proxy` service for the
+// explicit, allowlisted (CONTAINERS=1, everything else 0, including
+// POST=0) subset of the Docker API this grants -- never the full
+// socket, which is equivalent to root on the Docker host (see
+// observability/alloy/config.alloy's own docstring in the local-dev
+// file for that exact threat-model note; this file closes it for a
+// deployment). Every other pipeline stage (discovery -> relabel ->
+// loki.source.docker -> loki.write) is byte-for-byte identical to the
+// local-development file.
+
+discovery.docker "containers" {
+	host = "tcp://docker-socket-proxy:2375"
+}
+
+discovery.relabel "app_containers" {
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		regex         = sys.env("COMPOSE_PROJECT_NAME")
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		regex         = "checkout-service|payment-service|inventory-service|notification-service"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		target_label  = "compose_project"
+	}
+
+	rule {
+		target_label = "environment"
+		replacement  = "deploy"
+	}
+}
+
+loki.source.docker "containers" {
+	host       = "tcp://docker-socket-proxy:2375"
+	targets    = discovery.relabel.app_containers.output
+	forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

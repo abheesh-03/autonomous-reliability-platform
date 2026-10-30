@@ -1,0 +1,122 @@
+{
+	# No admin API exposed on any network interface -- nothing else in
+	# this stack, and nothing external, ever needs to reconfigure Caddy
+	# at runtime.
+	admin off
+}
+
+# Phase 17A local proof uses Caddy's OWN built-in local certificate
+# authority ("tls internal") -- a real, dedicated test CA, never a
+# globally/publicly trusted one, and never curl -k / a global
+# TLS-verification bypass (see deploy/README.md's "Local HTTPS proof"
+# section for how a client explicitly trusts this CA's root
+# certificate instead). A real Phase 17B hosting deployment with an
+# actual, DNS-resolvable domain replaces the "tls internal" line below
+# with Caddy's own automatic public ACME issuance (remove the line
+# entirely -- Caddy already does this by default for any site block
+# whose host is not "localhost"/an IP/another non-public-looking
+# name) -- not implemented or claimed by this phase.
+{$DEPLOYMENT_PUBLIC_ORIGIN} {
+	tls internal
+
+	encode gzip zstd
+
+	# CORRECTION ROUND, item 3: by default Caddy's JSON access log
+	# includes the full request URI and every request/response header
+	# verbatim. Three real, distinct token-leak paths here, confirmed
+	# directly against Better Auth's own installed source
+	# (node_modules/better-auth/dist/api/routes/{email-verification,
+	# password}.mjs):
+	#   1. The verification email's link carries its token as a QUERY
+	#      parameter (`GET /api/auth/verify-email?token=...`).
+	#   2. The password-reset email's link carries its token as a PATH
+	#      segment instead (`GET /api/auth/reset-password/<token>
+	#      ?callbackURL=...`).
+	#   3. On a VALID reset token, that same endpoint then redirects
+	#      (302) to `<callbackURL>?token=<token>` -- the SAME raw
+	#      token, now as a query parameter on the LANDING page's own
+	#      URL, carried inside the `Location` RESPONSE header.
+	#
+	# CORRECTION ROUND (third pass) -- real finding: `fields` below is
+	# a MAP keyed by field path, not a list -- declaring BOTH
+	# `request>uri query { ... }` and `request>uri regexp ...` as two
+	# separate entries for the SAME key ("request>uri") meant the
+	# second simply overwrote the first in the compiled config
+	# (confirmed directly: `caddy adapt` on the previous two-line
+	# version showed only the regexp filter survived; the query-
+	# parameter redaction for `/verify-email?token=...` was silently
+	# gone entirely, never actually protecting leak path #1 above,
+	# despite having been written and believed tested). Fixed with
+	# ONE regexp covering all three leak paths at once -- there is
+	# only one "request>uri" key to assign, so the fix is a single
+	# pattern, not two filters: `(token=|reset-password/)` matches
+	# whichever literal prefix precedes the token (the query key for
+	# leak #1 and #3's own `?token=` landing redirect target carried
+	# in a DIFFERENT field below, and the path segment for leak #2),
+	# `[^&/?]+` consumes exactly the opaque token value that follows
+	# (stopping at the next `&`, `/`, or `?` -- real Better Auth
+	# tokens are plain alphanumeric/base64url and never contain any of
+	# those), and `${1}REDACTED` keeps the matched prefix while
+	# discarding the value. Confirmed directly against a real Caddy
+	# instance: a real `?token=...` query string, a real
+	# `/reset-password/<token>` path, and a real `Location` header
+	# carrying `?token=...` on its own landing URL are all redacted in
+	# the logged record while the real client receives every one of
+	# them completely unmodified.
+	#
+	# The `Cookie` request header and `Set-Cookie` response header
+	# both carry the real Better Auth session token on every
+	# authenticated request/sign-in -- unaffected by the above (a
+	# different field key each), confirmed separately.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp (token=|reset-password/)[^&/?]+ ${1}REDACTED
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+				request>headers>Referer delete
+				resp_headers>Set-Cookie delete
+				resp_headers>Location delete
+			}
+		}
+	}
+
+	# Phase 17A item 1: the EXACT external telemetry ingestion path
+	# only, preserving control-plane's existing method/body/auth
+	# contract unchanged -- no path rewriting, no stripped prefix, and
+	# no broad /api/* proxy to control-plane. Every other
+	# control-plane route (incidents, remediation, internal-service
+	# reads, the Alertmanager webhook, services/integrations CRUD used
+	# only by web-console's own server-side BFF) stays unreachable
+	# from outside this host; only this one path is ever proxied here.
+	@telemetry_ingest {
+		method POST
+		path /api/v1/telemetry/otlp/v1/metrics
+	}
+	handle @telemetry_ingest {
+		reverse_proxy control-plane:8000 {
+			# Phase 17A item 2: OVERWRITE (never append to) the
+			# forwarded-client-address header with the REAL connecting
+			# peer this exact TCP connection terminated on -- a client
+			# that sends its own X-Forwarded-For is never trusted; this
+			# is the one hop control-plane's own trusted-proxy check
+			# (core/trusted_proxy.py) actually relies on being honest.
+			header_up X-Forwarded-For {http.request.remote.host}
+			header_up X-Forwarded-Proto {http.request.scheme}
+			header_up Host {http.request.host}
+		}
+	}
+
+	# Everything else -> web-console, which owns its own browser
+	# BFF/auth routes under /api/* (Better Auth, service-assertion
+	# minting, etc.) -- never routed to control-plane directly.
+	handle {
+		reverse_proxy web-console:3101 {
+			header_up X-Forwarded-For {http.request.remote.host}
+			header_up X-Forwarded-Proto {http.request.scheme}
+			header_up Host {http.request.host}
+		}
+	}
+}

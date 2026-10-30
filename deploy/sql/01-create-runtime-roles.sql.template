@@ -1,0 +1,204 @@
+-- Phase 17A: deployment-only PostgreSQL runtime-role separation.
+--
+-- NOT applied to the existing local-development database and NOT a
+-- change to database/migrations/ (V1-V16 stay byte-for-byte
+-- untouched; this is bootstrap/role DDL, not Flyway-owned schema
+-- DDL). Applied once, by deploy/scripts/init-deploy-secrets.sh,
+-- against a freshly-provisioned deployment database, AFTER Flyway has
+-- created reliability.* (the roles below need those tables to exist
+-- before GRANT can target them).
+--
+-- WHY THIS EXISTS: the existing local-development docker-compose.yml
+-- gives control-plane, retrieval-service, AND Flyway itself the SAME
+-- schema-owning POSTGRES_USER role -- correct for a single-operator
+-- local dev box, but broader than a deployed service needs (a bug in
+-- either application could otherwise ALTER/DROP its own tables, or
+-- read a sibling application's unrelated data). This file creates
+-- two NEW, separate, least-privileged runtime roles -- one per
+-- application that talks to `reliability.*` directly -- used ONLY in
+-- deploy/docker-compose.yml.
+--
+-- `web_console` (auth schema) and `agent_runtime` (agent_runtime
+-- schema) are ALSO created here, with the EXACT SAME role
+-- attributes/schema-ownership shape as the repository root's own
+-- scripts/init-web-console-db.sh / scripts/init-agent-runtime-db.sh
+-- (Phase 14 / Phase 7) -- NOT because they need any further
+-- narrowing (they are already correctly least-privileged), but
+-- because those two scripts hardcode `ENV_FILE=".env"` (the
+-- repository root's OWN local-development file) with no override
+-- parameter, so invoking them directly from a deployment flow would
+-- read/write the DEVELOPER'S OWN .env -- exactly what this phase's
+-- own instructions forbid. This template is deployment's own,
+-- parallel bootstrap path for the identical role/schema shape,
+-- reading only deploy/.env.deploy.
+--
+-- Placeholders ending in `_PLACEHOLDER` are substituted by
+-- init-deploy-secrets.sh via envsubst-style sed, from freshly
+-- generated, independently random passwords -- this file is a
+-- template, never applied with the literal placeholder text, and
+-- never committed with real values (it has none).
+--
+-- Neither new role can: create/alter/drop a table or schema, create
+-- or alter another role, bypass row-level security, log in as a
+-- replication connection, or read/write `auth.*` or `agent_runtime.*`.
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'control_plane_app') THEN
+    CREATE ROLE control_plane_app LOGIN
+      NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'retrieval_app') THEN
+    CREATE ROLE retrieval_app LOGIN
+      NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'web_console') THEN
+    CREATE ROLE web_console LOGIN
+      NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'agent_runtime') THEN
+    CREATE ROLE agent_runtime LOGIN
+      NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+  END IF;
+END
+$$;
+
+ALTER ROLE control_plane_app WITH PASSWORD 'CONTROL_PLANE_APP_PASSWORD_PLACEHOLDER';
+ALTER ROLE control_plane_app WITH NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+
+ALTER ROLE retrieval_app WITH PASSWORD 'RETRIEVAL_APP_PASSWORD_PLACEHOLDER';
+ALTER ROLE retrieval_app WITH NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+
+-- web_console / agent_runtime: identical shape to scripts/init-web-
+-- console-db.sh / scripts/init-agent-runtime-db.sh (own schema,
+-- search_path set at the role level, no access to `reliability`).
+ALTER ROLE web_console WITH PASSWORD 'WEB_CONSOLE_PASSWORD_PLACEHOLDER';
+ALTER ROLE web_console WITH NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION web_console;
+ALTER ROLE web_console SET search_path TO auth;
+
+ALTER ROLE agent_runtime WITH PASSWORD 'AGENT_RUNTIME_PASSWORD_PLACEHOLDER';
+ALTER ROLE agent_runtime WITH NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+CREATE SCHEMA IF NOT EXISTS agent_runtime AUTHORIZATION agent_runtime;
+ALTER ROLE agent_runtime SET search_path TO agent_runtime;
+
+REVOKE ALL ON SCHEMA reliability FROM web_console, agent_runtime;
+REVOKE ALL ON ALL TABLES IN SCHEMA reliability FROM web_console, agent_runtime;
+
+GRANT USAGE ON SCHEMA reliability TO control_plane_app;
+GRANT USAGE ON SCHEMA reliability TO retrieval_app;
+
+-- control_plane_app: full DML on the tables control-plane's own
+-- repositories/*.py actually read and write (see
+-- services/control-plane/src/control_plane/repositories/ -- every
+-- `schema="reliability"` table reference was audited to produce this
+-- exact list).
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+  reliability.incidents,
+  reliability.services,
+  reliability.integration_credentials,
+  reliability.telemetry_samples,
+  reliability.remediation_proposals
+  TO control_plane_app;
+
+-- incident_events/remediation_events are real, trigger-enforced
+-- append-only audit tables (see database/migrations/V4 and V6's own
+-- "block_mutation" triggers). The UPDATE/DELETE triggers already
+-- reject any attempt regardless of grants -- this GRANT omission is
+-- belt-and-suspenders defense in depth, not the primary control, and
+-- matches the trigger's own intent exactly: a row can be appended,
+-- never changed or removed, by this role either.
+GRANT SELECT, INSERT ON
+  reliability.incident_events,
+  reliability.remediation_events
+  TO control_plane_app;
+
+-- retrieval_app: read-only on incidents (organization_id lookup for
+-- tenant-scoped historical search only -- see
+-- services/retrieval-service/src/retrieval_service/db.py's own
+-- `search_chunks`/`get_incident_organization_id`), full DML on the
+-- one table it owns and writes.
+GRANT SELECT ON reliability.incidents TO retrieval_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON reliability.retrieval_chunks TO retrieval_app;
+
+-- Explicit sequence grants -- BIGSERIAL/SERIAL primary keys need
+-- USAGE on their backing sequence for INSERT to work at all; GRANT ON
+-- ALL TABLES does not imply this.
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA reliability TO control_plane_app;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA reliability TO retrieval_app;
+
+-- Defense in depth: `retrieval_app` gets NOTHING on `auth` (Better
+-- Auth/web_console's own schema) or `agent_runtime` (agent_runtime's
+-- own schema) -- the authoritative proof is that no GRANT to it
+-- appears anywhere in this file; this REVOKE only guards against a
+-- future, accidental PUBLIC grant on those schemas. `control_plane_app`
+-- is deliberately NOT included here -- see the real, narrow grant
+-- below (Phase 14 correction round, BLOCKER 4) it needs on `auth`
+-- specifically.
+SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'agent_runtime') AS agent_runtime_schema_exists \gset
+\if :agent_runtime_schema_exists
+REVOKE ALL ON SCHEMA agent_runtime FROM control_plane_app, retrieval_app;
+\else
+\echo 'agent_runtime schema does not exist yet -- skipping (default privileges already grant no access)'
+\endif
+
+-- Phase 14 correction round, BLOCKER 4, re-targeted at
+-- `control_plane_app` (the role control-plane actually authenticates
+-- as in this deployment -- the ORIGINAL grant in
+-- scripts/init-web-console-db.sh targets $POSTGRES_USER, which
+-- control-plane no longer authenticates as here).
+--
+-- CORRECTION ROUND: the previous version of this file granted
+-- `control_plane_app` blanket SELECT on EVERY table in `auth` (via
+-- `GRANT SELECT ON ALL TABLES IN SCHEMA auth` plus a matching
+-- `ALTER DEFAULT PRIVILEGES`) -- far broader than what the
+-- application code actually needs. Audited directly against the
+-- real, only query this service ever issues against this schema
+-- (services/control-plane/src/control_plane/repositories/
+-- auth_membership_repository.py::AuthMembershipRepository.get_current_role,
+-- the Gate 7 decision-time membership re-check
+-- api/remediation.py::decide_remediation_proposal relies on): it
+-- reads EXACTLY three columns of EXACTLY one table,
+-- `auth.member ("organizationId", "userId", "role")` -- never
+-- `auth."user"`, `auth.session`, `auth.account`, or
+-- `auth.verification`. The grant below is narrowed to match that
+-- exactly, at COLUMN granularity (Postgres's real, supported
+-- column-level GRANT -- not merely a comment promising restraint).
+-- `retrieval_app` gets nothing here -- it has no legitimate reason to
+-- read `auth` at all.
+--
+-- The REVOKEs below are real, not merely preventive: they also undo
+-- any broader grant a PRIOR run of the old, blanket-granting version
+-- of this script may have already applied to an existing deployment
+-- database -- rerunning this corrected script repairs that deployment
+-- in place, it does not merely avoid making it worse.
+--
+-- CORRECTION ROUND (second pass) -- real finding: this script's own
+-- SOURCE dropped the old `ALTER DEFAULT PRIVILEGES FOR ROLE
+-- web_console IN SCHEMA auth GRANT SELECT ON TABLES TO
+-- control_plane_app` statement entirely, but removing a statement
+-- from a SCRIPT does not undo a default-privilege RULE that an
+-- earlier run of the old script already recorded in Postgres's own
+-- `pg_default_acl` catalog. That rule is a standing instruction --
+-- "whenever web_console creates a NEW table in auth, automatically
+-- grant SELECT on it to control_plane_app" -- independent of any
+-- table-level GRANT/REVOKE below, and it keeps firing on every
+-- FUTURE table web_console creates (e.g. a later Better Auth schema
+-- migration) until explicitly reversed with the exact same (role,
+-- schema) scope it was set with. REVOKE ALL / REVOKE SELECT ON ALL
+-- TABLES above/below only ever touch privileges on EXISTING objects;
+-- neither one is "ALTER DEFAULT PRIVILEGES" and neither one can
+-- remove this rule.
+ALTER DEFAULT PRIVILEGES FOR ROLE web_console IN SCHEMA auth REVOKE SELECT ON TABLES FROM control_plane_app;
+REVOKE ALL ON SCHEMA auth FROM retrieval_app;
+REVOKE ALL ON SCHEMA auth FROM control_plane_app;
+GRANT USAGE ON SCHEMA auth TO control_plane_app;
+SELECT EXISTS (
+  SELECT 1 FROM information_schema.tables WHERE table_schema = 'auth' AND table_name = 'member'
+) AS auth_member_table_exists \gset
+\if :auth_member_table_exists
+REVOKE SELECT ON ALL TABLES IN SCHEMA auth FROM control_plane_app;
+GRANT SELECT ("organizationId", "userId", "role") ON auth.member TO control_plane_app;
+\else
+\echo 'auth.member does not exist yet (Better Auth schema not yet applied) -- deploy/scripts/apply-deploy-auth-schema.sh re-applies this exact column-level grant once it creates that table, so this is safe to skip here regardless of run order'
+\endif

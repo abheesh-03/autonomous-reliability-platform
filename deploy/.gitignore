@@ -1,0 +1,14 @@
+# Phase 17A deployment secrets/state -- never committed.
+.env.deploy
+.env.deploy.*
+!.env.deploy.example
+secrets/
+backups/
+caddy_data/
+caddy_config/
+*.sql.gz
+*.sql.gz.sha256
+*.pem
+*.crt
+*.key
+restored-credentials*.txt
