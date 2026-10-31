@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/abheesh-03/autonomous-reliability-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/abheesh-03/autonomous-reliability-platform/actions/workflows/ci.yml)
 
-An agentic SRE platform that watches a real distributed application, turns a firing alert into a durable incident, investigates it with an LLM-backed agent grounded in real evidence, and executes remediation only after a human approves it — recovery is re-verified and every step is written to an append-only audit trail.
+An agentic SRE platform that watches a real distributed application, turns a firing alert into a durable incident, investigates it with an LLM-backed agent grounded in real evidence, and executes remediation only after a human approves it, recovery is re-verified and every step is written to an append-only audit trail.
 
 ![Dashboard](docs/screenshots/dashboard.png)
 *The organization dashboard: open incidents, recent activity, and services at a glance.*
