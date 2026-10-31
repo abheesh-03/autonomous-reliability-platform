@@ -272,7 +272,7 @@ curl_https() {
   # --resolve pins the test hostname to Caddy's own container-network
   # address without needing real DNS; --cacert trusts Caddy's own
   # extracted local CA -- never -k / a global TLS bypass.
-  docker run --rm --network "$NETWORK_NAME" -v "$HTTP_DIR:/http" -v "$CA_CERT_FILE:/ca.crt:ro" \
+  docker run --rm --user "$(id -u):$(id -g)" --network "$NETWORK_NAME" -v "$HTTP_DIR:/http" -v "$CA_CERT_FILE:/ca.crt:ro" \
     curlimages/curl:8.11.1 --resolve "$TEST_ORIGIN_HOST:443:$CADDY_IP" \
     --cacert /ca.crt "$@"
 }
@@ -560,7 +560,7 @@ CREATED_WC=1
 wait_http_ready_in_network "http://web-console:3101/api/health" "web-console (local-dev mode)"
 
 localdev_cookie="$(mktemp)"
-curl_localdev() { docker run --rm --network "$NETWORK_NAME" -v "$(dirname "$localdev_cookie"):/http" curlimages/curl:8.11.1 "$@"; }
+curl_localdev() { docker run --rm --user "$(id -u):$(id -g)" --network "$NETWORK_NAME" -v "$(dirname "$localdev_cookie"):/http" curlimages/curl:8.11.1 "$@"; }
 local_headers=(-H "Origin: http://web-console:3101" -H "Content-Type: application/json")
 local_email="otlp-localdev-$RANDOM$RANDOM@example.com"
 curl_localdev -s -o /dev/null -c "/http/$(basename "$localdev_cookie")" "${local_headers[@]}" \

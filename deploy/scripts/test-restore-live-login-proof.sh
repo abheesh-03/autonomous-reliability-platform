@@ -200,7 +200,7 @@ curl_net() {
   # $1 = curl's own args/flags; mounts $HTTP_DIR at /http inside the
   # disposable container, so -c/-b/-o paths under /http persist on
   # the host at $HTTP_DIR.
-  docker run --rm --network "$NETWORK_NAME" -v "$HTTP_DIR:/http" curlimages/curl:8.11.1 "$@"
+  docker run --rm --user "$(id -u):$(id -g)" --network "$NETWORK_NAME" -v "$HTTP_DIR:/http" curlimages/curl:8.11.1 "$@"
 }
 
 echo ""
