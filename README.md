@@ -4,6 +4,8 @@
 
 An agentic SRE platform that watches a real distributed application, turns a firing alert into a durable incident, investigates it with an LLM-backed agent grounded in real evidence, and executes remediation only after a human approves it, recovery is re-verified and every step is written to an append-only audit trail.
 
+**Live:** [vps-9037dd41.vps.ovh.us](https://vps-9037dd41.vps.ovh.us) — a real single-host deployment (see [Limitations](#limitations)). Try **[/demo](https://vps-9037dd41.vps.ovh.us/demo)** for a recorded, read-only walkthrough with no signup required.
+
 ![Dashboard](docs/screenshots/dashboard.png)
 *The organization dashboard: open incidents, recent activity, and services at a glance.*
 
@@ -63,7 +65,7 @@ make db-migrate   # apply database migrations (Flyway)
 make db-status    # wait for "healthy"
 ```
 
-Then open the dashboard at **http://127.0.0.1:3101**. See [`docs/DEMO_WALKTHROUGH.md`](docs/DEMO_WALKTHROUGH.md) for a from-scratch walkthrough: signing up, creating an organization, registering a service, sending real telemetry, and triggering a demo incident.
+Then open the dashboard at **http://127.0.0.1:3101**. See [`docs/DEMO_WALKTHROUGH.md`](docs/DEMO_WALKTHROUGH.md) for a from-scratch walkthrough: signing up, creating an organization, registering a service, sending real telemetry, and triggering a demo incident. Prefer not to run anything locally first? The hosted [`/demo`](https://vps-9037dd41.vps.ovh.us/demo) above needs nothing installed.
 
 ## Documentation
 
@@ -71,6 +73,7 @@ Then open the dashboard at **http://127.0.0.1:3101**. See [`docs/DEMO_WALKTHROUG
 - [Architecture overview](docs/architecture/system-overview.md) — full system design, with a per-phase architecture doc for every capability under `docs/architecture/`.
 - [Telemetry onboarding](docs/architecture/phase-16-secure-telemetry-onboarding.md) — how external applications connect via OpenTelemetry.
 - [Deployment](docs/architecture/phase-17a-deployment.md) ([runbook](deploy/README.md)) — the single-host deployment configuration.
+- [Live deployment record](docs/architecture/phase-17b-deployment-handoff.md) — the real hosted instance: infrastructure, what was verified, and its honest limitations.
 
 ## Screenshots
 
@@ -91,10 +94,10 @@ Capture details, including which screens used a deterministic (non-LLM) investig
 - **Tenant telemetry is metrics-only.** External onboarding currently accepts authenticated OpenTelemetry HTTP server-request metrics (OTLP JSON/protobuf) — there is no tenant log or trace ingestion yet.
 - **Remediation is deliberately narrow.** Every remediation action comes from a small, explicit allowlist and always requires approval from an OWNER or INCIDENT_APPROVER; nothing autonomous ever writes to production.
 - **Kubernetes and AWS integration are read-only observers**, operator-configured (not self-service), feeding the same incident/investigation pipeline. Kubernetes additionally supports exactly one allowlisted, human-approved remediation action (restarting a specified Deployment); AWS supports detection and investigation only — it can never authorize remediation.
-- **Deployment is a single-host MVP.** `deploy/` provides a hardened, single-host Docker Compose configuration with no high availability or horizontal scaling. Public cloud hosting (a real domain, TLS, managed SMTP, off-host backups) is a planned follow-on, not yet done.
+- **Deployment is a single-host MVP, now live.** The hosted instance above runs on a single 2 vCPU/4 GB VPS — no high availability, no horizontal scaling, no sustained-load or production SLA claim. Database backups are currently manual (not yet shipped off-host automatically), and telemetry retention runs in dry-run mode. See [the live deployment record](docs/architecture/phase-17b-deployment-handoff.md) for the full, honest detail.
 - **LLM use is configurable.** Investigation can run against a real LLM provider or a deterministic stub (used throughout CI and for some of the screenshots above — see the provenance note); either way, the investigation report structure and approval/remediation flow are identical.
 - **No self-service onboarding for Kubernetes or AWS.** Only OpenTelemetry metrics onboarding is currently self-service through the web console.
 
 ---
 
-*Built incrementally, phase by phase, through Phase 17A. Full history is in `git log` and `docs/architecture/`.*
+*Built incrementally, phase by phase, through Phase 18. Full history is in `git log` and `docs/architecture/`.*

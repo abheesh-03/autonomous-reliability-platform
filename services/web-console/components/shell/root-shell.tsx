@@ -4,13 +4,13 @@ import { auth } from "../../lib/auth/auth";
 import { getSessionUser, resolveActor } from "../../lib/server/actor";
 import { VerifyEmailBanner } from "../auth/VerifyEmailBanner";
 import { AppShell } from "./app-shell";
+import { DemoShell } from "../demo/demo-shell";
 import { ThemeToggle } from "../theme/theme-toggle";
 
 /**
  * Phase 15: the one place that decides which of three real,
- * session-derived layouts to render -- never a fourth, separate
- * "demo" layout. All three read the EXACT same real
- * resolveActor()/getSessionUser() this console's protected pages
+ * session-derived layouts to render. All three read the EXACT same
+ * real resolveActor()/getSessionUser() this console's protected pages
  * already use (lib/server/actor.ts) -- this component only decides
  * what CHROME to show around whatever the page itself renders; it is
  * never itself a security boundary (Gate 9: the real boundary is each
@@ -23,8 +23,34 @@ import { ThemeToggle } from "../theme/theme-toggle";
  *      minimal top bar only (the /organizations page itself is the
  *      only reasonable destination here).
  *   3. A real, fully resolved actor -> the full application shell.
+ *
+ * Phase 18, deliberately: a FOURTH, explicit branch for `/demo` and
+ * everything under it, checked FIRST and BEFORE any session/actor
+ * resolution runs at all. This is the one intentional exception to
+ * "never a fourth, separate demo layout" above -- a public, read-only
+ * recorded demo genuinely needs chrome that does not depend on who
+ * (if anyone) is signed in: a signed-in visitor must never see their
+ * own real organization's sidebar/nav/org name wrapped around
+ * recorded-demo content (it would look like the demo data belongs to
+ * their account), and an anonymous visitor needs real navigation
+ * between the demo's own views, which the plain centered
+ * sign-in/register shell (branch 1) was never designed to provide.
+ * This performs no authentication decision of its own -- every
+ * existing protected route below is completely unaffected, still
+ * resolves actor/session exactly as before, and `/demo`'s own pages
+ * read only the bundled, static `lib/demo/snapshot.ts` (see that
+ * file), never a live backend call. The pathname itself comes from
+ * `middleware.ts`'s own narrow `x-pathname` header -- that file's
+ * only job, and the only reason this console has a middleware.ts at
+ * all.
  */
 export async function RootShell({ children }: { children: React.ReactNode }) {
+  const requestHeaders = await nextHeaders();
+  const pathname = requestHeaders.get("x-pathname") ?? "";
+  if (pathname === "/demo" || pathname.startsWith("/demo/")) {
+    return <DemoShell>{children}</DemoShell>;
+  }
+
   const [actor, sessionUser] = await Promise.all([resolveActor(), getSessionUser()]);
 
   if (!sessionUser) {

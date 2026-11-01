@@ -1,7 +1,9 @@
 import Link from "next/link";
-import { ShieldAlert } from "lucide-react";
+import { ShieldAlert, Sparkles } from "lucide-react";
 import { SignInForm } from "../../components/auth/SignInForm";
 import { Card, CardContent } from "../../components/ui/card";
+import { buttonVariants } from "../../components/ui/button";
+import { cn } from "../../lib/cn";
 
 export default function SignInPage() {
   return (
@@ -28,6 +30,10 @@ export default function SignInPage() {
         </Link>
         .
       </p>
+      <Link href="/demo" className={cn(buttonVariants({ variant: "outline", size: "sm" }), "mt-5 w-full")}>
+        <Sparkles className="h-4 w-4" aria-hidden="true" />
+        Explore recorded demo — no signup needed
+      </Link>
     </div>
   );
 }
