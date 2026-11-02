@@ -98,6 +98,13 @@ Capture details, including which screens used a deterministic (non-LLM) investig
 - **LLM use is configurable.** Investigation can run against a real LLM provider or a deterministic stub (used throughout CI and for some of the screenshots above — see the provenance note); either way, the investigation report structure and approval/remediation flow are identical.
 - **No self-service onboarding for Kubernetes or AWS.** Only OpenTelemetry metrics onboarding is currently self-service through the web console.
 
+
+## Copyright and permissions
+
+Copyright © 2026 Sai Abheesh Annaiah. All rights reserved.
+
+This repository is public for portfolio review. No general license is granted to reuse, modify, redistribute, or commercialize its original code or documentation. Rights granted by GitHub's Terms of Service and applicable law remain unaffected. Third-party components retain their respective licenses. For additional permissions, contact [@abheesh-03](https://github.com/abheesh-03).
+
 ---
 
 *Built incrementally, phase by phase, through Phase 18. Full history is in `git log` and `docs/architecture/`.*
