@@ -4,7 +4,7 @@
 
 An agentic SRE platform that watches a real distributed application, turns a firing alert into a durable incident, investigates it with an LLM-backed agent grounded in real evidence, and executes remediation only after a human approves it, recovery is re-verified and every step is written to an append-only audit trail.
 
-**Live:** [vps-9037dd41.vps.ovh.us](https://vps-9037dd41.vps.ovh.us) — a real single-host deployment (see [Limitations](#limitations)). Try **[/demo](https://vps-9037dd41.vps.ovh.us/demo)** for a recorded, read-only walkthrough with no signup required.
+**Live:** [reliability.abheesh.dev](https://reliability.abheesh.dev) — a real single-host deployment (see [Limitations](#limitations)). Try **[/demo](https://reliability.abheesh.dev/demo)** for a recorded, read-only walkthrough with no signup required.
 
 ![Dashboard](docs/screenshots/dashboard.png)
 *The organization dashboard: open incidents, recent activity, and services at a glance.*
@@ -65,7 +65,7 @@ make db-migrate   # apply database migrations (Flyway)
 make db-status    # wait for "healthy"
 ```
 
-Then open the dashboard at **http://127.0.0.1:3101**. See [`docs/DEMO_WALKTHROUGH.md`](docs/DEMO_WALKTHROUGH.md) for a from-scratch walkthrough: signing up, creating an organization, registering a service, sending real telemetry, and triggering a demo incident. Prefer not to run anything locally first? The hosted [`/demo`](https://vps-9037dd41.vps.ovh.us/demo) above needs nothing installed.
+Then open the dashboard at **http://127.0.0.1:3101**. See [`docs/DEMO_WALKTHROUGH.md`](docs/DEMO_WALKTHROUGH.md) for a from-scratch walkthrough: signing up, creating an organization, registering a service, sending real telemetry, and triggering a demo incident. Prefer not to run anything locally first? The hosted [`/demo`](https://reliability.abheesh.dev/demo) above needs nothing installed.
 
 ## Documentation
 

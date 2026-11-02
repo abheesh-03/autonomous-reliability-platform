@@ -1,5 +1,16 @@
 # Phase 17B — Live Deployment Record and Operator Handoff
 
+## Current public address — updated 2026-11-02
+
+- [Recorded demo](https://reliability.abheesh.dev/demo) — no account required.
+- [Live console](https://reliability.abheesh.dev) and [sign-in](https://reliability.abheesh.dev/sign-in).
+
+The operator migrated the deployment to `reliability.abheesh.dev` and confirmed the new address works. The migration output showed validated HTTPS 200 for `/demo`, preserved all private environment values except the public origin, and confirmed that only web-console and Caddy were recreated.
+
+The server-only Caddy configuration now also handles the custom hostname, trusts the published Cloudflare proxy ranges for client-IP forwarding, and redirects browser requests on the original provider hostname to the new origin. The original exact OTLP metrics endpoint remains routed for the existing sample sender. Settings backups are stored privately under the Ubuntu user's `~/arp-domain-backups/`.
+
+**The sections below preserve the original Phase 17B/18 record.** Their provider-hostname configuration and rollout guards describe the earlier deployment; the guards deliberately reject the newer Caddy configuration. Do not reuse that historical rollout block unchanged on the migrated server. The repository's local `tls internal` default remains unchanged.
+
 This records the real, live Phase 17B deployment on top of Phase 17A's
 own single-host configuration (`docs/architecture/phase-17a-deployment.md`,
 `deploy/README.md`). It distinguishes facts **reported by the operator**
@@ -16,8 +27,8 @@ or server change was made while producing Phase 18.
 - Resources: **2 vCPU, ~4 GB RAM, 40 GB disk, 2 GB swap**.
 - Price at purchase: **$5.35/month before tax** — the price actually
   selected at signup, not a guaranteed future rate.
-- Public hostname: **https://vps-9037dd41.vps.ovh.us** (the provider's
-  own hostname; no separate custom domain purchased this round).
+- Original provider hostname: `vps-9037dd41.vps.ovh.us` (used during
+  Phase 17B; see the current public address above).
 - This is a **single-host MVP**, unchanged in kind from Phase 17A's own
   stated scope: no high availability, no automatic failover, no
   sustained-load or production SLA claim.

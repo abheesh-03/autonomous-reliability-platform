@@ -2,6 +2,12 @@
 
 A concrete, from-scratch path through the platform, on top of the quick start in the main [README](../README.md). Every command below is a real `make` target or a real HTTP call against the local stack — nothing here is simulated or mocked.
 
+## Hosted demo
+
+Explore the [recorded demo](https://reliability.abheesh.dev/demo) without an account, or [sign in](https://reliability.abheesh.dev/sign-in) to your live workspace. The recorded views are read-only snapshots, including a deterministic-stub investigation; the telemetry recording is a separate capture. Nothing in the recorded demo is live.
+
+The steps below run the stack locally.
+
 ## 1. Start the stack
 
 ```bash
